@@ -29,3 +29,7 @@ npm run build
 
 The product rationale, interaction model, visual direction, and validation plan
 are documented in [`PRODUCT_BLUEPRINT.md`](./PRODUCT_BLUEPRINT.md).
+
+The cross-platform framework decision, fallback criteria, and target product
+architecture are documented in
+[`跨平台技术路线与产品技术架构调研.md`](./跨平台技术路线与产品技术架构调研.md).
