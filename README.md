@@ -33,3 +33,19 @@ are documented in [`PRODUCT_BLUEPRINT.md`](./PRODUCT_BLUEPRINT.md).
 The cross-platform framework decision, fallback criteria, and target product
 architecture are documented in
 [`跨平台技术路线与产品技术架构调研.md`](./跨平台技术路线与产品技术架构调研.md).
+
+The beachhead market, positioning, ICP, competitive evidence, expansion path,
+and six-week validation gates are documented in
+[`产品市场定位与切入策略调研.md`](./产品市场定位与切入策略调研.md).
+
+## Project MCP servers
+
+All 12 TikHub social-platform MCP servers are declared only for this repository
+in `.codex/config.toml`; no entry is added to `~/.codex/config.toml`. Before
+starting Codex from this project, expose the bare TikHub token as
+`TIKHUB_API_KEY`; keep the token itself in a local environment or secret
+manager, never in Git. The source `.omp/` directory is intentionally ignored
+because its local configuration contains credentials.
+
+Restart Codex and open a new task after changing MCP configuration so the
+project-scoped servers and environment variable are loaded.
