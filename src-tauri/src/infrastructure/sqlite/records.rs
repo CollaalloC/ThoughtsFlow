@@ -96,6 +96,14 @@ pub struct ModelRunRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunProviderProvenanceRecord {
+    pub run_id: String,
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentBlockRecord {
     pub id: String,
     pub role: String,

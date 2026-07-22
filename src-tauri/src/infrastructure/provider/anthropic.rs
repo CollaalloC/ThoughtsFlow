@@ -209,7 +209,7 @@ fn normalize_stream_error(kind: Option<&str>) -> RunEvent {
             "Anthropic is temporarily overloaded",
             true,
         ),
-        Some("rate_limit_error") => ("rate_limit_error", "Anthropic rate limit exceeded", true),
+        Some("rate_limit_error") => ("rate_limited", "Anthropic rate limit exceeded", true),
         Some("api_error") | Some("internal_server_error") => (
             "api_error",
             "Anthropic reported an internal API error",
@@ -607,6 +607,58 @@ mod tests {
         assert!(!format!("{events:?}").contains("sk-ant-secret"));
         assert!(decoder.is_terminal());
         assert!(decoder.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn anthropic_stream_quota_mapping_requires_the_exact_structured_error_type() {
+        let cases = [
+            (
+                "rate_limit_error",
+                "ignored",
+                "rate_limited",
+                "Anthropic rate limit exceeded",
+                true,
+            ),
+            (
+                "RATE_LIMIT_ERROR",
+                "rate_limit_error",
+                "anthropic_stream_error",
+                "Anthropic stream reported an error",
+                false,
+            ),
+            (
+                "api_error",
+                "rate_limit_error",
+                "api_error",
+                "Anthropic reported an internal API error",
+                true,
+            ),
+            (
+                "overloaded_error",
+                "rate_limit_error",
+                "overloaded_error",
+                "Anthropic is temporarily overloaded",
+                true,
+            ),
+        ];
+
+        for (kind, provider_message, expected_code, expected_message, expected_retryable) in cases {
+            let mut decoder = AnthropicSseDecoder::new();
+            let frame = format!(
+                "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{provider_message}\"}}}}\n\n"
+            );
+
+            assert_eq!(
+                decoder.push(frame.as_bytes()).unwrap(),
+                vec![RunEvent::RunFailed {
+                    code: expected_code.to_owned(),
+                    message: expected_message.to_owned(),
+                    retryable: expected_retryable,
+                    status: None,
+                }],
+                "kind={kind}"
+            );
+        }
     }
 
     #[test]

@@ -53,6 +53,7 @@ export function App({ bridge: providedBridge }: AppProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [settingsProviderProfileId, setSettingsProviderProfileId] = useState<string>();
 
   useEffect(() => {
     let active = true;
@@ -121,24 +122,35 @@ export function App({ bridge: providedBridge }: AppProps) {
 
   const runs = useMemo(() => (detail ? decisionRuns(detail) : []), [detail]);
 
+  const openOrdinaryView = (nextView: Exclude<AppView, "settings">) => {
+    setSettingsProviderProfileId(undefined);
+    setView(nextView);
+  };
+
+  const openSettings = (providerProfileId?: string) => {
+    setError(null);
+    setSettingsProviderProfileId(providerProfileId);
+    setView("settings");
+  };
+
   const openRoute = (nextWorkspaceId: string, runId?: string) => {
     setWorkspaceId(nextWorkspaceId);
     setCurrentRunId(runId);
     setProjection(null);
     setError(null);
-    setView("route");
+    openOrdinaryView("route");
   };
 
   const openDecisions = (nextWorkspaceId: string) => {
     setWorkspaceId(nextWorkspaceId);
     setError(null);
-    setView("decision");
+    openOrdinaryView("decision");
   };
 
   const openWorkspaceView = (nextView: "route" | "decision") => {
     setError(null);
     if (nextView === "route") setProjection(null);
-    setView(nextView);
+    openOrdinaryView(nextView);
   };
 
   const persistViewState = (change: { turnId: string; x: number; y: number }) => {
@@ -157,7 +169,7 @@ export function App({ bridge: providedBridge }: AppProps) {
         <nav aria-label="工作面" className="app-shell__navigation">
           <button
             aria-current={view === "focus" ? "page" : undefined}
-            onClick={() => setView("focus")}
+            onClick={() => openOrdinaryView("focus")}
             type="button"
           >
             <MessageSquareText aria-hidden="true" size={14} /> Focus
@@ -180,10 +192,7 @@ export function App({ bridge: providedBridge }: AppProps) {
           </button>
           <button
             aria-current={view === "settings" ? "page" : undefined}
-            onClick={() => {
-              setError(null);
-              setView("settings");
-            }}
+            onClick={() => openSettings()}
             type="button"
           >
             <Settings2 aria-hidden="true" size={14} /> Provider 设置
@@ -199,12 +208,16 @@ export function App({ bridge: providedBridge }: AppProps) {
             initialWorkspaceId={workspaceId}
             onOpenDecisions={openDecisions}
             onOpenRouteMap={openRoute}
-            onOpenSettings={() => setView("settings")}
+            onOpenSettings={openSettings}
           />
         ) : (
           <section className="app-shell__workspace-view" aria-label={`${view} 工作面`}>
             <header className="app-shell__view-header">
-              <button aria-label="返回 Focus" onClick={() => setView("focus")} type="button">
+              <button
+                aria-label="返回 Focus"
+                onClick={() => openOrdinaryView("focus")}
+                type="button"
+              >
                 <ArrowLeft aria-hidden="true" size={15} /> 返回 Focus
               </button>
               <div>
@@ -214,7 +227,12 @@ export function App({ bridge: providedBridge }: AppProps) {
             </header>
 
             <Suspense fallback={<LoadingState label="正在加载工作面" />}>
-              {view === "settings" ? <ProviderSettings bridge={bridge} /> : null}
+              {view === "settings" ? (
+                <ProviderSettings
+                  bridge={bridge}
+                  initialProviderProfileId={settingsProviderProfileId}
+                />
+              ) : null}
 
               {view !== "settings" && loading ? (
                 <LoadingState label={view === "route" ? "正在读取路线投影" : "正在读取决策工作区"} />
@@ -233,7 +251,7 @@ export function App({ bridge: providedBridge }: AppProps) {
                 <RouteMap
                 onCreateBranch={(parentRunId) => {
                   setCurrentRunId(parentRunId);
-                  setView("focus");
+                  openOrdinaryView("focus");
                 }}
                 onSelectRun={(runId) => setCurrentRunId(runId)}
                 onSelectTurn={(turnId) => {

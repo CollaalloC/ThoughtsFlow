@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
+import type { WorkspaceDetail } from "../../shared/contracts";
 import { FocusWorkspace } from "./FocusWorkspace";
 
 const workspace = {
@@ -13,7 +14,7 @@ const workspace = {
   updatedAt: "2026-07-22T10:00:00Z",
 };
 
-const detail = {
+const detail: WorkspaceDetail = {
   workspace,
   turns: [
     {
@@ -112,9 +113,11 @@ function bridgeFixture() {
     compareRuns: vi.fn(),
     markDecision: vi.fn(),
     exportDecisionPacket: vi.fn(),
+    listProviderTemplates: vi.fn().mockResolvedValue([]),
     listProviderProfiles: vi.fn().mockResolvedValue([
       {
         id: "provider-cloud",
+        providerId: "openai-compatible",
         name: "OpenAI compatible",
         dialect: "openai-compatible",
         baseUrl: "https://api.example.com/v1",
@@ -123,16 +126,205 @@ function bridgeFixture() {
       },
     ]),
     listProviderModels: vi.fn().mockResolvedValue([]),
+    listSessionCredentials: vi.fn().mockResolvedValue([]),
     saveProviderProfile: vi.fn(),
-    setSessionCredential: vi.fn(),
+    setSessionCredential: vi.fn().mockResolvedValue([]),
+    activateSessionCredential: vi.fn().mockResolvedValue([]),
+    reorderSessionCredentials: vi.fn().mockResolvedValue([]),
+    removeSessionCredential: vi.fn().mockResolvedValue([]),
     testProviderConnection: vi.fn(),
     subscribeToRunEvents: vi.fn().mockReturnValue(() => undefined),
   } as unknown as DesktopBridge;
 }
 
 describe("FocusWorkspace", () => {
+  it("recovers a quota failure with the failed Run's exact Provider and creates a new version", async () => {
+    const bridge = bridgeFixture();
+    const composerProfile = {
+      id: "provider-composer",
+      providerId: "ollama",
+      name: "Current composer",
+      dialect: "ollama" as const,
+      baseUrl: "http://127.0.0.1:11434",
+      model: "qwen3:14b",
+      isDefault: true,
+      parameters: {},
+    };
+    const failedProfile = {
+      id: "provider-failed",
+      providerId: "openai-compatible",
+      name: "Failed exact provider",
+      dialect: "openai-compatible" as const,
+      baseUrl: "https://failed.example.com/v1",
+      model: "gpt-exact",
+      isDefault: false,
+      parameters: {},
+    };
+    const failedRun = {
+      ...detail.turns[0].runs[0],
+      status: "failed" as const,
+      output: "已保留的失败部分输出",
+      providerProfileId: failedProfile.id,
+      providerName: failedProfile.name,
+      model: failedProfile.model,
+      baseUrl: failedProfile.baseUrl,
+      error: {
+        code: "quota_exhausted",
+        message: "当前凭据额度已耗尽。",
+        retryable: true,
+        status: 429,
+      },
+    };
+    vi.mocked(bridge.listProviderProfiles).mockResolvedValue([
+      composerProfile,
+      failedProfile,
+    ]);
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail,
+      turns: [{ ...detail.turns[0], runs: [failedRun] }],
+      selectedRunIds: { "turn-1": failedRun.id },
+    });
+    vi.mocked(bridge.listSessionCredentials).mockResolvedValue([
+      { credentialId: "primary", label: "Primary", order: 0, isActive: true },
+      { credentialId: "backup", label: "Backup", order: 1, isActive: false },
+    ]);
+    vi.mocked(bridge.inspectContext).mockImplementation(async (input) => ({
+      ...preview,
+      hash: input.providerProfileId === failedProfile.id
+        ? "sha256:failed-exact-profile"
+        : "sha256:composer-profile",
+      providerProfileId: input.providerProfileId,
+    }));
+    vi.mocked(bridge.retryRun).mockResolvedValue({
+      turnId: "turn-1",
+      runId: "run-recovered",
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    expect(await screen.findByText("已保留的失败部分输出")).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue(
+      composerProfile.id,
+    );
+    expect(screen.getByRole("region", { name: "凭据恢复" })).toBeVisible();
+    expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "选择备用凭据" }));
+    await screen.findByRole("combobox", { name: "备用凭据" });
+    expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "切换并新增回答版本" }));
+
+    await waitFor(() => expect(bridge.retryRun).toHaveBeenCalledTimes(1));
+    expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
+    expect(bridge.inspectContext).toHaveBeenCalledWith({
+      workspaceId: workspace.id,
+      parentRunId: null,
+      prompt: detail.turns[0].prompt,
+      providerProfileId: failedProfile.id,
+    });
+    expect(bridge.retryRun).toHaveBeenCalledWith(
+      {
+        runId: failedRun.id,
+        providerProfileId: failedProfile.id,
+        previewHash: "sha256:failed-exact-profile",
+        credentialId: "backup",
+      },
+      expect.any(Function),
+    );
+    expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue(
+      composerProfile.id,
+    );
+    expect(await screen.findByRole("button", { name: /回答 B · gpt-exact/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /回答 A · gpt-exact/ }));
+    expect(screen.getByText("已保留的失败部分输出")).toBeVisible();
+  });
+
+  it("keeps an atomic credential retry rejected when Run creation fails", async () => {
+    const bridge = bridgeFixture();
+    const failedRun = {
+      ...detail.turns[0].runs[0],
+      status: "failed" as const,
+      output: "已保留的部分输出",
+      error: {
+        code: "rate_limited",
+        message: "当前凭据被限流。",
+        retryable: true,
+        status: 429,
+      },
+    };
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail,
+      turns: [{ ...detail.turns[0], runs: [failedRun] }],
+      selectedRunIds: { "turn-1": failedRun.id },
+    });
+    vi.mocked(bridge.listSessionCredentials).mockResolvedValue([
+      { credentialId: "primary", label: "Primary", order: 0, isActive: true },
+      { credentialId: "backup", label: "Backup", order: 1, isActive: false },
+    ]);
+    vi.mocked(bridge.retryRun).mockRejectedValue(new DesktopBridgeError({
+      code: "context_preview_stale",
+      message: "Context 已变化，请重新确认。",
+      retryable: false,
+    }));
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    const recovery = await screen.findByRole("region", { name: "凭据恢复" });
+    fireEvent.click(within(recovery).getByRole("button", { name: "选择备用凭据" }));
+    await within(recovery).findByRole("combobox", { name: "备用凭据" });
+    fireEvent.click(within(recovery).getByRole("button", { name: "切换并新增回答版本" }));
+
+    expect(await within(recovery).findByRole("alert")).toHaveTextContent(
+      "Context 已变化，请重新确认。",
+    );
+    expect(bridge.retryRun).toHaveBeenCalledWith(
+      expect.objectContaining({ credentialId: "backup" }),
+      expect.any(Function),
+    );
+    expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /回答 B/ })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["a different provider error", "provider_unreachable", true],
+    ["a non-retryable rate limit", "rate_limited", false],
+  ])("does not offer credential recovery for %s", async (_label, code, retryable) => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail,
+      turns: [{
+        ...detail.turns[0],
+        runs: [{
+          ...detail.turns[0].runs[0],
+          status: "failed",
+          error: { code, message: "不可使用凭据恢复。", retryable },
+        }],
+      }],
+    } as never);
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    expect(await screen.findByText("不可使用凭据恢复。")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "凭据恢复" })).not.toBeInTheDocument();
+    expect(bridge.listSessionCredentials).not.toHaveBeenCalled();
+    expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
+  });
+
   it("labels a remote Ollama endpoint as outbound instead of local", async () => {
     const bridge = bridgeFixture();
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail,
+      turns: [{
+        ...detail.turns[0],
+        runs: [{
+          ...detail.turns[0].runs[0],
+          providerProfileId: "provider-remote-ollama",
+          providerName: "Remote Ollama",
+          model: "qwen3",
+          baseUrl: "https://ollama.example.com",
+        }],
+      }],
+    });
     vi.mocked(bridge.listProviderProfiles).mockResolvedValue([
       {
         id: "provider-remote-ollama",
@@ -159,6 +351,41 @@ describe("FocusWorkspace", () => {
     expect(outboundLabels.length).toBeGreaterThan(0);
     expect(outboundLabels[0]).toBeVisible();
     expect(screen.queryByText("本机 · ollama.example.com")).not.toBeInTheDocument();
+  });
+
+  it("renders a Run's immutable historical endpoint after its Profile is edited", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.listProviderProfiles).mockResolvedValue([{
+      id: "provider-cloud",
+      providerId: "openai-compatible",
+      name: "Renamed current Profile",
+      dialect: "openai-compatible",
+      baseUrl: "https://new-endpoint.example.com/v1",
+      model: "gpt-current",
+      isDefault: true,
+      parameters: {},
+    }]);
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail,
+      turns: [{
+        ...detail.turns[0],
+        runs: [{
+          ...detail.turns[0].runs[0],
+          providerName: "Historical Profile",
+          baseUrl: "https://historical.example.com/v1",
+        }],
+      }],
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    const output = await screen.findByText("线性阅读降低首分钟认知成本。");
+    const answer = output.closest(".focus-turn__answer");
+    expect(answer).not.toBeNull();
+    expect(within(answer as HTMLElement).getByText("外发 · historical.example.com")).toBeVisible();
+    expect(
+      within(answer as HTMLElement).queryByText("外发 · new-endpoint.example.com"),
+    ).not.toBeInTheDocument();
   });
 
   it("creates an untitled-goal workspace without turning placeholder copy into model context", async () => {

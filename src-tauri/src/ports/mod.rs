@@ -92,6 +92,17 @@ pub struct RunFinish {
     pub finished_at: i64,
 }
 
+/// Immutable provider identity projected from the Context Snapshot captured
+/// for a Run. This read model keeps workspace hydration independent from the
+/// concrete snapshot storage schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunProviderProvenance {
+    pub run_id: String,
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointOutcome {
     Saved,
@@ -139,6 +150,11 @@ pub trait RepositoryPort: Send + Sync {
     fn get_run(&self, id: &str) -> RepositoryFuture<'_, ModelRun>;
 
     fn list_runs_for_turn(&self, turn_id: &str) -> RepositoryFuture<'_, Vec<ModelRun>>;
+
+    fn list_run_provider_provenance(
+        &self,
+        workspace_id: &str,
+    ) -> RepositoryFuture<'_, Vec<RunProviderProvenance>>;
 
     fn mark_run_connecting(&self, run_id: &str, at: i64) -> RepositoryFuture<'_, ()>;
 

@@ -7,7 +7,7 @@ use crate::{
     },
     ports::{
         CheckpointOutcome, PersistRunStart, RepositoryPort, RunCheckpoint as PortRunCheckpoint,
-        RunFinish as PortRunFinish, RunPersistencePort,
+        RunFinish as PortRunFinish, RunPersistencePort, RunProviderProvenance,
     },
 };
 use sqlx::{ConnectOptions, Connection, migrate::Migrate};
@@ -683,6 +683,80 @@ async fn repository_port_reads_legacy_unquoted_provider_parameters() {
         .unwrap();
     assert_eq!(profile.parameters["temperature"], "0.2");
     assert_eq!(profile.parameters["_thoughsflowIsDefault"], "true");
+}
+
+#[tokio::test]
+async fn workspace_run_provenance_is_loaded_from_snapshots_in_one_projection() {
+    let repository = SqliteRepository::connect_in_memory().await.unwrap();
+    repository
+        .create_workspace(&workspace("workspace-a", "Decision lab A"))
+        .await
+        .unwrap();
+    repository
+        .create_workspace(&workspace("workspace-b", "Decision lab B"))
+        .await
+        .unwrap();
+
+    let mut first = root_bundle("workspace-a", "turn-a", "run-a");
+    first.run.model = "immutable-model-a".into();
+    first.snapshot.provider = "Original provider A".into();
+    first.snapshot.base_url = "https://original-a.example/v1".into();
+    first.snapshot.model = "immutable-model-a".into();
+    repository.persist_run_start(&first).await.unwrap();
+
+    let mut retry = root_bundle("workspace-a", "turn-a", "run-b");
+    retry.turn = None;
+    retry.run.model = "immutable-model-b".into();
+    retry.snapshot.provider = "Original provider B".into();
+    retry.snapshot.base_url = "https://original-b.example/v1".into();
+    retry.snapshot.model = "immutable-model-b".into();
+    repository.persist_run_start(&retry).await.unwrap();
+
+    let mut other_workspace = root_bundle("workspace-b", "turn-c", "run-c");
+    other_workspace.snapshot.provider = "Other workspace provider".into();
+    repository
+        .persist_run_start(&other_workspace)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        SqliteRepository::list_run_provider_provenance(&repository, "workspace-a")
+            .await
+            .unwrap(),
+        vec![
+            RunProviderProvenanceRecord {
+                run_id: "run-a".into(),
+                provider_name: "Original provider A".into(),
+                base_url: "https://original-a.example/v1".into(),
+                model: "immutable-model-a".into(),
+            },
+            RunProviderProvenanceRecord {
+                run_id: "run-b".into(),
+                provider_name: "Original provider B".into(),
+                base_url: "https://original-b.example/v1".into(),
+                model: "immutable-model-b".into(),
+            },
+        ]
+    );
+    assert_eq!(
+        RepositoryPort::list_run_provider_provenance(&repository, "workspace-a")
+            .await
+            .unwrap(),
+        vec![
+            RunProviderProvenance {
+                run_id: "run-a".into(),
+                provider_name: "Original provider A".into(),
+                base_url: "https://original-a.example/v1".into(),
+                model: "immutable-model-a".into(),
+            },
+            RunProviderProvenance {
+                run_id: "run-b".into(),
+                provider_name: "Original provider B".into(),
+                base_url: "https://original-b.example/v1".into(),
+                model: "immutable-model-b".into(),
+            },
+        ]
+    );
 }
 
 #[tokio::test]

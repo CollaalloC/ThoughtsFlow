@@ -64,12 +64,57 @@ where
     let provider_code = parsed
         .as_ref()
         .and_then(|value| extract_error_code(dialect, value, &redact_bounded));
+    let provider_code = normalize_quota_and_rate_code(dialect, status, provider_code);
 
     ProviderError::Http {
         status,
         provider_code,
         message,
         retryable,
+    }
+}
+
+fn normalize_quota_and_rate_code(
+    dialect: ProviderDialect,
+    status: u16,
+    provider_code: Option<String>,
+) -> Option<String> {
+    if status != 429 {
+        return provider_code;
+    }
+
+    match dialect {
+        // OpenAI-compatible endpoints do not have one universal rate-limit
+        // code. Exact quota codes are separated from every other HTTP 429 so
+        // callers can distinguish exhausted credit from transient throttling.
+        ProviderDialect::OpenAiChatCompletions => Some(
+            if matches!(
+                provider_code.as_deref(),
+                Some("insufficient_quota" | "quota_exceeded")
+            ) {
+                "quota_exhausted"
+            } else {
+                "rate_limited"
+            }
+            .to_owned(),
+        ),
+        // Native dialects are normalized only when both the HTTP status and
+        // the provider's documented structured code agree. An unknown or
+        // malformed code remains available for safe diagnostics and must not
+        // trigger credential rotation.
+        ProviderDialect::AnthropicMessages
+            if provider_code.as_deref() == Some("rate_limit_error") =>
+        {
+            Some("rate_limited".to_owned())
+        }
+        ProviderDialect::GoogleGenerativeAi
+            if provider_code.as_deref() == Some("RESOURCE_EXHAUSTED") =>
+        {
+            Some("rate_limited".to_owned())
+        }
+        ProviderDialect::AnthropicMessages
+        | ProviderDialect::GoogleGenerativeAi
+        | ProviderDialect::OllamaChat => provider_code,
     }
 }
 
@@ -183,7 +228,7 @@ mod tests {
         let body =
             br#"{"error":{"code":"openai_code","type":"anthropic_type","status":"GOOGLE_STATUS"}}"#;
         let cases = [
-            (ProviderDialect::OpenAiChatCompletions, "openai_code"),
+            (ProviderDialect::OpenAiChatCompletions, "rate_limited"),
             (ProviderDialect::AnthropicMessages, "anthropic_type"),
             (ProviderDialect::GoogleGenerativeAi, "GOOGLE_STATUS"),
             (ProviderDialect::OllamaChat, "openai_code"),
@@ -206,7 +251,7 @@ mod tests {
         ) else {
             panic!("expected an HTTP error");
         };
-        assert_eq!(provider_code.as_deref(), Some("rate_limit_error"));
+        assert_eq!(provider_code.as_deref(), Some("rate_limited"));
 
         let ProviderError::Http { provider_code, .. } = decode_http_error(
             ProviderDialect::OllamaChat,
@@ -226,7 +271,131 @@ mod tests {
         ) else {
             panic!("expected an HTTP error");
         };
-        assert_eq!(provider_code.as_deref(), Some("rate_limit_error"));
+        assert_eq!(provider_code.as_deref(), Some("rate_limited"));
+    }
+
+    #[test]
+    fn quota_and_rate_machine_codes_require_exact_dialect_and_http_status_matches() {
+        struct Case {
+            dialect: ProviderDialect,
+            status: u16,
+            body: &'static [u8],
+            expected: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                dialect: ProviderDialect::OpenAiChatCompletions,
+                status: 429,
+                body: br#"{"error":{"code":"insufficient_quota","message":"quota"}}"#,
+                expected: Some("quota_exhausted"),
+            },
+            Case {
+                dialect: ProviderDialect::OpenAiChatCompletions,
+                status: 429,
+                body: br#"{"error":{"code":"quota_exceeded","message":"quota"}}"#,
+                expected: Some("quota_exhausted"),
+            },
+            Case {
+                dialect: ProviderDialect::OpenAiChatCompletions,
+                status: 429,
+                body: br#"{"error":{"code":"requests","message":"slow down"}}"#,
+                expected: Some("rate_limited"),
+            },
+            Case {
+                dialect: ProviderDialect::OpenAiChatCompletions,
+                status: 429,
+                body: br#"{"error":{"message":"slow down"}}"#,
+                expected: Some("rate_limited"),
+            },
+            Case {
+                dialect: ProviderDialect::AnthropicMessages,
+                status: 429,
+                body: br#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
+                expected: Some("rate_limited"),
+            },
+            Case {
+                dialect: ProviderDialect::GoogleGenerativeAi,
+                status: 429,
+                body: br#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"slow down"}}"#,
+                expected: Some("rate_limited"),
+            },
+            // A structured code is not a quota/rate signal on a mismatched
+            // status. Retryability and credential rotation are separate.
+            Case {
+                dialect: ProviderDialect::OpenAiChatCompletions,
+                status: 500,
+                body: br#"{"error":{"code":"insufficient_quota","message":"failed"}}"#,
+                expected: Some("insufficient_quota"),
+            },
+            Case {
+                dialect: ProviderDialect::AnthropicMessages,
+                status: 529,
+                body: br#"{"error":{"type":"rate_limit_error","message":"overloaded"}}"#,
+                expected: Some("rate_limit_error"),
+            },
+            Case {
+                dialect: ProviderDialect::GoogleGenerativeAi,
+                status: 500,
+                body: br#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"failed"}}"#,
+                expected: Some("RESOURCE_EXHAUSTED"),
+            },
+            // Native dialects require the exact documented structured code.
+            Case {
+                dialect: ProviderDialect::AnthropicMessages,
+                status: 429,
+                body: br#"{"error":{"type":"other_limit","message":"slow down"}}"#,
+                expected: Some("other_limit"),
+            },
+            Case {
+                dialect: ProviderDialect::AnthropicMessages,
+                status: 429,
+                body: br#"{"error":{"message":"rate_limit_error"}}"#,
+                expected: None,
+            },
+            Case {
+                dialect: ProviderDialect::GoogleGenerativeAi,
+                status: 429,
+                body: br#"{"error":{"status":"resource_exhausted","message":"slow down"}}"#,
+                expected: Some("resource_exhausted"),
+            },
+            Case {
+                dialect: ProviderDialect::GoogleGenerativeAi,
+                status: 429,
+                body: br#"{"error":{"message":"RESOURCE_EXHAUSTED"}}"#,
+                expected: None,
+            },
+            Case {
+                dialect: ProviderDialect::OllamaChat,
+                status: 429,
+                body: br#"{"error":"busy","code":"queue_full"}"#,
+                expected: Some("queue_full"),
+            },
+            Case {
+                dialect: ProviderDialect::OllamaChat,
+                status: 429,
+                body: br#"{"error":"busy"}"#,
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            let ProviderError::Http { provider_code, .. } = decode_http_error(
+                case.dialect,
+                case.status,
+                Some("application/json"),
+                case.body,
+            ) else {
+                panic!("expected an HTTP error");
+            };
+            assert_eq!(
+                provider_code.as_deref(),
+                case.expected,
+                "dialect={:?}, status={}",
+                case.dialect,
+                case.status
+            );
+        }
     }
 
     #[test]
@@ -297,7 +466,7 @@ mod tests {
             ),
             ProviderError::Http {
                 status: 429,
-                provider_code: Some("rpm".to_owned()),
+                provider_code: Some("rate_limited".to_owned()),
                 message: "rate limit reached".to_owned(),
                 retryable: true,
             }
@@ -398,7 +567,7 @@ mod tests {
             html_error,
             ProviderError::Http {
                 status: 429,
-                provider_code: None,
+                provider_code: Some("rate_limited".to_owned()),
                 message: "before [SAFE] after".to_owned(),
                 retryable: true,
             }

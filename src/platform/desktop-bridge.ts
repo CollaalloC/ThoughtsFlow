@@ -18,6 +18,7 @@ import type {
   RunHandle,
   RunSnapshot,
   SaveProviderProfileInput,
+  SessionCredentialSummary,
   WorkspaceDetail,
   WorkspaceSummary,
 } from "../shared/contracts";
@@ -74,14 +75,31 @@ export interface DesktopBridge {
   listProviderTemplates(): Promise<ProviderTemplate[]>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   listProviderModels(input: ListProviderModelsInput): Promise<ProviderModelInfo[]>;
+  listSessionCredentials(input: {
+    providerProfileId: string;
+  }): Promise<SessionCredentialSummary[]>;
   saveProviderProfile(
     input: SaveProviderProfileInput,
-    sessionCredential?: string,
+    initialCredential?: { label: string; credential: string },
   ): Promise<ProviderProfile>;
   setSessionCredential(input: {
     providerProfileId: string;
+    credentialId?: string;
+    credentialLabel: string;
     credential: string;
-  }): Promise<void>;
+  }): Promise<SessionCredentialSummary[]>;
+  activateSessionCredential(input: {
+    providerProfileId: string;
+    credentialId: string;
+  }): Promise<SessionCredentialSummary[]>;
+  reorderSessionCredentials(input: {
+    providerProfileId: string;
+    orderedCredentialIds: string[];
+  }): Promise<SessionCredentialSummary[]>;
+  removeSessionCredential(input: {
+    providerProfileId: string;
+    credentialId: string;
+  }): Promise<SessionCredentialSummary[]>;
   testProviderConnection(input: {
     providerProfileId: string;
   }): Promise<{ ok: boolean; message: string }>;
@@ -111,6 +129,17 @@ export class DesktopBridgeError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function toSafeSessionCredentialSummaries(
+  summaries: SessionCredentialSummary[],
+): SessionCredentialSummary[] {
+  return summaries.map(({ credentialId, label, order, isActive }) => ({
+    credentialId,
+    label,
+    order,
+    isActive,
+  }));
 }
 
 export function normalizeDesktopBridgeError(reason: unknown): DesktopBridgeError {
@@ -190,14 +219,38 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
     listProviderTemplates: () => request("list_provider_templates"),
     listProviderProfiles: () => request("list_provider_profiles"),
     listProviderModels: (input) => request("list_provider_models", { input }),
-    saveProviderProfile: (input, sessionCredential) =>
+    listSessionCredentials: async (input) =>
+      toSafeSessionCredentialSummaries(
+        await request<SessionCredentialSummary[]>("list_session_credentials", { input }),
+      ),
+    saveProviderProfile: (input, initialCredential) =>
       request("save_provider_profile", {
         input: {
           ...input,
-          ...(sessionCredential === undefined ? {} : { sessionCredential }),
+          ...(initialCredential === undefined
+            ? {}
+            : {
+                sessionCredentialLabel: initialCredential.label,
+                sessionCredential: initialCredential.credential,
+              }),
         },
       }),
-    setSessionCredential: (input) => request("set_session_credential", { input }),
+    setSessionCredential: async (input) =>
+      toSafeSessionCredentialSummaries(
+        await request<SessionCredentialSummary[]>("set_session_credential", { input }),
+      ),
+    activateSessionCredential: async (input) =>
+      toSafeSessionCredentialSummaries(
+        await request<SessionCredentialSummary[]>("activate_session_credential", { input }),
+      ),
+    reorderSessionCredentials: async (input) =>
+      toSafeSessionCredentialSummaries(
+        await request<SessionCredentialSummary[]>("reorder_session_credentials", { input }),
+      ),
+    removeSessionCredential: async (input) =>
+      toSafeSessionCredentialSummaries(
+        await request<SessionCredentialSummary[]>("remove_session_credential", { input }),
+      ),
     testProviderConnection: (input) => request("test_provider_connection", { input }),
     subscribeToRunEvents: (listener) => {
       listeners.add(listener);
@@ -215,6 +268,7 @@ export type {
   RouteProjection,
   RunEvent,
   RunSnapshot,
+  SessionCredentialSummary,
   WorkspaceDetail,
   WorkspaceSummary,
 };

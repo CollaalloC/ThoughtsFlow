@@ -36,7 +36,11 @@ fn register_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
         list_provider_profiles,
         list_provider_models,
         save_provider_profile,
+        list_session_credentials,
         set_session_credential,
+        activate_session_credential,
+        reorder_session_credentials,
+        remove_session_credential,
         test_provider_connection,
     ])
 }

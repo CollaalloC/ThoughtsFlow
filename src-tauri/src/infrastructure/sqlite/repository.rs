@@ -349,6 +349,20 @@ impl SqliteRepository {
         rows.iter().map(model_run_from_row).collect()
     }
 
+    pub async fn list_run_provider_provenance(
+        &self,
+        workspace_id: &str,
+    ) -> RepositoryResult<Vec<RunProviderProvenanceRecord>> {
+        let rows = sqlx::query(
+            "SELECT run_id, provider AS provider_name, base_url, model \
+             FROM context_snapshot WHERE workspace_id = ? ORDER BY created_at, run_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(run_provider_provenance_from_row).collect()
+    }
+
     pub async fn list_content_blocks(
         &self,
         workspace_id: &str,
@@ -1082,6 +1096,17 @@ fn model_run_from_row(row: &SqliteRow) -> RepositoryResult<ModelRunRecord> {
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
         checkpointed_at: row.try_get("checkpointed_at")?,
+    })
+}
+
+fn run_provider_provenance_from_row(
+    row: &SqliteRow,
+) -> RepositoryResult<RunProviderProvenanceRecord> {
+    Ok(RunProviderProvenanceRecord {
+        run_id: row.try_get("run_id")?,
+        provider_name: row.try_get("provider_name")?,
+        base_url: row.try_get("base_url")?,
+        model: row.try_get("model")?,
     })
 }
 

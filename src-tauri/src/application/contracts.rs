@@ -452,13 +452,6 @@ pub struct SaveProviderProfileInput {
     pub parameters: Option<BTreeMap<String, Value>>,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetSessionCredentialInput {
-    pub provider_profile_id: EntityId,
-    pub credential: String,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TestProviderConnectionInput {

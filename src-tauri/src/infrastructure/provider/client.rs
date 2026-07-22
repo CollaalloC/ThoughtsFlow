@@ -1324,18 +1324,39 @@ mod tests {
     async fn native_http_429_machine_codes_reach_run_failed_events() {
         let cases = [
             (
+                ProviderDialect::OpenAiChatCompletions,
+                "fixture-model",
+                "x-api-key",
+                r#"{"error":{"code":"insufficient_quota","message":"quota exhausted"}}"#,
+                "quota_exhausted",
+            ),
+            (
+                ProviderDialect::OpenAiChatCompletions,
+                "fixture-model",
+                "x-api-key",
+                r#"{"error":{"code":"requests","message":"slow down"}}"#,
+                "rate_limited",
+            ),
+            (
                 ProviderDialect::AnthropicMessages,
                 "claude-fixture",
                 "x-api-key",
                 r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
-                "rate_limit_error",
+                "rate_limited",
             ),
             (
                 ProviderDialect::GoogleGenerativeAi,
                 "gemini-fixture",
                 "x-goog-api-key",
                 r#"{"error":{"code":429,"message":"quota exhausted","status":"RESOURCE_EXHAUSTED"}}"#,
-                "RESOURCE_EXHAUSTED",
+                "rate_limited",
+            ),
+            (
+                ProviderDialect::OllamaChat,
+                "ollama-fixture",
+                "x-api-key",
+                r#"{"error":"busy","code":"queue_full"}"#,
+                "queue_full",
             ),
         ];
 
@@ -1369,6 +1390,82 @@ mod tests {
                     status: Some(429),
                     ..
                 }) if code == expected_code
+            ));
+            assert!(receiver.recv().await.is_none());
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn retryable_gateway_errors_do_not_fabricate_quota_or_rate_codes() {
+        let cases = [
+            (
+                "500 Internal Server Error",
+                ProviderDialect::OpenAiChatCompletions,
+                r#"{"error":{"code":"insufficient_quota","message":"failed"}}"#,
+                "insufficient_quota",
+                Some(500),
+            ),
+            (
+                "529 Site Overloaded",
+                ProviderDialect::AnthropicMessages,
+                r#"{"error":{"type":"rate_limit_error","message":"overloaded"}}"#,
+                "rate_limit_error",
+                Some(529),
+            ),
+            (
+                "429 Too Many Requests",
+                ProviderDialect::AnthropicMessages,
+                r#"{"error":{"type":"other_limit","message":"slow down"}}"#,
+                "other_limit",
+                Some(429),
+            ),
+            (
+                "429 Too Many Requests",
+                ProviderDialect::GoogleGenerativeAi,
+                r#"{"error":{"status":"resource_exhausted","message":"slow down"}}"#,
+                "resource_exhausted",
+                Some(429),
+            ),
+            (
+                "429 Too Many Requests",
+                ProviderDialect::AnthropicMessages,
+                r#"{"error":{"message":"rate_limit_error"}}"#,
+                "provider_http_error",
+                Some(429),
+            ),
+        ];
+
+        for (http_status, dialect, body, expected_code, expected_status) in cases {
+            let (base_url, _, server) = spawn_single_response(
+                http_status,
+                vec![("Content-Type".into(), "application/json".into())],
+                body.to_owned(),
+            );
+            let invocation = native_invocation(
+                base_url,
+                dialect,
+                "fixture-model",
+                "x-api-key",
+                std::collections::BTreeMap::new(),
+                1_024,
+            );
+            let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+            let (sender, mut receiver) = mpsc::channel(2);
+
+            gateway
+                .stream(invocation, CancellationToken::new(), sender)
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                receiver.recv().await,
+                Some(RunEvent::RunFailed {
+                    code,
+                    retryable: true,
+                    status,
+                    ..
+                }) if code == expected_code && status == expected_status
             ));
             assert!(receiver.recv().await.is_none());
             server.join().unwrap();

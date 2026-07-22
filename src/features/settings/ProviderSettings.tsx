@@ -9,6 +9,7 @@ import type {
   ProviderTemplate,
 } from "../../shared/contracts";
 import { Button, LocalDataBadge, ProviderDestination } from "../../shared/ui";
+import { SessionCredentialManager } from "./SessionCredentialManager";
 import "./provider-settings.css";
 
 type ProviderProfileView = ProviderProfile;
@@ -20,6 +21,7 @@ type Draft = {
   name: string;
   baseUrl: string;
   defaultModel: string;
+  credentialLabel: string;
   credential: string;
 };
 
@@ -28,8 +30,14 @@ const emptyDraft: Draft = {
   name: "",
   baseUrl: "",
   defaultModel: "",
+  credentialLabel: "Primary",
   credential: "",
 };
+
+interface ProviderSettingsProps {
+  bridge: DesktopBridge;
+  initialProviderProfileId?: string;
+}
 
 function isLoopbackUrl(url: URL) {
   return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
@@ -81,7 +89,22 @@ function modelOptionLabel(model: ProviderModelInfo) {
     : `${displayName} (${model.id})`;
 }
 
-export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
+function draftFromProfile(profile: ProviderProfileView): Draft {
+  return {
+    id: profile.id,
+    providerId: profile.providerId,
+    name: profile.name,
+    baseUrl: profile.baseUrl,
+    defaultModel: profile.model,
+    credentialLabel: "Primary",
+    credential: "",
+  };
+}
+
+export function ProviderSettings({
+  bridge,
+  initialProviderProfileId,
+}: ProviderSettingsProps) {
   const [profiles, setProfiles] = useState<ProviderProfileView[]>([]);
   const [templates, setTemplates] = useState<ProviderTemplate[]>([]);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
@@ -98,6 +121,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
     retryable: boolean;
   } | null>(null);
   const modelDiscoveryRequest = useRef(0);
+  const [credentialManagerRevision, setCredentialManagerRevision] = useState(0);
 
   const clearModelDiscovery = () => {
     modelDiscoveryRequest.current += 1;
@@ -113,6 +137,13 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
         if (!active) return;
         setProfiles(nextProfiles as ProviderProfileView[]);
         setTemplates(nextTemplates);
+        const initialProfile = initialProviderProfileId
+          ? nextProfiles.find((profile) => profile.id === initialProviderProfileId)
+          : undefined;
+        if (initialProfile) {
+          setDraft(draftFromProfile(initialProfile));
+          return;
+        }
         const firstAvailable = nextTemplates.find((template) => template.runtimeAvailable);
         if (firstAvailable) {
           setDraft((current) =>
@@ -136,7 +167,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
       active = false;
       modelDiscoveryRequest.current += 1;
     };
-  }, [bridge]);
+  }, [bridge, initialProviderProfileId]);
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.providerId === draft.providerId),
@@ -170,14 +201,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
 
   const editProfile = (profile: ProviderProfileView) => {
     clearModelDiscovery();
-    setDraft({
-      id: profile.id,
-      providerId: profile.providerId,
-      name: profile.name,
-      baseUrl: profile.baseUrl,
-      defaultModel: profile.model,
-      credential: "",
-    });
+    setDraft(draftFromProfile(profile));
     setError(null);
     setStatus(null);
   };
@@ -207,11 +231,29 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
       setError("请填写默认模型。");
       return;
     }
+    if (draft.credential && !draft.credentialLabel.trim()) {
+      setError("请填写初始凭据标签。");
+      return;
+    }
 
     setSaving(true);
     try {
       const wasExisting = Boolean(draft.id);
       const submittedCredential = draft.credential;
+      const submittedCredentialLabel = draft.credentialLabel.trim();
+      const persisted = draft.id
+        ? profiles.find((profile) => profile.id === draft.id)
+        : undefined;
+      const targetChanged = Boolean(
+        persisted
+        && (
+          persisted.providerId !== draft.providerId
+          || normalizeBaseUrl(persisted.baseUrl) !== normalizeBaseUrl(draft.baseUrl)
+        ),
+      );
+      if (submittedCredential) {
+        setDraft((current) => ({ ...current, credential: "" }));
+      }
       const profileInput = {
         id: draft.id,
         providerId: draft.providerId,
@@ -223,7 +265,10 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
       };
       const saved = (await (
         submittedCredential && selectedTemplate.protocol.authPlacement !== "none"
-          ? bridge.saveProviderProfile(profileInput, submittedCredential)
+          ? bridge.saveProviderProfile(profileInput, {
+              label: submittedCredentialLabel,
+              credential: submittedCredential,
+            })
           : bridge.saveProviderProfile(profileInput)
       )) as ProviderProfileView;
       setProfiles((current) => {
@@ -231,22 +276,18 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
         return [...withoutSaved, saved];
       });
       clearModelDiscovery();
-      setDraft({
-        id: saved.id,
-        providerId: saved.providerId,
-        name: saved.name,
-        baseUrl: saved.baseUrl,
-        defaultModel: saved.model,
-        credential: "",
-      });
+      setDraft(draftFromProfile(saved));
+      setCredentialManagerRevision((current) => current + 1);
       if (selectedTemplate?.protocol.authPlacement === "none") {
         setStatus("Provider 已保存；该模板无需会话凭据。");
       } else if (submittedCredential) {
-        setStatus("Provider 已保存；新 API Key 已载入本次应用会话，退出即清除。");
+        setStatus(`Provider 已保存；命名凭据“${submittedCredentialLabel}”已载入 Rust 进程内存，退出即清除。`);
+      } else if (wasExisting && targetChanged) {
+        setStatus("Provider 已保存；端点身份已变更，旧会话凭据已在保存成功后清除。");
       } else if (wasExisting) {
-        setStatus("Provider 已保存；之前的会话 API Key 已清除，如需继续调用请重新输入并保存。");
+        setStatus("Provider 已保存；端点身份未变，现有会话凭据已保留。");
       } else {
-        setStatus("Provider 已保存；当前没有会话 API Key，如需调用请重新输入并保存。");
+        setStatus("Provider 已保存；当前没有会话凭据，可在下方会话凭据管理器中添加。");
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "保存 Provider 失败。");
@@ -400,12 +441,16 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
         </div>
       </aside>
 
-      <form className="provider-settings__form" onSubmit={submit}>
-        <header>
-          <span>Provider Profile</span>
-          <h2>{draft.id ? "编辑模型端点" : "连接模型端点"}</h2>
-          <p>网络请求只由 Rust Core 发起。前端不会读取或持久化你的 API Key。</p>
-        </header>
+      <div className="provider-settings__details">
+        <form className="provider-settings__form" onSubmit={submit}>
+          <header>
+            <span>Provider Profile</span>
+            <h2>{draft.id ? "编辑模型端点" : "连接模型端点"}</h2>
+            <p>
+              网络请求只由 Rust Core 发起。新建时，API Key 会短暂存在 WebView 表单；
+              提交后只保留在 Rust 进程内存，不写入 SQLite 或前端持久状态。
+            </p>
+          </header>
 
         <div className="provider-settings__boundary">
           <LocalDataBadge />
@@ -443,6 +488,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
                   providerId: template.providerId,
                   baseUrl: template.defaultBaseUrl,
                   defaultModel: "",
+                  credentialLabel: "Primary",
                   credential: "",
                 });
               }}
@@ -566,30 +612,45 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
               </span>
             )}
           </div>
-          <label>
-            <span>API Key（仅本次会话）</span>
-            <span className="provider-settings__secret">
-              <KeyRound size={14} aria-hidden="true" />
-              <input
-                type="password"
-                aria-label="API Key（仅本次会话）"
-                aria-describedby={draft.id && selectedTemplate?.protocol.authPlacement !== "none" ? "provider-credential-reset-note" : undefined}
-                autoComplete="off"
-                disabled={selectedTemplate?.protocol.authPlacement === "none"}
-                value={draft.credential}
-                onChange={(event) => {
-                  clearModelDiscovery();
-                  setDraft({ ...draft, credential: event.target.value });
-                }}
-                placeholder={selectedTemplate?.protocol.authPlacement === "none" ? "通常不需要" : "退出应用后清除"}
-              />
-            </span>
-            {draft.id && selectedTemplate?.protocol.authPlacement !== "none" && (
-              <small id="provider-credential-reset-note" className="provider-settings__field-note">
-                保存 Profile 会清除旧会话凭据；需要继续使用时，请在本次保存中重新输入。
-              </small>
-            )}
-          </label>
+          {!draft.id && selectedTemplate?.protocol.authPlacement !== "none" && (
+            <>
+              <label>
+                <span>初始凭据标签</span>
+                <input
+                  aria-label="初始凭据标签"
+                  autoComplete="off"
+                  value={draft.credentialLabel}
+                  onChange={(event) =>
+                    setDraft({ ...draft, credentialLabel: event.target.value })
+                  }
+                  placeholder="例如：Primary"
+                />
+              </label>
+              <label>
+                <span>API Key（仅本次会话）</span>
+                <span className="provider-settings__secret">
+                  <KeyRound size={14} aria-hidden="true" />
+                  <input
+                    type="password"
+                    aria-label="API Key（仅本次会话）"
+                    autoComplete="new-password"
+                    value={draft.credential}
+                    onChange={(event) => {
+                      clearModelDiscovery();
+                      setDraft({ ...draft, credential: event.target.value });
+                    }}
+                    placeholder="提交后从 WebView 表单清除"
+                  />
+                </span>
+              </label>
+            </>
+          )}
+          {draft.id && selectedTemplate?.protocol.authPlacement !== "none" && (
+            <p className="provider-settings__credential-policy provider-settings__wide">
+              名称、模型和参数更新会保留现有会话凭据；Provider 身份或 Base URL
+              变更只会在保存成功后清除旧凭据。已保存的 Secret 不会返回 WebView。
+            </p>
+          )}
         </div>
 
         {draft.baseUrl && (
@@ -605,25 +666,36 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
         {error && <p className="provider-settings__message is-error" role="alert">{error}</p>}
         {status && <p className="provider-settings__message is-success" role="status"><Check size={14} /> {status}</p>}
 
-        <footer>
-          <Button
-            type="button"
-            tone="quiet"
-            icon={testing ? <LoaderCircle className="tf-spin" size={15} /> : <PlugZap size={15} />}
-            disabled={testing || saving || connectionTestNeedsSave}
-            onClick={testConnection}
-          >
-            {testing ? "测试中" : !draft.id ? "请先保存 Provider" : connectionTestNeedsSave ? "请先保存更改" : "测试连接"}
-          </Button>
-          <Button
-            type="submit"
-            tone="primary"
-            disabled={saving || testing || !selectedTemplate?.runtimeAvailable}
-          >
-            {saving ? "保存中" : selectedTemplate && !selectedTemplate.runtimeAvailable ? "协议即将支持" : "保存 Provider"}
-          </Button>
-        </footer>
-      </form>
+          <footer>
+            <Button
+              type="button"
+              tone="quiet"
+              icon={testing ? <LoaderCircle className="tf-spin" size={15} /> : <PlugZap size={15} />}
+              disabled={testing || saving || connectionTestNeedsSave}
+              onClick={testConnection}
+            >
+              {testing ? "测试中" : !draft.id ? "请先保存 Provider" : connectionTestNeedsSave ? "请先保存更改" : "测试连接"}
+            </Button>
+            <Button
+              type="submit"
+              tone="primary"
+              disabled={saving || testing || !selectedTemplate?.runtimeAvailable}
+            >
+              {saving ? "保存中" : selectedTemplate && !selectedTemplate.runtimeAvailable ? "协议即将支持" : "保存 Provider"}
+            </Button>
+          </footer>
+        </form>
+        {draft.id && selectedTemplate?.protocol.authPlacement !== "none" && (
+          <div className="provider-settings__credential-manager">
+            <SessionCredentialManager
+              key={`${draft.id}:${credentialManagerRevision}`}
+              bridge={bridge}
+              providerProfileId={draft.id}
+              disabled={saving || testing}
+            />
+          </div>
+        )}
+      </div>
     </section>
   );
 }

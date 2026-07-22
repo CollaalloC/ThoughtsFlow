@@ -94,6 +94,11 @@ impl GoogleSseDecoder {
                 .filter(|status| !status.trim().is_empty())
                 .unwrap_or_else(|| "google_stream_error".to_owned());
             let retryable = google_error_is_retryable(status, &provider_code);
+            let provider_code = if status == Some(429) && provider_code == "RESOURCE_EXHAUSTED" {
+                "rate_limited".to_owned()
+            } else {
+                provider_code
+            };
             self.terminal = true;
             events.push(RunEvent::RunFailed {
                 code: provider_code,
@@ -525,7 +530,7 @@ mod tests {
                     text: "partial".to_owned(),
                 },
                 RunEvent::RunFailed {
-                    code: "RESOURCE_EXHAUSTED".to_owned(),
+                    code: "rate_limited".to_owned(),
                     message: "quota exhausted".to_owned(),
                     retryable: true,
                     status: Some(429),
@@ -534,6 +539,78 @@ mod tests {
         );
         assert!(decoder.is_terminal());
         assert!(decoder.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn google_stream_quota_mapping_requires_exact_structured_code_and_status() {
+        let cases = [
+            (
+                Some(429_u64),
+                Some("RESOURCE_EXHAUSTED"),
+                "ignored",
+                "rate_limited",
+                true,
+                Some(429),
+            ),
+            (
+                Some(503),
+                Some("RESOURCE_EXHAUSTED"),
+                "ignored",
+                "RESOURCE_EXHAUSTED",
+                true,
+                Some(503),
+            ),
+            (
+                Some(429),
+                Some("resource_exhausted"),
+                "RESOURCE_EXHAUSTED",
+                "resource_exhausted",
+                true,
+                Some(429),
+            ),
+            (
+                Some(429),
+                Some("UNAVAILABLE"),
+                "RESOURCE_EXHAUSTED",
+                "UNAVAILABLE",
+                true,
+                Some(429),
+            ),
+            (
+                None,
+                Some("RESOURCE_EXHAUSTED"),
+                "ignored",
+                "RESOURCE_EXHAUSTED",
+                true,
+                None,
+            ),
+        ];
+
+        for (code, status, provider_message, expected_code, expected_retryable, expected_status) in
+            cases
+        {
+            let mut decoder = GoogleSseDecoder::new();
+            let code_field = code
+                .map(|code| format!("\"code\":{code},"))
+                .unwrap_or_default();
+            let status_field = status
+                .map(|status| format!("\"status\":\"{status}\","))
+                .unwrap_or_default();
+            let frame = format!(
+                "data: {{\"error\":{{{code_field}{status_field}\"message\":\"{provider_message}\"}}}}\n\n"
+            );
+
+            assert_eq!(
+                decoder.push(frame.as_bytes()).unwrap(),
+                vec![RunEvent::RunFailed {
+                    code: expected_code.to_owned(),
+                    message: provider_message.to_owned(),
+                    retryable: expected_retryable,
+                    status: expected_status,
+                }],
+                "code={code:?}, status={status:?}"
+            );
+        }
     }
 
     #[test]

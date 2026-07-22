@@ -138,21 +138,70 @@ pub async fn create_turn_and_start_run(
 #[tauri::command]
 pub async fn retry_run(
     state: State<'_, AppState>,
-    input: RetryRunInput,
+    input: RetryRunCommandInput,
     on_event: Channel<RunEventView>,
 ) -> AppResult<ApiResponse<RunHandle>> {
+    let RetryRunCommandInput {
+        run_id,
+        provider_profile_id,
+        preview_hash,
+        credential_id,
+    } = input;
+    let input = RetryRunInput {
+        run_id,
+        provider_profile_id,
+        preview_hash,
+    };
     require_non_empty("runId", &input.run_id)?;
     require_non_empty("providerProfileId", &input.provider_profile_id)?;
     require_non_empty("previewHash", &input.preview_hash)?;
+    if let Some(credential_id) = credential_id.as_deref() {
+        require_non_empty("credentialId", credential_id)?;
+    }
     let provider_profile_lock = state.provider_profile_lock(&input.provider_profile_id)?;
     let _provider_profile_operation = provider_profile_lock.lock().await;
-    let credentials: Arc<dyn SessionCredentialLookup> = state.credentials().clone();
+    let provider_profile_id = input.provider_profile_id.clone();
+    let backend = state.backend().clone();
     let events: Arc<dyn RunEventSink> = Arc::new(TauriRunEventSink { channel: on_event });
-    state
-        .backend()
-        .retry_run(input, credentials, events)
-        .await
-        .map(ApiResponse::new)
+    retry_run_with_selected_credential(
+        state.credentials().clone(),
+        &provider_profile_id,
+        credential_id.as_deref(),
+        move |credentials| async move { backend.retry_run(input, credentials, events).await },
+    )
+    .await
+    .map(ApiResponse::new)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetryRunCommandInput {
+    run_id: EntityId,
+    provider_profile_id: EntityId,
+    preview_hash: String,
+    #[serde(default)]
+    credential_id: Option<String>,
+}
+
+async fn retry_run_with_selected_credential<Start, StartFuture>(
+    credentials: Arc<SessionCredentialStore>,
+    provider_profile_id: &str,
+    credential_id: Option<&str>,
+    start: Start,
+) -> AppResult<RunHandle>
+where
+    Start: FnOnce(Arc<dyn SessionCredentialLookup>) -> StartFuture,
+    StartFuture: std::future::Future<Output = AppResult<RunHandle>>,
+{
+    let lookup: Arc<dyn SessionCredentialLookup> = match credential_id {
+        Some(credential_id) => credentials.selected_lookup(provider_profile_id, credential_id)?,
+        None => credentials.clone(),
+    };
+    let handle = start(lookup).await?;
+    if let Some(credential_id) = credential_id {
+        credentials.activate(provider_profile_id, credential_id)?;
+    }
+    Ok(handle)
 }
 
 #[tauri::command]
@@ -396,19 +445,32 @@ pub async fn save_provider_profile(
     let SaveProviderProfileCommandInput {
         mut profile,
         session_credential,
+        session_credential_label,
     } = input;
     validate_provider_profile(&profile)?;
+    let session_credential =
+        validate_initial_session_credential(session_credential_label, session_credential)?;
     let profile_id = profile
         .id
         .get_or_insert_with(|| Uuid::new_v4().to_string())
         .clone();
     let provider_profile_lock = state.provider_profile_lock(&profile_id)?;
     let _provider_profile_operation = provider_profile_lock.lock().await;
+    let existing_profile = state
+        .backend()
+        .list_provider_profiles()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id == profile_id);
+    let clear_existing_credentials = existing_profile
+        .as_ref()
+        .is_some_and(|existing| provider_credential_target_changed(existing, &profile));
     let backend = state.backend().clone();
     save_provider_profile_securely(
         state.credentials(),
         profile,
         session_credential,
+        clear_existing_credentials,
         move |input| async move { backend.save_provider_profile(input).await },
     )
     .await
@@ -426,44 +488,193 @@ pub struct SaveProviderProfileCommandInput {
     profile: SaveProviderProfileInput,
     #[serde(default)]
     session_credential: Option<String>,
+    #[serde(default)]
+    session_credential_label: Option<String>,
 }
 
 async fn save_provider_profile_securely<Save, SaveFuture>(
     credentials: &SessionCredentialStore,
     input: SaveProviderProfileInput,
-    session_credential: Option<String>,
+    session_credential: Option<(String, String)>,
+    clear_existing_credentials: bool,
     save: Save,
 ) -> AppResult<ProviderProfileView>
 where
     Save: FnOnce(SaveProviderProfileInput) -> SaveFuture,
     SaveFuture: std::future::Future<Output = AppResult<ProviderProfileView>>,
 {
-    if let Some(profile_id) = input.id.as_deref() {
-        credentials.remove(profile_id)?;
-    }
-
     let profile = save(input).await?;
-    credentials.remove(&profile.id)?;
-    if let Some(credential) = session_credential {
-        credentials.set(profile.id.clone(), credential)?;
+    if clear_existing_credentials || session_credential.is_some() {
+        credentials.remove(&profile.id)?;
+    }
+    if let Some((label, credential)) = session_credential {
+        credentials.upsert(profile.id.clone(), None, label, credential)?;
     }
     Ok(profile)
+}
+
+fn validate_initial_session_credential(
+    label: Option<String>,
+    credential: Option<String>,
+) -> AppResult<Option<(String, String)>> {
+    match (label, credential) {
+        (None, None) => Ok(None),
+        (label, Some(credential)) if !credential.is_empty() => Ok(Some((
+            validate_session_credential_label(label.unwrap_or_else(|| "Default".into()))?,
+            credential,
+        ))),
+        (Some(_), None) | (_, Some(_)) => Err(AppError::validation(
+            "invalid_session_credential",
+            "A non-empty credential and its label must be supplied together",
+        )),
+    }
+}
+
+fn provider_credential_target_changed(
+    existing: &ProviderProfileView,
+    update: &SaveProviderProfileInput,
+) -> bool {
+    existing.provider_id != update.provider_id
+        || existing.base_url.trim_end_matches('/') != update.base_url.trim_end_matches('/')
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCredentialProfileInput {
+    provider_profile_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSessionCredentialCommandInput {
+    provider_profile_id: String,
+    #[serde(default)]
+    credential_id: Option<String>,
+    credential_label: String,
+    credential: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivateSessionCredentialCommandInput {
+    provider_profile_id: String,
+    credential_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReorderSessionCredentialsCommandInput {
+    provider_profile_id: String,
+    ordered_credential_ids: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn list_session_credentials(
+    state: State<'_, AppState>,
+    input: ProviderCredentialProfileInput,
+) -> AppResult<ApiResponse<Vec<SessionCredentialSummary>>> {
+    require_non_empty("providerProfileId", &input.provider_profile_id)?;
+    let provider_profile_lock = state.provider_profile_lock(&input.provider_profile_id)?;
+    let _provider_profile_operation = provider_profile_lock.lock().await;
+    require_provider_profile_exists(&state, &input.provider_profile_id).await?;
+    state
+        .credentials()
+        .summaries(&input.provider_profile_id)
+        .map(ApiResponse::new)
 }
 
 #[tauri::command]
 pub async fn set_session_credential(
     state: State<'_, AppState>,
-    input: SetSessionCredentialInput,
-) -> AppResult<ApiResponse<CommandAcknowledgement>> {
+    input: SetSessionCredentialCommandInput,
+) -> AppResult<ApiResponse<Vec<SessionCredentialSummary>>> {
     require_non_empty("providerProfileId", &input.provider_profile_id)?;
     let provider_profile_lock = state.provider_profile_lock(&input.provider_profile_id)?;
     let _provider_profile_operation = provider_profile_lock.lock().await;
+    require_provider_profile_exists(&state, &input.provider_profile_id).await?;
     let profile_id = input.provider_profile_id;
+    state.credentials().upsert(
+        profile_id.clone(),
+        input.credential_id,
+        input.credential_label,
+        input.credential,
+    )?;
     state
         .credentials()
-        .set(profile_id.clone(), input.credential)?;
-    let _present = state.credentials().contains(&profile_id)?;
-    Ok(ApiResponse::new(CommandAcknowledgement { accepted: true }))
+        .summaries(&profile_id)
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn activate_session_credential(
+    state: State<'_, AppState>,
+    input: ActivateSessionCredentialCommandInput,
+) -> AppResult<ApiResponse<Vec<SessionCredentialSummary>>> {
+    mutate_session_credentials(state, input.provider_profile_id, |store, profile_id| {
+        store.activate(profile_id, &input.credential_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn reorder_session_credentials(
+    state: State<'_, AppState>,
+    input: ReorderSessionCredentialsCommandInput,
+) -> AppResult<ApiResponse<Vec<SessionCredentialSummary>>> {
+    mutate_session_credentials(state, input.provider_profile_id, |store, profile_id| {
+        store.reorder(profile_id, &input.ordered_credential_ids)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_session_credential(
+    state: State<'_, AppState>,
+    input: ActivateSessionCredentialCommandInput,
+) -> AppResult<ApiResponse<Vec<SessionCredentialSummary>>> {
+    mutate_session_credentials(state, input.provider_profile_id, |store, profile_id| {
+        store.remove_one(profile_id, &input.credential_id)
+    })
+    .await
+}
+
+async fn mutate_session_credentials<Mutation>(
+    state: State<'_, AppState>,
+    provider_profile_id: String,
+    mutation: Mutation,
+) -> AppResult<ApiResponse<Vec<SessionCredentialSummary>>>
+where
+    Mutation: FnOnce(&SessionCredentialStore, &str) -> AppResult<()>,
+{
+    require_non_empty("providerProfileId", &provider_profile_id)?;
+    let provider_profile_lock = state.provider_profile_lock(&provider_profile_id)?;
+    let _provider_profile_operation = provider_profile_lock.lock().await;
+    require_provider_profile_exists(&state, &provider_profile_id).await?;
+    mutation(state.credentials(), &provider_profile_id)?;
+    state
+        .credentials()
+        .summaries(&provider_profile_id)
+        .map(ApiResponse::new)
+}
+
+async fn require_provider_profile_exists(
+    state: &State<'_, AppState>,
+    provider_profile_id: &str,
+) -> AppResult<()> {
+    if state
+        .backend()
+        .list_provider_profiles()
+        .await?
+        .iter()
+        .any(|profile| profile.id == provider_profile_id)
+    {
+        Ok(())
+    } else {
+        Err(AppError::validation(
+            "provider_profile_not_found",
+            "Provider Profile was not found",
+        ))
+    }
 }
 
 #[tauri::command]
@@ -583,7 +794,8 @@ mod tests {
                 "max_output_tokens": 2048,
                 "stop": ["END"]
             },
-            "sessionCredential": "session-secret"
+            "sessionCredential": "session-secret",
+            "sessionCredentialLabel": "Primary"
         }))
         .expect("the DesktopBridge payload must deserialize");
 
@@ -604,6 +816,195 @@ mod tests {
         );
         assert_eq!(parameters.get("stop"), Some(&serde_json::json!(["END"])));
         assert_eq!(input.session_credential.as_deref(), Some("session-secret"));
+        assert_eq!(input.session_credential_label.as_deref(), Some("Primary"));
+    }
+
+    #[test]
+    fn retry_command_accepts_one_exact_credential_id_and_rejects_unknown_fields() {
+        let input: RetryRunCommandInput = serde_json::from_value(serde_json::json!({
+            "runId": "run-failed",
+            "providerProfileId": "profile-1",
+            "previewHash": "sha256:preview",
+            "credentialId": "credential-backup"
+        }))
+        .expect("exact credential retry command deserializes");
+        assert_eq!(input.run_id, "run-failed");
+        assert_eq!(input.provider_profile_id, "profile-1");
+        assert_eq!(input.preview_hash, "sha256:preview");
+        assert_eq!(input.credential_id.as_deref(), Some("credential-backup"));
+
+        assert!(
+            serde_json::from_value::<RetryRunCommandInput>(serde_json::json!({
+                "runId": "run-failed",
+                "providerProfileId": "profile-1",
+                "previewHash": "sha256:preview",
+                "credentialId": "credential-backup",
+                "credential": "must-not-be-accepted"
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_credential_retry_uses_the_selected_secret_and_activates_only_after_success() {
+        let credentials = Arc::new(SessionCredentialStore::default());
+        let primary = credentials
+            .upsert(
+                "profile-1".into(),
+                None,
+                "Primary".into(),
+                "secret-primary".into(),
+            )
+            .expect("primary credential is stored");
+        let backup = credentials
+            .upsert(
+                "profile-1".into(),
+                None,
+                "Backup".into(),
+                "secret-backup".into(),
+            )
+            .expect("backup credential is stored");
+
+        let error = retry_run_with_selected_credential(
+            credentials.clone(),
+            "profile-1",
+            Some(&backup.credential_id),
+            |lookup| async move {
+                assert_eq!(
+                    lookup
+                        .credential_for("profile-1")?
+                        .expect("selected credential exists")
+                        .as_str()?,
+                    "secret-backup"
+                );
+                Err(AppError::validation(
+                    "context_preview_stale",
+                    "preview changed",
+                ))
+            },
+        )
+        .await
+        .expect_err("a failed Run start is returned");
+        assert_eq!(error.code, "context_preview_stale");
+        assert_eq!(
+            credentials
+                .summaries("profile-1")
+                .expect("summaries remain readable")[0]
+                .credential_id,
+            primary.credential_id,
+            "failed starts must not change the active credential"
+        );
+
+        let handle = retry_run_with_selected_credential(
+            credentials.clone(),
+            "profile-1",
+            Some(&backup.credential_id),
+            |_| async {
+                Ok(RunHandle {
+                    turn_id: "turn-1".into(),
+                    run_id: "run-recovered".into(),
+                })
+            },
+        )
+        .await
+        .expect("successful Run start activates the selected credential");
+        assert_eq!(handle.run_id, "run-recovered");
+        assert_eq!(
+            credentials
+                .summaries("profile-1")
+                .expect("summaries remain readable")[0]
+                .credential_id,
+            backup.credential_id
+        );
+    }
+
+    #[test]
+    fn named_credential_command_envelopes_are_strict_and_return_safe_summaries() {
+        let input: SetSessionCredentialCommandInput = serde_json::from_value(serde_json::json!({
+            "providerProfileId": "profile-1",
+            "credentialId": "credential-1",
+            "credentialLabel": "Backup",
+            "credential": "session-secret"
+        }))
+        .expect("named credential command deserializes");
+        assert_eq!(input.provider_profile_id, "profile-1");
+        assert_eq!(input.credential_id.as_deref(), Some("credential-1"));
+        assert_eq!(input.credential_label, "Backup");
+        assert_eq!(input.credential, "session-secret");
+
+        assert!(
+            serde_json::from_value::<SetSessionCredentialCommandInput>(serde_json::json!({
+                "providerProfileId": "profile-1",
+                "credentialLabel": "Backup",
+                "credential": "session-secret",
+                "unexpected": true
+            }))
+            .is_err(),
+            "secret ingress rejects unknown fields"
+        );
+
+        let serialized = serde_json::to_string(&SessionCredentialSummary {
+            credential_id: "credential-1".into(),
+            label: "Backup".into(),
+            order: 1,
+            is_active: false,
+        })
+        .expect("safe summary serializes");
+        assert_eq!(
+            serialized,
+            r#"{"credentialId":"credential-1","label":"Backup","order":1,"isActive":false}"#
+        );
+        assert!(!serialized.contains("session-secret"));
+    }
+
+    #[test]
+    fn initial_credential_validation_is_explicit_and_legacy_label_is_safe() {
+        assert_eq!(
+            validate_initial_session_credential(None, Some("session-secret".into()))
+                .expect("legacy credential gets a stable label")
+                .expect("credential is present")
+                .0,
+            "Default"
+        );
+        for (label, credential) in [
+            (Some("Primary".into()), None),
+            (None, Some(String::new())),
+            (Some("bad\nlabel".into()), Some("session-secret".into())),
+        ] {
+            assert!(
+                validate_initial_session_credential(label, credential).is_err(),
+                "invalid credential pairs fail before the Profile save"
+            );
+        }
+    }
+
+    #[test]
+    fn only_provider_identity_or_endpoint_changes_invalidate_session_credentials() {
+        let existing = ProviderProfileView {
+            id: "profile-1".into(),
+            provider_id: "openai".into(),
+            name: "Existing".into(),
+            dialect: ProviderDialectView::OpenaiCompatible,
+            base_url: "https://api.example.com/v1/".into(),
+            model: "model-a".into(),
+            is_default: true,
+            parameters: Some(std::collections::BTreeMap::new()),
+        };
+        let mut update = SaveProviderProfileInput {
+            id: Some(existing.id.clone()),
+            provider_id: existing.provider_id.clone(),
+            name: "Renamed".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "model-b".into(),
+            is_default: true,
+            parameters: Some(std::collections::BTreeMap::new()),
+        };
+        assert!(!provider_credential_target_changed(&existing, &update));
+        update.base_url = "https://other.example.com/v1".into();
+        assert!(provider_credential_target_changed(&existing, &update));
+        update.base_url = existing.base_url.clone();
+        update.provider_id = "anthropic".into();
+        assert!(provider_credential_target_changed(&existing, &update));
     }
 
     #[test]
@@ -768,7 +1169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updating_a_provider_profile_clears_its_old_credential_before_a_failed_save() {
+    async fn a_failed_profile_save_preserves_the_previous_session_credential() {
         let credentials = SessionCredentialStore::default();
         credentials
             .set("profile-1".into(), "old-secret".into())
@@ -779,13 +1180,14 @@ mod tests {
         let result = save_provider_profile_securely(
             &credentials,
             input,
-            Some("replacement-secret".into()),
+            Some(("Replacement".into(), "replacement-secret".into())),
+            true,
             |_| async {
                 assert!(
-                    !credentials
+                    credentials
                         .contains("profile-1")
                         .expect("credential store is readable"),
-                    "the old credential must be gone before the backend can publish a new endpoint"
+                    "the old credential remains authoritative until the Profile save commits"
                 );
                 Err(AppError::internal("save_failed", "profile was not saved"))
             },
@@ -793,15 +1195,19 @@ mod tests {
         .await;
 
         assert_eq!(result.expect_err("save must fail").code, "save_failed");
-        assert!(
-            !credentials
-                .contains("profile-1")
+        assert_eq!(
+            credentials
+                .get("profile-1")
                 .expect("credential store is readable")
+                .expect("old credential remains present")
+                .as_str()
+                .expect("credential is valid UTF-8"),
+            "old-secret"
         );
     }
 
     #[tokio::test]
-    async fn saving_a_provider_profile_without_a_new_key_leaves_no_session_credential() {
+    async fn an_unchanged_profile_save_without_a_new_key_preserves_credentials() {
         let credentials = SessionCredentialStore::default();
         credentials
             .set("profile-1".into(), "old-secret".into())
@@ -819,13 +1225,47 @@ mod tests {
             parameters: Some(std::collections::BTreeMap::new()),
         };
 
-        let result = save_provider_profile_securely(&credentials, input, None, |_| async {
+        let result = save_provider_profile_securely(&credentials, input, None, false, |_| async {
             Ok(saved.clone())
         })
         .await
         .expect("profile is saved");
 
         assert_eq!(result, saved);
+        assert_eq!(
+            credentials
+                .get("profile-1")
+                .expect("credential store is readable")
+                .expect("credential remains present")
+                .as_str()
+                .expect("credential is valid UTF-8"),
+            "old-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_committed_provider_target_change_clears_old_credentials() {
+        let credentials = SessionCredentialStore::default();
+        credentials
+            .set("profile-1".into(), "old-secret".into())
+            .expect("credential is stored");
+        let mut input = provider("https://new-endpoint.example.com/v1");
+        input.id = Some("profile-1".into());
+        let saved = ProviderProfileView {
+            id: "profile-1".into(),
+            provider_id: "ollama".into(),
+            name: "Local model".into(),
+            dialect: ProviderDialectView::Ollama,
+            base_url: input.base_url.clone(),
+            model: "qwen3".into(),
+            is_default: true,
+            parameters: Some(std::collections::BTreeMap::new()),
+        };
+
+        save_provider_profile_securely(&credentials, input, None, true, |_| async { Ok(saved) })
+            .await
+            .expect("Profile change commits");
+
         assert!(
             !credentials
                 .contains("profile-1")
@@ -855,7 +1295,8 @@ mod tests {
         let result = save_provider_profile_securely(
             &credentials,
             input,
-            Some("replacement-secret".into()),
+            Some(("Replacement".into(), "replacement-secret".into())),
+            false,
             |_| async { Ok(saved.clone()) },
         )
         .await
@@ -869,6 +1310,13 @@ mod tests {
         assert_eq!(
             credential.as_str().expect("credential is valid UTF-8"),
             "replacement-secret"
+        );
+        assert_eq!(
+            credentials
+                .summaries("profile-1")
+                .expect("summaries are readable")[0]
+                .label,
+            "Replacement"
         );
     }
 }

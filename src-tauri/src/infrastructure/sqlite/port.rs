@@ -13,6 +13,7 @@ use crate::{
     ports::{
         CheckpointOutcome, PersistRunStart, RepositoryFuture, RepositoryPort, RepositoryPortError,
         RunCheckpoint as PortRunCheckpoint, RunFinish as PortRunFinish, RunPersistencePort,
+        RunProviderProvenance,
     },
 };
 
@@ -127,6 +128,30 @@ impl RepositoryPort for SqliteRepository {
                 .into_iter()
                 .map(run_to_domain)
                 .collect()
+        })
+    }
+
+    fn list_run_provider_provenance(
+        &self,
+        workspace_id: &str,
+    ) -> RepositoryFuture<'_, Vec<RunProviderProvenance>> {
+        let repository = self.clone();
+        let workspace_id = workspace_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::list_run_provider_provenance(&repository, &workspace_id)
+                .await
+                .map(|records| {
+                    records
+                        .into_iter()
+                        .map(|record| RunProviderProvenance {
+                            run_id: record.run_id,
+                            provider_name: record.provider_name,
+                            base_url: record.base_url,
+                            model: record.model,
+                        })
+                        .collect()
+                })
+                .map_err(port_error)
         })
     }
 

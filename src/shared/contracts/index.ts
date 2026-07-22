@@ -132,6 +132,13 @@ export interface ProviderProfile {
   parameters?: Record<string, unknown>;
 }
 
+export interface SessionCredentialSummary {
+  credentialId: string;
+  label: string;
+  order: number;
+  isActive: boolean;
+}
+
 export interface ProtocolProfile {
   streamProtocol: ProviderStreamProtocol;
   authPlacement: ProviderAuthPlacement;
@@ -222,6 +229,7 @@ export interface RetryRunInput {
   runId: string;
   providerProfileId: string;
   previewHash: string;
+  credentialId?: string;
 }
 
 export interface RunHandle {

@@ -146,8 +146,12 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     listProviderTemplates: vi.fn().mockResolvedValue([]),
     listProviderProfiles: vi.fn().mockResolvedValue([provider]),
     listProviderModels: vi.fn().mockResolvedValue([]),
+    listSessionCredentials: vi.fn().mockResolvedValue([]),
     saveProviderProfile: vi.fn().mockResolvedValue(provider),
-    setSessionCredential: vi.fn().mockResolvedValue(undefined),
+    setSessionCredential: vi.fn().mockResolvedValue([]),
+    activateSessionCredential: vi.fn().mockResolvedValue([]),
+    reorderSessionCredentials: vi.fn().mockResolvedValue([]),
+    removeSessionCredential: vi.fn().mockResolvedValue([]),
     testProviderConnection: vi.fn().mockResolvedValue({ ok: true, message: "ok" }),
     subscribeToRunEvents: vi.fn().mockReturnValue(() => undefined),
     ...overrides,
@@ -155,6 +159,70 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
 }
 
 describe("App", () => {
+  it("deep-links credential recovery to the failed Provider and clears it on ordinary navigation", async () => {
+    const user = userEvent.setup();
+    const failedProvider: ProviderProfile = {
+      id: "provider-failed",
+      providerId: "openai-compatible",
+      name: "Failed exact provider",
+      dialect: "openai-compatible",
+      baseUrl: "https://failed.example.com/v1",
+      model: "gpt-exact",
+      isDefault: false,
+    };
+    const failedDetail: WorkspaceDetail = {
+      ...detail,
+      turns: [{
+        ...detail.turns[0],
+        runs: [{
+          ...detail.turns[0].runs[0],
+          status: "failed",
+          output: "失败回答仍保留",
+          providerProfileId: failedProvider.id,
+          providerName: failedProvider.name,
+          model: failedProvider.model,
+          baseUrl: failedProvider.baseUrl,
+          error: {
+            code: "rate_limited",
+            message: "当前凭据触发速率限制。",
+            retryable: true,
+            status: 429,
+          },
+        }],
+      }],
+      selectedRunIds: { "turn-root": "run-root-a" },
+    };
+    const bridge = bridgeFixture({
+      openWorkspace: vi.fn().mockResolvedValue(failedDetail),
+      listProviderProfiles: vi.fn().mockResolvedValue([provider, failedProvider]),
+      listSessionCredentials: vi.fn().mockResolvedValue([
+        { credentialId: "primary", label: "Primary", order: 0, isActive: true },
+      ]),
+    });
+
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText("失败回答仍保留")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "选择备用凭据" }));
+    expect(await screen.findByText("当前会话没有可用的备用凭据。")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "打开此 Provider 设置" }));
+
+    expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
+    await waitFor(() => {
+      expect(screen.getByLabelText("名称")).toHaveValue(failedProvider.name);
+    });
+
+    const navigation = screen.getByRole("navigation", { name: "工作面" });
+    await user.click(within(navigation).getByRole("button", { name: "Focus" }));
+    expect(await screen.findByText("失败回答仍保留")).toBeVisible();
+    await user.click(within(navigation).getByRole("button", { name: "Provider 设置" }));
+
+    expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
+    await waitFor(() => {
+      expect(screen.getByLabelText("名称")).toHaveValue("");
+    });
+  });
+
   it("opens the persisted route projection and returns to Focus", async () => {
     const user = userEvent.setup();
     const bridge = bridgeFixture();

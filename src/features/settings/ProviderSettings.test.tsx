@@ -50,8 +50,12 @@ function createProviderSettingsBridge(overrides: Partial<DesktopBridge> = {}): D
     listProviderTemplates: vi.fn().mockResolvedValue([]),
     listProviderProfiles: vi.fn().mockResolvedValue([]),
     listProviderModels: vi.fn().mockResolvedValue([]),
+    listSessionCredentials: vi.fn().mockResolvedValue([]),
     saveProviderProfile: vi.fn(),
-    setSessionCredential: vi.fn(),
+    setSessionCredential: vi.fn().mockResolvedValue([]),
+    activateSessionCredential: vi.fn().mockResolvedValue([]),
+    reorderSessionCredentials: vi.fn().mockResolvedValue([]),
+    removeSessionCredential: vi.fn().mockResolvedValue([]),
     testProviderConnection: vi.fn(),
     subscribeToRunEvents: vi.fn(() => () => undefined),
     ...overrides,
@@ -223,6 +227,9 @@ describe("ProviderSettings", () => {
     fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://llm.example.com/v1" },
     });
+    fireEvent.change(screen.getByLabelText("初始凭据标签"), {
+      target: { value: "Team primary" },
+    });
     fireEvent.change(screen.getByLabelText("API Key（仅本次会话）"), {
       target: { value: "secret-value" },
     });
@@ -236,13 +243,22 @@ describe("ProviderSettings", () => {
     await waitFor(() =>
       expect(bridge.saveProviderProfile).toHaveBeenCalledWith(
         expect.not.objectContaining({ apiKey: expect.anything() }),
-        "secret-value",
+        { label: "Team primary", credential: "secret-value" },
       ),
     );
     expect(bridge.setSessionCredential).not.toHaveBeenCalled();
     expect(screen.getByText(/工作区内容保存在本机/)).toBeVisible();
     expect(screen.getByText(/选中的 Context 会发送到 llm\.example\.com/)).toBeVisible();
-    expect(screen.getByRole("status")).toHaveTextContent("新 API Key 已载入本次应用会话");
+    expect(screen.getByText(/API Key 会短暂存在 WebView 表单/)).toBeVisible();
+    expect(screen.getByText(/不写入 SQLite 或前端持久状态/)).toBeVisible();
+    expect(
+      screen.getByText(/命名凭据“Team primary”已载入 Rust 进程内存/),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(bridge.listSessionCredentials).toHaveBeenCalledWith({
+        providerProfileId: "provider-1",
+      }),
+    );
     expect(screen.queryByText("secret-value")).not.toBeInTheDocument();
   });
 
@@ -292,7 +308,7 @@ describe("ProviderSettings", () => {
 
     expect(screen.getByText(/外发 · 未命名 Provider · ollama\.example\.com/)).toBeVisible();
     expect(screen.getByText("无认证")).toBeVisible();
-    expect(screen.getByLabelText("API Key（仅本次会话）")).toBeDisabled();
+    expect(screen.queryByLabelText("API Key（仅本次会话）")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("名称"), {
       target: { value: "Remote no-auth endpoint" },
@@ -355,6 +371,8 @@ describe("ProviderSettings", () => {
 
     expect(screen.getByLabelText("Provider 模板")).toBeDisabled();
     expect(screen.getByText(/已保存 Profile 的模板不可更改/)).toBeVisible();
+    expect(screen.getByText(/名称、模型和参数更新会保留现有会话凭据/)).toBeVisible();
+    expect(screen.getByText(/Base URL.*保存成功后清除旧凭据/)).toBeVisible();
     expect(screen.getByRole("button", { name: "测试连接" })).toBeEnabled();
 
     fireEvent.change(screen.getByLabelText("Base URL"), {
@@ -368,7 +386,9 @@ describe("ProviderSettings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
     await waitFor(() => expect(bridge.saveProviderProfile).toHaveBeenCalled());
-    expect(screen.getByRole("status")).toHaveTextContent("之前的会话 API Key 已清除");
+    expect(
+      screen.getByText(/端点身份已变更，旧会话凭据已在保存成功后清除/),
+    ).toBeVisible();
   });
 
   it("rejects insecure non-loopback HTTP endpoints before saving", async () => {
@@ -534,10 +554,22 @@ describe("ProviderSettings", () => {
         ...profile,
         ...input,
       })),
+      listSessionCredentials: vi.fn().mockResolvedValue([
+        {
+          credentialId: "credential-primary",
+          label: "Primary production",
+          order: 0,
+          isActive: true,
+        },
+      ]),
     });
 
     render(<ProviderSettings bridge={bridge} />);
     fireEvent.click(await screen.findByRole("button", { name: /Saved gateway/ }));
+    expect(await screen.findByText("Primary production")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "会话凭据" })).toBeVisible();
+    expect(screen.queryByLabelText("初始凭据标签")).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("stored-secret-that-must-not-return");
     fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
 
     await waitFor(() =>
@@ -565,6 +597,61 @@ describe("ProviderSettings", () => {
         expect.objectContaining({ model: "new-model" }),
       ),
     );
+    expect(
+      screen.getByText(/端点身份未变，现有会话凭据已保留/),
+    ).toBeVisible();
+  });
+
+  it("opens the requested saved profile directly and loads only its safe credential summaries", async () => {
+    const profiles = [
+      {
+        id: "provider-a",
+        providerId: "openai-compatible",
+        name: "Gateway A",
+        dialect: "openai-compatible" as const,
+        baseUrl: "https://a.example.com/v1",
+        model: "model-a",
+        isDefault: true,
+        parameters: {},
+      },
+      {
+        id: "provider-b",
+        providerId: "openai-compatible",
+        name: "Gateway B",
+        dialect: "openai-compatible" as const,
+        baseUrl: "https://b.example.com/v1",
+        model: "model-b",
+        isDefault: false,
+        parameters: {},
+      },
+    ];
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([openAiTemplate]),
+      listProviderProfiles: vi.fn().mockResolvedValue(profiles),
+      listSessionCredentials: vi.fn().mockResolvedValue([
+        {
+          credentialId: "credential-b",
+          label: "B backup",
+          order: 0,
+          isActive: true,
+        },
+      ]),
+    });
+
+    render(
+      <ProviderSettings
+        bridge={bridge}
+        initialProviderProfileId="provider-b"
+      />,
+    );
+
+    expect(await screen.findByLabelText("名称")).toHaveValue("Gateway B");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://b.example.com/v1");
+    expect(screen.getByLabelText("模型")).toHaveValue("model-b");
+    expect(await screen.findByText("B backup")).toBeVisible();
+    expect(bridge.listSessionCredentials).toHaveBeenCalledWith({
+      providerProfileId: "provider-b",
+    });
   });
 
   it("shows discovery loading, retryable errors, retry, and a valid empty catalog", async () => {

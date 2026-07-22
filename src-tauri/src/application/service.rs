@@ -26,7 +26,7 @@ use crate::{
     },
     ports::{
         CheckpointOutcome, DecisionPacketWriter, PersistRunStart, RepositoryPort,
-        RepositoryPortError, RunCheckpoint, RunFinish, RunPersistencePort,
+        RepositoryPortError, RunCheckpoint, RunFinish, RunPersistencePort, RunProviderProvenance,
     },
 };
 
@@ -752,7 +752,7 @@ fn workspace_view(record: Workspace) -> WorkspaceSummary {
     }
 }
 
-fn run_view(record: &ModelRun, profile: Option<&ProviderProfile>) -> AppResult<RunView> {
+fn run_view(record: &ModelRun, provenance: Option<&RunProviderProvenance>) -> AppResult<RunView> {
     let usage = record.usage().map(|usage| {
         BTreeMap::from([
             ("prompt_tokens".into(), usage.input_tokens),
@@ -774,12 +774,14 @@ fn run_view(record: &ModelRun, profile: Option<&ProviderProfile>) -> AppResult<R
         reasoning: (!record.reasoning_markdown().is_empty())
             .then(|| record.reasoning_markdown().to_owned()),
         provider_profile_id: record.provider_profile_id.clone().unwrap_or_default(),
-        provider_name: profile
-            .map(|profile| profile.name.clone())
+        provider_name: provenance
+            .map(|provenance| provenance.provider_name.clone())
             .unwrap_or_else(|| "Unknown provider".into()),
-        model: record.model.clone(),
-        base_url: profile
-            .map(|profile| profile.base_url.clone())
+        model: provenance
+            .map(|provenance| provenance.model.clone())
+            .unwrap_or_else(|| record.model.clone()),
+        base_url: provenance
+            .map(|provenance| provenance.base_url.clone())
             .unwrap_or_default(),
         created_at: timestamp_view(record.created_at),
         completed_at: state.finished_at.map(timestamp_view),
@@ -1805,13 +1807,13 @@ impl DefaultApplicationBackend {
             .get_workspace(workspace_id)
             .await
             .map_err(repository_port_error)?;
-        let profiles = self
+        let run_provenance = self
             .repository
-            .list_provider_profiles()
+            .list_run_provider_provenance(workspace_id)
             .await
             .map_err(repository_port_error)?
             .into_iter()
-            .map(|profile| (profile.id.clone(), profile))
+            .map(|provenance| (provenance.run_id.clone(), provenance))
             .collect::<HashMap<_, _>>();
         let turns = self
             .repository
@@ -1828,12 +1830,7 @@ impl DefaultApplicationBackend {
                 .map_err(repository_port_error)?;
             let views = run_records
                 .iter()
-                .map(|run| {
-                    run_view(
-                        run,
-                        profiles.get(run.provider_profile_id.as_deref().unwrap_or("")),
-                    )
-                })
+                .map(|run| run_view(run, run_provenance.get(&run.id)))
                 .collect::<AppResult<Vec<_>>>()?;
             if let Some(selected) = run_records
                 .iter()
@@ -2498,6 +2495,48 @@ mod tests {
 
     fn run(id: &str, turn_id: &str) -> ModelRun {
         run_with_status(id, turn_id, RunStatus::Completed)
+    }
+
+    fn run_provider_provenance(
+        run_id: &str,
+        provider_name: &str,
+        base_url: &str,
+        model: &str,
+    ) -> RunProviderProvenance {
+        RunProviderProvenance {
+            run_id: run_id.into(),
+            provider_name: provider_name.into(),
+            base_url: base_url.into(),
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn failed_run_view_keeps_immutable_provider_identity_after_profile_changes() {
+        let failed = run_with_status("run-failed", "turn-1", RunStatus::Failed);
+        let historical = run_provider_provenance(
+            &failed.id,
+            "Original provider",
+            "https://original.example.com/v1",
+            "original-model",
+        );
+        let view = run_view(&failed, Some(&historical)).expect("a failed Run remains displayable");
+
+        assert_eq!(view.provider_name, "Original provider");
+        assert_eq!(view.base_url, "https://original.example.com/v1");
+        assert_eq!(view.model, "original-model");
+        assert_eq!(view.status, RunStatusView::Failed);
+    }
+
+    #[test]
+    fn legacy_run_without_provenance_does_not_invent_mutable_provider_identity() {
+        let failed = run_with_status("run-legacy", "turn-1", RunStatus::Failed);
+
+        let view = run_view(&failed, None).expect("legacy fallback remains usable");
+
+        assert_eq!(view.provider_name, "Unknown provider");
+        assert!(view.base_url.is_empty());
+        assert_eq!(view.model, failed.model);
     }
 
     #[test]

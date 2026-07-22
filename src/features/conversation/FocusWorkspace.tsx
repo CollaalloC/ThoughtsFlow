@@ -49,6 +49,7 @@ import {
   ProviderDestination,
   SafeMarkdown,
 } from "../../shared/ui";
+import { CredentialRecovery } from "./CredentialRecovery";
 import "../../shared/tokens/index.css";
 import "../../shared/ui/styles.css";
 import "./focus-workspace.css";
@@ -67,7 +68,7 @@ type FocusWorkspaceProps = {
   initialRunId?: string;
   onOpenRouteMap?: (workspaceId: string, runId?: string) => void;
   onOpenDecisions?: (workspaceId: string) => void;
-  onOpenSettings?: () => void;
+  onOpenSettings?: (providerProfileId?: string) => void;
 };
 
 type SelectedRuns = Record<string, string>;
@@ -107,10 +108,9 @@ function runLabel(index: number) {
   return `回答 ${String.fromCharCode(65 + (index % 26))}`;
 }
 
-function isLocalProfile(profile?: ProviderProfileView) {
-  if (!profile) return false;
+function isLocalBaseUrl(baseUrl: string) {
   try {
-    return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(new URL(profile.baseUrl).hostname);
+    return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(new URL(baseUrl).hostname);
   } catch {
     return false;
   }
@@ -349,16 +349,26 @@ export function FocusWorkspace({
   const inspect = useCallback(async (
     prompt: string,
     exactParentRunId: string | null | undefined = parentRunId,
+    exactProviderProfileId: string | undefined = selectedProfile?.id,
   ) => {
-    if (!detail || !selectedProfile) return null;
+    if (!detail || !exactProviderProfileId) return null;
     const result = (await bridge.inspectContext({
       workspaceId: detail.workspace.id,
       parentRunId: exactParentRunId ?? null,
       prompt,
-      providerProfileId: selectedProfile.id,
+      providerProfileId: exactProviderProfileId,
     })) as ContextPreviewView;
     return result;
-  }, [bridge, detail, excludedSourceIds, parentRunId, pinnedSourceIds, selectedProfile]);
+  // Overrides live in Rust, but keeping them as dependencies is intentional:
+  // their mutations must trigger a fresh preview after the command commits.
+  }, [
+    bridge,
+    detail,
+    excludedSourceIds,
+    parentRunId,
+    pinnedSourceIds,
+    selectedProfile?.id,
+  ]);
 
   useEffect(() => {
     if (!detail || !selectedProfile) {
@@ -541,28 +551,42 @@ export function FocusWorkspace({
     if (branchRunId && branchDraft.trim()) void startTurn(branchDraft.trim(), branchRunId);
   };
 
-  const retryRun = async (run: RunView) => {
-    if (!detail || !selectedProfile || busy) return;
+  const retryRun = async (
+    run: RunView,
+    retryProviderProfileId: string,
+    retryCredentialId?: string,
+    propagateFailure = false,
+  ) => {
+    if (!detail || busy) return;
     const turn = detail.turns.find((item) => item.id === run.turnId);
     if (!turn) return;
+    const retryProfile = profiles.find((profile) => profile.id === retryProviderProfileId);
     setBusy(true);
     clearError();
     try {
-      const checked = await inspect(turn.prompt, turn.parentRunId ?? null);
+      const checked = await inspect(
+        turn.prompt,
+        turn.parentRunId ?? null,
+        retryProviderProfileId,
+      );
       if (!checked || checked.blocked) throw new Error(checked?.warnings[0] || "Context 无法发送。");
+      if (checked.providerProfileId !== retryProviderProfileId) {
+        throw new Error("Context 预览的 Provider 已变化，请重新确认后重试。");
+      }
       const streamEvents = bufferedRunEvents();
       const started = (await bridge.retryRun({
         runId: run.id,
-        providerProfileId: selectedProfile.id,
+        providerProfileId: retryProviderProfileId,
         previewHash: checked.hash,
+        ...(retryCredentialId ? { credentialId: retryCredentialId } : {}),
       }, streamEvents.consume)) as { runId: string };
       const nextRun: RunView = {
         ...run,
         id: started.runId,
-        providerProfileId: selectedProfile.id,
-        providerName: selectedProfile.name,
-        model: selectedProfile.model,
-        baseUrl: selectedProfile.baseUrl,
+        providerProfileId: retryProviderProfileId,
+        providerName: retryProfile?.name ?? run.providerName,
+        model: retryProfile?.model ?? run.model,
+        baseUrl: retryProfile?.baseUrl ?? run.baseUrl,
         status: "connecting",
         output: "",
         createdAt: new Date().toISOString(),
@@ -580,8 +604,14 @@ export function FocusWorkspace({
       reportError(
         reason,
         "重试失败。",
-        { label: "重试回答请求", execute: () => { void retryRun(run); } },
+        {
+          label: "重试回答请求",
+          execute: () => {
+            void retryRun(run, retryProviderProfileId, retryCredentialId);
+          },
+        },
       );
+      if (propagateFailure) throw reason;
     }
   };
 
@@ -684,7 +714,7 @@ export function FocusWorkspace({
     name: selectedProfile?.name ?? "尚未配置 Provider",
     model: selectedProfile?.model ?? "",
     baseUrl: selectedProfile?.baseUrl ?? "未配置",
-    local: isLocalProfile(selectedProfile),
+    local: isLocalBaseUrl(selectedProfile?.baseUrl ?? ""),
   };
 
   return (
@@ -777,7 +807,12 @@ export function FocusWorkspace({
                 <Button icon={<PanelRight size={14} />} aria-label="打开上下文检查器" onClick={() => setInspectorOpen(true)}>
                   上下文 <span className="focus-header__count">{contextItems.filter((item) => item.included).length}</span>
                 </Button>
-                <button type="button" className="focus-icon-button" aria-label="Provider 设置" onClick={onOpenSettings}><Settings2 size={16} /></button>
+                <button
+                  type="button"
+                  className="focus-icon-button"
+                  aria-label="Provider 设置"
+                  onClick={() => onOpenSettings?.()}
+                ><Settings2 size={16} /></button>
                 <button type="button" className="focus-icon-button" aria-label="归档工作区" onClick={archiveWorkspace}><Archive size={16} /></button>
               </div>
             </header>
@@ -806,7 +841,6 @@ export function FocusWorkspace({
                   const selectedRunId = selectedRuns[turn.id] ?? turn.runs[0]?.id;
                   const selectedRun = turn.runs.find((run) => run.id === selectedRunId) ?? turn.runs[0];
                   if (!selectedRun) return null;
-                  const profile = profiles.find((item) => item.id === selectedRun.providerProfileId) ?? selectedProfile;
                   const isGenerating = ["pending", "connecting", "streaming"].includes(selectedRun.status);
 
                   return (
@@ -818,7 +852,18 @@ export function FocusWorkspace({
                       </section>
                       <section className="focus-turn__answer">
                         <header>
-                          <div><FlowMark /><strong>Flow 回答</strong>{profile && <ProviderDestination name={profile.name} baseUrl={profile.baseUrl} local={isLocalProfile(profile)} compact />}</div>
+                          <div>
+                            <FlowMark />
+                            <strong>Flow 回答</strong>
+                            {selectedRun.providerName && selectedRun.baseUrl && (
+                              <ProviderDestination
+                                name={selectedRun.providerName}
+                                baseUrl={selectedRun.baseUrl}
+                                local={isLocalBaseUrl(selectedRun.baseUrl)}
+                                compact
+                              />
+                            )}
+                          </div>
                           <span>{formatDuration(selectedRun)} · {formatUsage(selectedRun.usage)}</span>
                         </header>
 
@@ -844,6 +889,14 @@ export function FocusWorkspace({
 
                         {selectedRun.error && <div className="focus-turn__run-error" role="alert">{selectedRun.error.message}</div>}
                         <SafeMarkdown>{selectedRun.output || (isGenerating ? "正在等待模型响应…" : "该运行没有输出。")}</SafeMarkdown>
+                        <CredentialRecovery
+                          bridge={bridge}
+                          run={selectedRun}
+                          disabled={busy || isGenerating}
+                          onRetryWithCredential={(exactProviderProfileId, credentialId) =>
+                            retryRun(selectedRun, exactProviderProfileId, credentialId, true)}
+                          onOpenSettings={onOpenSettings}
+                        />
 
                         <div className="focus-turn__actions">
                           <button type="button" onClick={() => void navigator.clipboard?.writeText(selectedRun.output)}><Copy size={13} /> 复制</button>
@@ -854,7 +907,14 @@ export function FocusWorkspace({
                             disabled={isGenerating}
                             onClick={() => { setBranchRunId((current) => current === selectedRun.id ? null : selectedRun.id); setBranchDraft(""); }}
                           ><GitBranch size={13} /> 从此回答创建分支</button>
-                          <button type="button" aria-label="重试回答" disabled={isGenerating} onClick={() => void retryRun(selectedRun)}><RefreshCw size={13} /> 新增回答版本</button>
+                          <button
+                            type="button"
+                            aria-label="重试回答"
+                            disabled={isGenerating || !selectedProfile}
+                            onClick={() => {
+                              if (selectedProfile) void retryRun(selectedRun, selectedProfile.id);
+                            }}
+                          ><RefreshCw size={13} /> 新增回答版本</button>
                           {isGenerating && <button type="button" aria-label="停止生成" onClick={() => void bridge.cancelRun(selectedRun.id)}><Square size={12} /> 停止</button>}
                         </div>
 
