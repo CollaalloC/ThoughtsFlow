@@ -30,8 +30,14 @@ fn finished_run(id: &str, turn_id: &str, output: &str) -> ModelRun {
 fn provider(model: &str) -> ProviderSnapshot {
     ProviderSnapshot {
         profile_id: "provider-1".into(),
+        provider_id: Some("ollama".into()),
+        template_revision: Some(1),
         provider_name: "Local test".into(),
         dialect: ProviderDialect::Ollama,
+        stream_protocol: Some(StreamProtocol::OllamaNdjson),
+        auth_placement: Some(AuthPlacement::None),
+        auth_header_name: None,
+        additional_headers: BTreeMap::new(),
         base_url: "http://127.0.0.1:11434".into(),
         model: model.into(),
         parameters: BTreeMap::new(),
@@ -428,6 +434,90 @@ fn provider_snapshot_changes_invalidate_the_preview_hash() {
 }
 
 #[test]
+fn resolved_template_revision_changes_invalidate_the_preview_hash() {
+    let graph = ConversationGraph::try_new(Vec::new(), Vec::new(), Vec::new()).unwrap();
+    let compiler = ContextCompiler::new(ContextPolicy::default());
+    let request = ContextCompileRequest {
+        workspace_id: "workspace".into(),
+        system_prompt: String::new(),
+        parent_run_id: None,
+        current_prompt: "same prompt".into(),
+        overrides: ContextOverrides::default(),
+        provider: Some(provider("model-a")),
+    };
+    let preview = compiler.inspect(&graph, request.clone()).unwrap();
+    let mut changed = request;
+    changed.provider.as_mut().unwrap().template_revision = Some(2);
+
+    let error = compiler
+        .compile(&graph, changed, &preview.preview_hash)
+        .expect_err("resolved template revision is part of the inspected request");
+
+    assert!(matches!(error, DomainError::PreviewHashMismatch { .. }));
+}
+
+#[test]
+fn context_preview_rejects_unresolved_provider_metadata() {
+    let graph = ConversationGraph::try_new(Vec::new(), Vec::new(), Vec::new()).unwrap();
+    let compiler = ContextCompiler::new(ContextPolicy::default());
+    let mut unresolved = provider("model-a");
+    unresolved.stream_protocol = None;
+
+    let error = compiler
+        .inspect(
+            &graph,
+            ContextCompileRequest {
+                workspace_id: "workspace".into(),
+                system_prompt: String::new(),
+                parent_run_id: None,
+                current_prompt: "prompt".into(),
+                overrides: ContextOverrides::default(),
+                provider: Some(unresolved),
+            },
+        )
+        .expect_err("send previews require a fully resolved Provider Template");
+
+    assert_eq!(
+        error,
+        DomainError::UnresolvedProviderMetadata {
+            field: "stream protocol"
+        }
+    );
+}
+
+#[test]
+fn canonical_hash_frames_variable_provider_groups() {
+    let graph = ConversationGraph::try_new(Vec::new(), Vec::new(), Vec::new()).unwrap();
+    let compiler = ContextCompiler::new(ContextPolicy::default());
+    let mut without_header = provider("header-value");
+    without_header.base_url = "header-name".into();
+    without_header
+        .parameters
+        .insert("base-url".into(), "model".into());
+    let mut with_header = provider("model");
+    with_header.base_url = "base-url".into();
+    with_header
+        .additional_headers
+        .insert("header-name".into(), "header-value".into());
+    let request = |provider| ContextCompileRequest {
+        workspace_id: "workspace".into(),
+        system_prompt: String::new(),
+        parent_run_id: None,
+        current_prompt: "same prompt".into(),
+        overrides: ContextOverrides::default(),
+        provider: Some(provider),
+    };
+
+    let first = compiler.inspect(&graph, request(without_header)).unwrap();
+    let second = compiler.inspect(&graph, request(with_header)).unwrap();
+
+    assert_ne!(
+        first.preview_hash, second.preview_hash,
+        "header and parameter group boundaries must be part of the canonical framing"
+    );
+}
+
+#[test]
 fn structured_run_failure_survives_rehydration() {
     let run = ModelRun::rehydrate(
         RunDraft {
@@ -459,4 +549,76 @@ fn structured_run_failure_survives_rehydration() {
     assert_eq!(run.failure().unwrap().code, "rate_limit");
     assert!(run.failure().unwrap().retryable);
     assert_eq!(run.failure().unwrap().status, Some(429));
+}
+
+#[test]
+fn provider_template_catalog_exposes_protocol_and_auth_without_secrets() {
+    let templates = provider_templates();
+    let ids = templates
+        .iter()
+        .map(|template| template.provider_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), templates.len(), "provider ids must be unique");
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from([
+            "anthropic",
+            "azure-openai",
+            "google",
+            "ollama",
+            "openai",
+            "openai-compatible",
+            "openrouter",
+        ])
+    );
+    for template in templates {
+        assert!(template.revision > 0);
+        assert_eq!(
+            template.protocol.requires_additional_headers,
+            !template.protocol.additional_headers.is_empty()
+        );
+        assert!(!template.default_base_url.contains("@"));
+    }
+
+    let openai = provider_template("openai").expect("OpenAI template");
+    assert_eq!(openai.default_base_url, "https://api.openai.com/v1");
+    assert_eq!(openai.protocol.stream_protocol, StreamProtocol::OpenAiSse);
+    assert_eq!(openai.protocol.auth_placement, AuthPlacement::BearerHeader);
+    assert_eq!(openai.protocol.models_endpoint, Some("/models"));
+    assert!(openai.runtime_available);
+
+    let anthropic = provider_template("anthropic").expect("Anthropic template");
+    assert_eq!(
+        anthropic.protocol.stream_protocol,
+        StreamProtocol::AnthropicSse
+    );
+    assert_eq!(
+        anthropic.protocol.auth_placement,
+        AuthPlacement::ApiKeyHeader
+    );
+    assert_eq!(anthropic.protocol.auth_header_name, Some("x-api-key"));
+    assert!(anthropic.protocol.requires_additional_headers);
+    assert_eq!(
+        anthropic.protocol.additional_headers,
+        &[StaticHeader {
+            name: "anthropic-version",
+            value: "2023-06-01",
+        }]
+    );
+    assert!(!anthropic.runtime_available);
+
+    let google = provider_template("google").expect("Google template");
+    assert_eq!(google.protocol.stream_protocol, StreamProtocol::GoogleSse);
+    assert_eq!(google.protocol.auth_header_name, Some("x-goog-api-key"));
+    assert!(!google.runtime_available);
+
+    let ollama = provider_template("ollama").expect("Ollama template");
+    assert_eq!(ollama.revision, 2);
+    assert_eq!(
+        ollama.protocol.auth_placement,
+        AuthPlacement::BearerHeader,
+        "a session credential must remain usable for migrated proxied Ollama profiles"
+    );
+    assert_eq!(ollama.protocol.auth_header_name, Some("Authorization"));
+    assert_eq!(ollama.default_base_url, "http://127.0.0.1:11434");
 }

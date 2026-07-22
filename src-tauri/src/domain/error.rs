@@ -49,6 +49,9 @@ pub enum DomainError {
         estimated_chars: usize,
         max_chars: usize,
     },
+    UnresolvedProviderMetadata {
+        field: &'static str,
+    },
     InvalidPersistedRun {
         run_id: String,
         reason: &'static str,
@@ -121,6 +124,9 @@ impl Display for DomainError {
                 formatter,
                 "context size {estimated_chars} exceeds limit {max_chars}"
             ),
+            Self::UnresolvedProviderMetadata { field } => {
+                write!(formatter, "Provider snapshot is missing resolved {field}")
+            }
             Self::InvalidPersistedRun { run_id, reason } => {
                 write!(formatter, "persisted run {run_id} is invalid: {reason}")
             }

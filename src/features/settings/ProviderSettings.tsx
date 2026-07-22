@@ -2,7 +2,7 @@ import { Check, Cloud, HardDrive, KeyRound, LoaderCircle, PlugZap, Plus } from "
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { DesktopBridge } from "../../platform/desktop-bridge";
-import type { ProviderProfile } from "../../shared/contracts";
+import type { ProviderProfile, ProviderTemplate } from "../../shared/contracts";
 import { Button, LocalDataBadge, ProviderDestination } from "../../shared/ui";
 import "./provider-settings.css";
 
@@ -10,16 +10,16 @@ type ProviderProfileView = ProviderProfile;
 
 type Draft = {
   id?: string;
+  providerId: string;
   name: string;
-  dialect: ProviderProfileView["dialect"];
   baseUrl: string;
   defaultModel: string;
   credential: string;
 };
 
 const emptyDraft: Draft = {
+  providerId: "",
   name: "",
-  dialect: "openai-compatible",
   baseUrl: "",
   defaultModel: "",
   credential: "",
@@ -27,6 +27,14 @@ const emptyDraft: Draft = {
 
 function isLoopbackUrl(url: URL) {
   return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
+}
+
+function isLocalEndpoint(rawUrl: string) {
+  try {
+    return isLoopbackUrl(new URL(rawUrl));
+  } catch {
+    return false;
+  }
 }
 
 function validateEndpoint(rawUrl: string) {
@@ -37,13 +45,32 @@ function validateEndpoint(rawUrl: string) {
     return "请输入完整的 Base URL，例如 https://api.example.com/v1。";
   }
   if (url.username || url.password) return "Base URL 不能包含用户名、密码或 API Key。";
+  if (url.search || url.hash) return "Base URL 不能包含查询参数或片段。";
   if (url.protocol === "http:" && !isLoopbackUrl(url)) return "远程端点必须使用 HTTPS。";
   if (url.protocol !== "https:" && url.protocol !== "http:") return "Provider 端点只支持 HTTP 或 HTTPS。";
   return null;
 }
 
+function normalizeBaseUrl(rawUrl: string) {
+  return rawUrl.trim().replace(/\/+$/, "");
+}
+
+function describeAuth(template?: ProviderTemplate) {
+  if (!template || template.protocol.authPlacement === "none") return "无认证";
+
+  const headerName = template.protocol.authHeaderName;
+  if (template.protocol.authPlacement === "bearer_header") {
+    return `${headerName ?? "Authorization"}: Bearer …`;
+  }
+  if (template.protocol.authPlacement === "api_key_header") {
+    return `${headerName ?? "x-api-key"}: …`;
+  }
+  return `${headerName ?? "key"}=…（URL 查询参数）`;
+}
+
 export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
   const [profiles, setProfiles] = useState<ProviderProfileView[]>([]);
+  const [templates, setTemplates] = useState<ProviderTemplate[]>([]);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -53,10 +80,23 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
 
   useEffect(() => {
     let active = true;
-    bridge
-      .listProviderProfiles()
-      .then((nextProfiles) => {
-        if (active) setProfiles(nextProfiles as ProviderProfileView[]);
+    Promise.all([bridge.listProviderProfiles(), bridge.listProviderTemplates()])
+      .then(([nextProfiles, nextTemplates]) => {
+        if (!active) return;
+        setProfiles(nextProfiles as ProviderProfileView[]);
+        setTemplates(nextTemplates);
+        const firstAvailable = nextTemplates.find((template) => template.runtimeAvailable);
+        if (firstAvailable) {
+          setDraft((current) =>
+            current.providerId
+              ? current
+              : {
+                  ...current,
+                  providerId: firstAvailable.providerId,
+                  baseUrl: current.baseUrl || firstAvailable.defaultBaseUrl,
+                },
+          );
+        }
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "无法读取 Provider 配置。");
@@ -66,6 +106,24 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
       });
     return () => { active = false; };
   }, [bridge]);
+
+  const selectedTemplate = useMemo(
+    () => templates.find((template) => template.providerId === draft.providerId),
+    [draft.providerId, templates],
+  );
+
+  const connectionTestNeedsSave = useMemo(() => {
+    if (!draft.id) return true;
+    const persisted = profiles.find((profile) => profile.id === draft.id);
+    if (!persisted) return true;
+    return (
+      draft.providerId !== persisted.providerId
+      || draft.name.trim() !== persisted.name
+      || normalizeBaseUrl(draft.baseUrl) !== normalizeBaseUrl(persisted.baseUrl)
+      || draft.defaultModel.trim() !== persisted.model
+      || draft.credential.length > 0
+    );
+  }, [draft, profiles]);
 
   const parsedHost = useMemo(() => {
     try {
@@ -78,8 +136,8 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
   const editProfile = (profile: ProviderProfileView) => {
     setDraft({
       id: profile.id,
+      providerId: profile.providerId,
       name: profile.name,
-      dialect: profile.dialect,
       baseUrl: profile.baseUrl,
       defaultModel: profile.model,
       credential: "",
@@ -101,6 +159,14 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
       setError("请填写 Provider 名称。");
       return;
     }
+    if (!selectedTemplate) {
+      setError("请选择 Provider 模板。");
+      return;
+    }
+    if (!selectedTemplate.runtimeAvailable) {
+      setError("该 Provider 协议尚未开放运行。");
+      return;
+    }
     if (!draft.defaultModel.trim()) {
       setError("请填写默认模型。");
       return;
@@ -108,27 +174,43 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
 
     setSaving(true);
     try {
-      const saved = (await bridge.saveProviderProfile({
+      const wasExisting = Boolean(draft.id);
+      const submittedCredential = draft.credential;
+      const profileInput = {
         id: draft.id,
+        providerId: draft.providerId,
         name: draft.name.trim(),
-        dialect: draft.dialect,
-        baseUrl: draft.baseUrl.trim().replace(/\/$/, ""),
+        baseUrl: normalizeBaseUrl(draft.baseUrl),
         model: draft.defaultModel.trim(),
         isDefault: profiles.length === 0,
         parameters: {},
-      })) as ProviderProfileView;
-      if (draft.credential) {
-        await bridge.setSessionCredential({
-          providerProfileId: saved.id,
-          credential: draft.credential,
-        });
-      }
+      };
+      const saved = (await (
+        submittedCredential && selectedTemplate.protocol.authPlacement !== "none"
+          ? bridge.saveProviderProfile(profileInput, submittedCredential)
+          : bridge.saveProviderProfile(profileInput)
+      )) as ProviderProfileView;
       setProfiles((current) => {
         const withoutSaved = current.filter((profile) => profile.id !== saved.id);
         return [...withoutSaved, saved];
       });
-      setDraft((current) => ({ ...current, id: saved.id, credential: "" }));
-      setStatus("Provider 已保存；API Key 仅在本次应用会话中可用。");
+      setDraft({
+        id: saved.id,
+        providerId: saved.providerId,
+        name: saved.name,
+        baseUrl: saved.baseUrl,
+        defaultModel: saved.model,
+        credential: "",
+      });
+      if (selectedTemplate?.protocol.authPlacement === "none") {
+        setStatus("Provider 已保存；该模板无需会话凭据。");
+      } else if (submittedCredential) {
+        setStatus("Provider 已保存；新 API Key 已载入本次应用会话，退出即清除。");
+      } else if (wasExisting) {
+        setStatus("Provider 已保存；之前的会话 API Key 已清除，如需继续调用请重新输入并保存。");
+      } else {
+        setStatus("Provider 已保存；当前没有会话 API Key，如需调用请重新输入并保存。");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "保存 Provider 失败。");
     } finally {
@@ -146,6 +228,10 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
     }
     if (!draft.id) {
       setError("请先保存 Provider，再测试 Rust Core 到端点的连接。");
+      return;
+    }
+    if (connectionTestNeedsSave) {
+      setError("当前配置尚未保存。请先保存更改，再测试 Rust Core 到最新端点的连接。");
       return;
     }
     setTesting(true);
@@ -169,7 +255,20 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
             <span>模型端点</span>
             <h2 id="provider-settings-title">Providers</h2>
           </div>
-          <button type="button" aria-label="新建 Provider" onClick={() => setDraft(emptyDraft)}>
+          <button
+            type="button"
+            aria-label="新建 Provider"
+            onClick={() => {
+              const firstAvailable = templates.find((template) => template.runtimeAvailable);
+              setDraft({
+                ...emptyDraft,
+                providerId: firstAvailable?.providerId ?? "",
+                baseUrl: firstAvailable?.defaultBaseUrl ?? "",
+              });
+              setError(null);
+              setStatus(null);
+            }}
+          >
             <Plus size={16} />
           </button>
         </header>
@@ -186,7 +285,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
               onClick={() => editProfile(profile)}
             >
               <span className="provider-settings__profile-icon">
-                {profile.dialect === "ollama" ? <HardDrive size={15} /> : <Cloud size={15} />}
+                {isLocalEndpoint(profile.baseUrl) ? <HardDrive size={15} /> : <Cloud size={15} />}
               </span>
               <span>
                 <strong>{profile.name}</strong>
@@ -222,22 +321,51 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
             <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：团队兼容网关" />
           </label>
           <label>
-            <span>协议</span>
+            <span>Provider 模板</span>
             <select
-              value={draft.dialect}
+              aria-label="Provider 模板"
+              value={draft.providerId}
+              disabled={Boolean(draft.id)}
+              aria-describedby={draft.id ? "provider-template-lock-note" : undefined}
               onChange={(event) => {
-                const dialect = event.target.value as Draft["dialect"];
+                if (draft.id) return;
+                const template = templates.find(
+                  (candidate) => candidate.providerId === event.target.value,
+                );
+                if (!template) return;
                 setDraft({
                   ...draft,
-                  dialect,
-                  baseUrl: dialect === "ollama" && !draft.baseUrl ? "http://127.0.0.1:11434" : draft.baseUrl,
+                  providerId: template.providerId,
+                  baseUrl: template.defaultBaseUrl,
+                  defaultModel: "",
+                  credential: "",
                 });
               }}
             >
-              <option value="openai-compatible">OpenAI-compatible</option>
-              <option value="ollama">Ollama native</option>
+              <option value="" disabled>请选择模板</option>
+              {templates.map((template) => (
+                <option
+                  key={template.providerId}
+                  value={template.providerId}
+                >
+                  {template.displayName}{template.runtimeAvailable ? "" : "（即将支持）"}
+                </option>
+              ))}
             </select>
+            {draft.id && (
+              <small id="provider-template-lock-note" className="provider-settings__field-note">
+                已保存 Profile 的模板不可更改；如需切换协议，请新建 Provider。
+              </small>
+            )}
           </label>
+          {selectedTemplate && (
+            <div className="provider-settings__protocol provider-settings__wide" aria-label="协议说明">
+              <span>流协议 <strong>{selectedTemplate.protocol.streamProtocol}</strong></span>
+              <span>
+                认证方式 <strong>{describeAuth(selectedTemplate)}</strong>
+              </span>
+            </div>
+          )}
           <label className="provider-settings__wide">
             <span>Base URL</span>
             <input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" inputMode="url" />
@@ -250,8 +378,22 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
             <span>API Key（仅本次会话）</span>
             <span className="provider-settings__secret">
               <KeyRound size={14} aria-hidden="true" />
-              <input type="password" autoComplete="off" value={draft.credential} onChange={(event) => setDraft({ ...draft, credential: event.target.value })} placeholder={draft.dialect === "ollama" ? "通常不需要" : "退出应用后清除"} />
+              <input
+                type="password"
+                aria-label="API Key（仅本次会话）"
+                aria-describedby={draft.id && selectedTemplate?.protocol.authPlacement !== "none" ? "provider-credential-reset-note" : undefined}
+                autoComplete="off"
+                disabled={selectedTemplate?.protocol.authPlacement === "none"}
+                value={draft.credential}
+                onChange={(event) => setDraft({ ...draft, credential: event.target.value })}
+                placeholder={selectedTemplate?.protocol.authPlacement === "none" ? "通常不需要" : "退出应用后清除"}
+              />
             </span>
+            {draft.id && selectedTemplate?.protocol.authPlacement !== "none" && (
+              <small id="provider-credential-reset-note" className="provider-settings__field-note">
+                保存 Profile 会清除旧会话凭据；需要继续使用时，请在本次保存中重新输入。
+              </small>
+            )}
           </label>
         </div>
 
@@ -260,9 +402,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
             <ProviderDestination
               name={draft.name || "未命名 Provider"}
               baseUrl={draft.baseUrl}
-              local={draft.dialect === "ollama" || (() => {
-                try { return isLoopbackUrl(new URL(draft.baseUrl)); } catch { return false; }
-              })()}
+              local={isLocalEndpoint(draft.baseUrl)}
             />
           </div>
         )}
@@ -271,11 +411,21 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
         {status && <p className="provider-settings__message is-success" role="status"><Check size={14} /> {status}</p>}
 
         <footer>
-          <Button type="button" tone="quiet" icon={testing ? <LoaderCircle className="tf-spin" size={15} /> : <PlugZap size={15} />} disabled={testing || saving} onClick={testConnection}>
-            {testing ? "测试中" : "测试连接"}
+          <Button
+            type="button"
+            tone="quiet"
+            icon={testing ? <LoaderCircle className="tf-spin" size={15} /> : <PlugZap size={15} />}
+            disabled={testing || saving || connectionTestNeedsSave}
+            onClick={testConnection}
+          >
+            {testing ? "测试中" : !draft.id ? "请先保存 Provider" : connectionTestNeedsSave ? "请先保存更改" : "测试连接"}
           </Button>
-          <Button type="submit" tone="primary" disabled={saving || testing}>
-            {saving ? "保存中" : "保存 Provider"}
+          <Button
+            type="submit"
+            tone="primary"
+            disabled={saving || testing || !selectedTemplate?.runtimeAvailable}
+          >
+            {saving ? "保存中" : selectedTemplate && !selectedTemplate.runtimeAvailable ? "协议即将支持" : "保存 Provider"}
           </Button>
         </footer>
       </form>

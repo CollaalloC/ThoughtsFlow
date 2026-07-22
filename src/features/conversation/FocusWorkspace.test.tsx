@@ -69,7 +69,7 @@ const preview = {
     {
       id: "context-system",
       ordinal: 1,
-      role: "system",
+      role: "system" as const,
       label: "系统说明",
       source: "工作区默认",
       content: "你是一名严谨的 AI 产品设计顾问。",
@@ -81,7 +81,7 @@ const preview = {
     {
       id: "context-run-a",
       ordinal: 2,
-      role: "assistant",
+      role: "assistant" as const,
       label: "回答 A",
       source: "run-a",
       content: "线性阅读降低首分钟认知成本。",
@@ -130,6 +130,36 @@ function bridgeFixture() {
 }
 
 describe("FocusWorkspace", () => {
+  it("labels a remote Ollama endpoint as outbound instead of local", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.listProviderProfiles).mockResolvedValue([
+      {
+        id: "provider-remote-ollama",
+        providerId: "ollama",
+        name: "Remote Ollama",
+        dialect: "ollama",
+        baseUrl: "https://ollama.example.com",
+        model: "qwen3",
+        isDefault: true,
+        parameters: {},
+      },
+    ]);
+    vi.mocked(bridge.inspectContext).mockResolvedValue({
+      ...preview,
+      providerProfileId: "provider-remote-ollama",
+      providerName: "Remote Ollama",
+      model: "qwen3",
+      baseUrl: "https://ollama.example.com",
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    const outboundLabels = await screen.findAllByText("外发 · ollama.example.com");
+    expect(outboundLabels.length).toBeGreaterThan(0);
+    expect(outboundLabels[0]).toBeVisible();
+    expect(screen.queryByText("本机 · ollama.example.com")).not.toBeInTheDocument();
+  });
+
   it("creates an untitled-goal workspace without turning placeholder copy into model context", async () => {
     const bridge = bridgeFixture();
     vi.mocked(bridge.createWorkspace).mockResolvedValue({
@@ -337,12 +367,18 @@ describe("FocusWorkspace", () => {
       runId: "run-a",
       canonicalHash: "sha256:locked",
       createdAt: "2026-07-22T09:11:00Z",
+      providerId: "openai-compatible",
+      templateRevision: 3,
       providerName: "OpenAI compatible",
+      streamProtocol: "openai_sse",
+      authPlacement: "bearer_header",
+      authHeaderName: "Authorization",
+      additionalHeaders: { "x-client-revision": "2026-07-22" },
       model: "gpt-4.1",
       baseUrl: "https://api.example.com/v1",
-      parameters: { temperature: 0.2 },
+      parameters: { temperature: 0.2, stop: ["DONE"] },
       items: preview.items,
-    } as never);
+    });
     render(<FocusWorkspace bridge={bridge} />);
 
     await screen.findByRole("heading", { name: workspace.name });
@@ -361,6 +397,40 @@ describe("FocusWorkspace", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "本次实际发送的内容" }));
     expect(await screen.findByText("sha256:locked")).toBeVisible();
+    expect(screen.getByText("openai-compatible r3")).toBeVisible();
+    expect(screen.getByText("OpenAI SSE")).toBeVisible();
+    expect(screen.getByText("Authorization: Bearer …")).toBeVisible();
+    expect(screen.getByText("x-client-revision")).toBeVisible();
+    expect(screen.getByText("2026-07-22")).toBeVisible();
+    expect(screen.getByText("temperature")).toBeVisible();
+    expect(screen.getByText("0.2")).toBeVisible();
+    expect(screen.getByText('["DONE"]')).toBeVisible();
     expect(screen.getByRole("button", { name: "排除 回答 A" })).toBeDisabled();
+  });
+
+  it("falls back atomically for a legacy snapshot instead of rendering partial provider metadata", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.getRunSnapshot).mockResolvedValue({
+      id: "snapshot-legacy",
+      runId: "run-a",
+      canonicalHash: "sha256:legacy",
+      createdAt: "2026-07-22T09:11:00Z",
+      providerName: "Legacy Provider",
+      model: "legacy-model",
+      baseUrl: "https://legacy.example.com/v1",
+      additionalHeaders: {},
+      parameters: { temperature: 0.7 },
+      items: preview.items,
+    });
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(screen.getByRole("button", { name: "打开上下文检查器" }));
+    fireEvent.click(screen.getByRole("tab", { name: "本次实际发送的内容" }));
+
+    expect(await screen.findByText("旧版快照：Provider 协议与认证元数据未记录")).toBeVisible();
+    expect(screen.queryByText(/undefined|rundefined/)).not.toBeInTheDocument();
+    expect(screen.getByText("temperature")).toBeVisible();
+    expect(screen.getByText("0.7")).toBeVisible();
   });
 });

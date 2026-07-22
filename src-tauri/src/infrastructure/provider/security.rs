@@ -11,6 +11,11 @@ pub fn validate_base_url(base_url: &str) -> Result<Url, ProviderError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ProviderError::CredentialsInUrl);
     }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ProviderError::InvalidEndpoint(
+            "Base URL must not include a query string or fragment".into(),
+        ));
+    }
 
     match url.scheme() {
         "https" => {}
@@ -98,6 +103,14 @@ mod tests {
         );
         assert!(matches!(
             validate_base_url("not a URL"),
+            Err(ProviderError::InvalidEndpoint(_))
+        ));
+        assert!(matches!(
+            validate_base_url("https://models.example.com/v1?key=secret"),
+            Err(ProviderError::InvalidEndpoint(_))
+        ));
+        assert!(matches!(
+            validate_base_url("https://models.example.com/v1#fragment"),
             Err(ProviderError::InvalidEndpoint(_))
         ));
     }

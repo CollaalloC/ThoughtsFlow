@@ -23,7 +23,9 @@ import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-b
 import type {
   ContextPreview,
   ModelRun,
+  ProviderAuthPlacement,
   ProviderProfile,
+  ProviderStreamProtocol,
   RunEvent,
   Turn,
   WorkspaceDetail,
@@ -35,6 +37,7 @@ import {
   type InspectorRun,
   type InspectorTab,
   type LockedSnapshot,
+  type LockedSnapshotProviderMetadata,
 } from "../context-inspector";
 import {
   Brand,
@@ -106,7 +109,6 @@ function runLabel(index: number) {
 
 function isLocalProfile(profile?: ProviderProfileView) {
   if (!profile) return false;
-  if (profile.dialect === "ollama") return true;
   try {
     return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(new URL(profile.baseUrl).hostname);
   } catch {
@@ -160,24 +162,92 @@ function toInspectorItem(item: ContextPreview["items"][number]): ContextInspecto
   };
 }
 
-function normalizeSnapshot(raw: unknown): LockedSnapshot | null {
-  if (!raw || typeof raw !== "object") return null;
-  const value = raw as {
-    canonicalHash?: string;
-    createdAt?: number | string;
-    providerName?: string;
-    model?: string;
-    baseUrl?: string;
-    items?: ContextPreview["items"];
+const providerStreamProtocols = new Set<ProviderStreamProtocol>([
+  "openai_sse",
+  "ollama_ndjson",
+  "anthropic_sse",
+  "google_sse",
+]);
+
+const providerAuthPlacements = new Set<ProviderAuthPlacement>([
+  "none",
+  "bearer_header",
+  "api_key_header",
+  "query_param",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function normalizeProviderSnapshot(
+  value: Record<string, unknown>,
+): LockedSnapshotProviderMetadata {
+  const providerId = typeof value.providerId === "string" ? value.providerId.trim() : "";
+  const templateRevision = value.templateRevision;
+  const streamProtocol = value.streamProtocol;
+  const authPlacement = value.authPlacement;
+  const authHeaderName = value.authHeaderName;
+  const parameters = isRecord(value.parameters) ? { ...value.parameters } : {};
+  const hasHeaderName = typeof authHeaderName === "string" && authHeaderName.trim().length > 0;
+  const resolved = Boolean(providerId)
+    && typeof templateRevision === "number"
+    && Number.isInteger(templateRevision)
+    && templateRevision > 0
+    && typeof streamProtocol === "string"
+    && providerStreamProtocols.has(streamProtocol as ProviderStreamProtocol)
+    && typeof authPlacement === "string"
+    && providerAuthPlacements.has(authPlacement as ProviderAuthPlacement)
+    && isStringRecord(value.additionalHeaders)
+    && isRecord(value.parameters)
+    && (authPlacement === "none" || hasHeaderName);
+
+  if (!resolved) {
+    return {
+      providerMetadataStatus: "legacy",
+      providerId: "legacy",
+      templateRevision: 0,
+      streamProtocol: "unknown",
+      authPlacement: "unknown",
+      authHeaderName: null,
+      additionalHeaders: {},
+      parameters,
+    };
+  }
+
+  return {
+    providerMetadataStatus: "resolved",
+    providerId,
+    templateRevision: templateRevision as number,
+    streamProtocol: streamProtocol as ProviderStreamProtocol,
+    authPlacement: authPlacement as ProviderAuthPlacement,
+    authHeaderName: hasHeaderName ? (authHeaderName as string).trim() : null,
+    additionalHeaders: { ...(value.additionalHeaders as Record<string, string>) },
+    parameters,
   };
-  if (!value.canonicalHash) return null;
+}
+
+function normalizeSnapshot(raw: unknown): LockedSnapshot | null {
+  if (!isRecord(raw)) return null;
+  const value = raw;
+  if (typeof value.canonicalHash !== "string" || !value.canonicalHash) return null;
+  const providerSnapshot = normalizeProviderSnapshot(value);
   return {
     canonicalHash: value.canonicalHash,
-    createdAt: value.createdAt ?? Date.now(),
-    providerName: value.providerName ?? "Provider",
-    model: value.model ?? "model",
-    baseUrl: value.baseUrl ?? "",
-    items: (value.items ?? []).map(toInspectorItem),
+    createdAt: typeof value.createdAt === "number" || typeof value.createdAt === "string"
+      ? value.createdAt
+      : Date.now(),
+    ...providerSnapshot,
+    providerName: typeof value.providerName === "string" ? value.providerName : "Provider",
+    model: typeof value.model === "string" ? value.model : "model",
+    baseUrl: typeof value.baseUrl === "string" ? value.baseUrl : "",
+    items: Array.isArray(value.items)
+      ? (value.items as ContextPreview["items"]).map(toInspectorItem)
+      : [],
   };
 }
 

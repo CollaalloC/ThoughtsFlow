@@ -1,4 +1,4 @@
-use std::{fmt, future::Future, pin::Pin};
+use std::{collections::BTreeMap, fmt, future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -12,9 +12,19 @@ pub enum ProviderDialect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "header_name", rename_all = "snake_case")]
+pub enum CredentialPlacement {
+    None,
+    BearerHeader,
+    Header(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderTarget {
     pub dialect: ProviderDialect,
     pub base_url: String,
+    pub credential_placement: CredentialPlacement,
+    pub additional_headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

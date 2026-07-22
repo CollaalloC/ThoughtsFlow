@@ -182,14 +182,15 @@ impl SqliteRepository {
     ) -> RepositoryResult<ProviderProfileRecord> {
         sqlx::query(
             "INSERT INTO provider_profile \
-             (id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             (id, provider_id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
-                 name = excluded.name, dialect = excluded.dialect, \
+                 provider_id = excluded.provider_id, name = excluded.name, dialect = excluded.dialect, \
                  base_url = excluded.base_url, default_model = excluded.default_model, \
                  parameters_json = excluded.parameters_json, updated_at = excluded.updated_at",
         )
         .bind(&profile.id)
+        .bind(&profile.provider_id)
         .bind(&profile.name)
         .bind(&profile.dialect)
         .bind(&profile.base_url)
@@ -204,7 +205,7 @@ impl SqliteRepository {
 
     pub async fn get_provider_profile(&self, id: &str) -> RepositoryResult<ProviderProfileRecord> {
         let row = sqlx::query(
-            "SELECT id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at \
+            "SELECT id, provider_id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at \
              FROM provider_profile WHERE id = ?",
         )
         .bind(id)
@@ -216,7 +217,7 @@ impl SqliteRepository {
 
     pub async fn list_provider_profiles(&self) -> RepositoryResult<Vec<ProviderProfileRecord>> {
         let rows = sqlx::query(
-            "SELECT id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at \
+            "SELECT id, provider_id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at \
              FROM provider_profile ORDER BY name COLLATE NOCASE, id",
         )
         .fetch_all(&self.pool)
@@ -494,8 +495,10 @@ impl SqliteRepository {
 
     pub async fn get_run_receipt(&self, run_id: &str) -> RepositoryResult<StoredRunReceipt> {
         let snapshot_row = sqlx::query(
-            "SELECT id, run_id, manifest_id, workspace_id, provider_profile_id, provider, model, \
-                    base_url, parameters_json, request_json, canonical_hash, created_at \
+            "SELECT id, run_id, manifest_id, workspace_id, provider_profile_id, provider_id, \
+                    template_revision, stream_protocol, auth_placement, auth_header_name, \
+                    additional_headers_json, provider, model, base_url, parameters_json, \
+                    request_json, canonical_hash, created_at \
              FROM context_snapshot WHERE run_id = ?",
         )
         .bind(run_id)
@@ -740,6 +743,15 @@ fn validate_run_start_bundle(bundle: &RunStartBundle) -> RepositoryResult<()> {
             "snapshot and manifest canonical hashes differ".into(),
         ));
     }
+    if bundle.snapshot.provider_id.is_none()
+        || bundle.snapshot.template_revision.is_none()
+        || bundle.snapshot.stream_protocol.is_none()
+        || bundle.snapshot.auth_placement.is_none()
+    {
+        return Err(RepositoryError::InvalidInput(
+            "new context snapshots require resolved Provider Template metadata".into(),
+        ));
+    }
     if let Some(turn) = &bundle.turn {
         if turn.id != bundle.run.turn_id || turn.workspace_id != bundle.run.workspace_id {
             return Err(RepositoryError::InvalidInput(
@@ -894,15 +906,23 @@ async fn insert_snapshot(
 ) -> RepositoryResult<()> {
     sqlx::query(
         "INSERT INTO context_snapshot \
-         (id, run_id, manifest_id, workspace_id, provider_profile_id, provider, model, base_url, \
-          parameters_json, request_json, canonical_hash, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, run_id, manifest_id, workspace_id, provider_profile_id, provider_id, \
+          template_revision, stream_protocol, auth_placement, auth_header_name, \
+          additional_headers_json, provider, model, base_url, parameters_json, request_json, \
+          canonical_hash, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&snapshot.id)
     .bind(&snapshot.run_id)
     .bind(&snapshot.manifest_id)
     .bind(&snapshot.workspace_id)
     .bind(&snapshot.provider_profile_id)
+    .bind(&snapshot.provider_id)
+    .bind(snapshot.template_revision)
+    .bind(&snapshot.stream_protocol)
+    .bind(&snapshot.auth_placement)
+    .bind(&snapshot.auth_header_name)
+    .bind(&snapshot.additional_headers_json)
     .bind(&snapshot.provider)
     .bind(&snapshot.model)
     .bind(&snapshot.base_url)
@@ -1001,6 +1021,7 @@ fn workspace_from_row(row: &SqliteRow) -> RepositoryResult<WorkspaceRecord> {
 fn provider_profile_from_row(row: &SqliteRow) -> RepositoryResult<ProviderProfileRecord> {
     Ok(ProviderProfileRecord {
         id: row.try_get("id")?,
+        provider_id: row.try_get("provider_id")?,
         name: row.try_get("name")?,
         dialect: row.try_get("dialect")?,
         base_url: row.try_get("base_url")?,
@@ -1062,6 +1083,12 @@ fn snapshot_from_row(row: &SqliteRow) -> RepositoryResult<ContextSnapshotRecord>
         manifest_id: row.try_get("manifest_id")?,
         workspace_id: row.try_get("workspace_id")?,
         provider_profile_id: row.try_get("provider_profile_id")?,
+        provider_id: row.try_get("provider_id")?,
+        template_revision: row.try_get("template_revision")?,
+        stream_protocol: row.try_get("stream_protocol")?,
+        auth_placement: row.try_get("auth_placement")?,
+        auth_header_name: row.try_get("auth_header_name")?,
+        additional_headers_json: row.try_get("additional_headers_json")?,
         provider: row.try_get("provider")?,
         model: row.try_get("model")?,
         base_url: row.try_get("base_url")?,

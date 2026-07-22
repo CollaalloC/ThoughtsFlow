@@ -10,6 +10,10 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
+import type {
+  ProviderAuthPlacement,
+  ProviderStreamProtocol,
+} from "../../shared/contracts";
 import { ProviderDestination } from "../../shared/ui";
 import "./context-inspector.css";
 
@@ -26,6 +30,28 @@ export type ContextInspectorItem = {
   pinned: boolean;
 };
 
+export type LockedSnapshotProviderMetadata =
+  | {
+      providerMetadataStatus: "resolved";
+      providerId: string;
+      templateRevision: number;
+      streamProtocol: ProviderStreamProtocol;
+      authPlacement: ProviderAuthPlacement;
+      authHeaderName: string | null;
+      additionalHeaders: Record<string, string>;
+      parameters: Record<string, unknown>;
+    }
+  | {
+      providerMetadataStatus: "legacy";
+      providerId: "legacy";
+      templateRevision: 0;
+      streamProtocol: "unknown";
+      authPlacement: "unknown";
+      authHeaderName: null;
+      additionalHeaders: Record<string, never>;
+      parameters: Record<string, unknown>;
+    };
+
 export type LockedSnapshot = {
   canonicalHash: string;
   createdAt: number | string;
@@ -33,7 +59,7 @@ export type LockedSnapshot = {
   model: string;
   baseUrl: string;
   items: ContextInspectorItem[];
-};
+} & LockedSnapshotProviderMetadata;
 
 export type InspectorRun = {
   id: string;
@@ -81,6 +107,35 @@ function dateTime(value: number | string) {
       }).format(date);
 }
 
+const protocolLabels: Record<ProviderStreamProtocol, string> = {
+  openai_sse: "OpenAI SSE",
+  ollama_ndjson: "Ollama NDJSON",
+  anthropic_sse: "Anthropic SSE",
+  google_sse: "Google SSE",
+};
+
+const sensitiveHeaderPattern = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|api-key)$/i;
+
+function authLabel(snapshot: Extract<LockedSnapshot, { providerMetadataStatus: "resolved" }>) {
+  if (snapshot.authPlacement === "none") return "无认证";
+  if (snapshot.authPlacement === "bearer_header") {
+    return `${snapshot.authHeaderName ?? "Authorization"}: Bearer …`;
+  }
+  if (snapshot.authPlacement === "api_key_header") {
+    return `${snapshot.authHeaderName ?? "API-Key"}: API Key …`;
+  }
+  if (snapshot.authPlacement === "query_param") {
+    return `${snapshot.authHeaderName ?? "key"} 查询参数: API Key …`;
+  }
+  return "认证元数据未记录";
+}
+
+function parameterValue(value: unknown) {
+  if (typeof value === "string") return value;
+  const serialized = JSON.stringify(value);
+  return serialized ?? String(value);
+}
+
 export function ContextInspector({
   open,
   items,
@@ -125,6 +180,14 @@ export function ContextInspector({
       }
     : null;
   const displayedProvider = tab === "snapshot" && snapshotProvider ? snapshotProvider : provider;
+  const visibleAdditionalHeaders = snapshot
+    ? Object.entries(snapshot.additionalHeaders)
+        .filter(([name]) => !sensitiveHeaderPattern.test(name))
+        .sort(([left], [right]) => left.localeCompare(right))
+    : [];
+  const effectiveParameters = snapshot
+    ? Object.entries(snapshot.parameters).sort(([left], [right]) => left.localeCompare(right))
+    : [];
 
   const selectTab = (nextTab: InspectorTab) => {
     setTab(nextTab);
@@ -208,6 +271,58 @@ export function ContextInspector({
               <>
                 <span><FileCheck2 size={14} /> {dateTime(snapshot.createdAt)} 锁定</span>
                 <code>{snapshot.canonicalHash}</code>
+                {snapshot.providerMetadataStatus === "legacy" ? (
+                  <p className="context-inspector__legacy-provider">
+                    旧版快照：Provider 协议与认证元数据未记录
+                  </p>
+                ) : (
+                  <div className="context-inspector__receipt-details">
+                    <dl aria-label="Provider 快照">
+                      <div>
+                        <dt>模板</dt>
+                        <dd>{snapshot.providerId} r{snapshot.templateRevision}</dd>
+                      </div>
+                      <div>
+                        <dt>流协议</dt>
+                        <dd>{protocolLabels[snapshot.streamProtocol]}</dd>
+                      </div>
+                      <div>
+                        <dt>认证</dt>
+                        <dd>{authLabel(snapshot)}</dd>
+                      </div>
+                    </dl>
+
+                    {visibleAdditionalHeaders.length > 0 && (
+                      <section aria-label="静态请求头">
+                        <strong>静态请求头</strong>
+                        <dl>
+                          {visibleAdditionalHeaders.map(([name, value]) => (
+                            <div key={name}>
+                              <dt>{name}</dt>
+                              <dd>{value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </section>
+                    )}
+
+                  </div>
+                )}
+                {effectiveParameters.length > 0 && (
+                  <div className="context-inspector__receipt-details">
+                    <section aria-label="有效模型参数">
+                      <strong>有效模型参数</strong>
+                      <dl>
+                        {effectiveParameters.map(([name, value]) => (
+                          <div key={name}>
+                            <dt>{name}</dt>
+                            <dd>{parameterValue(value)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </section>
+                  </div>
+                )}
                 <ProviderDestination {...snapshotProvider!} />
               </>
             ) : (

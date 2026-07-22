@@ -9,11 +9,13 @@ import type {
   ExportResult,
   InspectContextInput,
   ProviderProfile,
+  ProviderTemplate,
   RetryRunInput,
   RouteProjection,
   RunEvent,
   RunHandle,
   RunSnapshot,
+  SaveProviderProfileInput,
   WorkspaceDetail,
   WorkspaceSummary,
 } from "../shared/contracts";
@@ -67,9 +69,11 @@ export interface DesktopBridge {
     reason: string;
   }): Promise<DecisionMark>;
   exportDecisionPacket(input: { workspaceId: string }): Promise<ExportResult>;
+  listProviderTemplates(): Promise<ProviderTemplate[]>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(
-    input: Omit<ProviderProfile, "id"> & { id?: string },
+    input: SaveProviderProfileInput,
+    sessionCredential?: string,
   ): Promise<ProviderProfile>;
   setSessionCredential(input: {
     providerProfileId: string;
@@ -180,8 +184,15 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
     compareRuns: (input) => request("compare_runs", { input }),
     markDecision: (input) => request("mark_decision", { input }),
     exportDecisionPacket: (input) => request("export_decision_packet", { input }),
+    listProviderTemplates: () => request("list_provider_templates"),
     listProviderProfiles: () => request("list_provider_profiles"),
-    saveProviderProfile: (input) => request("save_provider_profile", { input }),
+    saveProviderProfile: (input, sessionCredential) =>
+      request("save_provider_profile", {
+        input: {
+          ...input,
+          ...(sessionCredential === undefined ? {} : { sessionCredential }),
+        },
+      }),
     setSessionCredential: (input) => request("set_session_credential", { input }),
     testProviderConnection: (input) => request("test_provider_connection", { input }),
     subscribeToRunEvents: (listener) => {
@@ -195,6 +206,7 @@ export type {
   CompareRunsResult,
   ContextPreview,
   ProviderProfile,
+  ProviderTemplate,
   RouteProjection,
   RunEvent,
   RunSnapshot,

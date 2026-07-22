@@ -5,7 +5,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -18,9 +18,9 @@ use crate::{
         Workspace,
     },
     ports::provider::{
-        CanonicalMessage, CanonicalRequest, MessageRole as ProviderMessageRole,
-        ProviderConnectionTester, ProviderDialect, ProviderGateway, ProviderInvocation,
-        ProviderTarget, RunEvent, SessionCredential, Usage,
+        CanonicalMessage, CanonicalRequest, CredentialPlacement,
+        MessageRole as ProviderMessageRole, ProviderConnectionTester, ProviderDialect,
+        ProviderGateway, ProviderInvocation, ProviderTarget, RunEvent, SessionCredential, Usage,
     },
     ports::{
         CheckpointOutcome, DecisionPacketWriter, PersistRunStart, RepositoryPort,
@@ -105,6 +105,7 @@ impl DefaultApplicationBackend {
         self.repository
             .save_provider_profile(ProviderProfile {
                 id: DEFAULT_PROVIDER_ID.into(),
+                provider_id: "ollama".into(),
                 name: "Local Ollama".into(),
                 dialect: domain::ProviderDialect::Ollama,
                 base_url: "http://127.0.0.1:11434".into(),
@@ -793,7 +794,29 @@ fn receipt_view(receipt: domain::ContextSnapshot) -> AppResult<RunSnapshotView> 
         run_id: receipt.run_id,
         canonical_hash: receipt.manifest.canonical_hash,
         created_at: timestamp_view(receipt.created_at),
+        provider_id: receipt.provider.provider_id,
+        template_revision: receipt.provider.template_revision,
         provider_name: receipt.provider.provider_name,
+        stream_protocol: receipt
+            .provider
+            .stream_protocol
+            .map(|protocol| match protocol {
+                domain::StreamProtocol::OpenAiSse => ProviderStreamProtocolView::OpenAiSse,
+                domain::StreamProtocol::OllamaNdjson => ProviderStreamProtocolView::OllamaNdjson,
+                domain::StreamProtocol::AnthropicSse => ProviderStreamProtocolView::AnthropicSse,
+                domain::StreamProtocol::GoogleSse => ProviderStreamProtocolView::GoogleSse,
+            }),
+        auth_placement: receipt
+            .provider
+            .auth_placement
+            .map(|placement| match placement {
+                domain::AuthPlacement::None => ProviderAuthPlacementView::None,
+                domain::AuthPlacement::BearerHeader => ProviderAuthPlacementView::BearerHeader,
+                domain::AuthPlacement::ApiKeyHeader => ProviderAuthPlacementView::ApiKeyHeader,
+                domain::AuthPlacement::QueryParam => ProviderAuthPlacementView::QueryParam,
+            }),
+        auth_header_name: receipt.provider.auth_header_name,
+        additional_headers: receipt.provider.additional_headers,
         model: receipt.provider.model,
         base_url: receipt.provider.base_url,
         parameters,
@@ -840,6 +863,7 @@ fn provider_profile_view(record: ProviderProfile) -> AppResult<ProviderProfileVi
         .unwrap_or(false);
     Ok(ProviderProfileView {
         id: record.id,
+        provider_id: record.provider_id,
         name: record.name,
         dialect: match record.dialect {
             domain::ProviderDialect::OpenAiCompatible => ProviderDialectView::OpenaiCompatible,
@@ -852,17 +876,63 @@ fn provider_profile_view(record: ProviderProfile) -> AppResult<ProviderProfileVi
     })
 }
 
+fn provider_template_view(record: &domain::ProviderTemplate) -> ProviderTemplateView {
+    ProviderTemplateView {
+        provider_id: record.provider_id.into(),
+        revision: record.revision,
+        display_name: record.display_name.into(),
+        default_base_url: record.default_base_url.into(),
+        protocol: ProtocolProfileView {
+            stream_protocol: match record.protocol.stream_protocol {
+                domain::StreamProtocol::OpenAiSse => ProviderStreamProtocolView::OpenAiSse,
+                domain::StreamProtocol::OllamaNdjson => ProviderStreamProtocolView::OllamaNdjson,
+                domain::StreamProtocol::AnthropicSse => ProviderStreamProtocolView::AnthropicSse,
+                domain::StreamProtocol::GoogleSse => ProviderStreamProtocolView::GoogleSse,
+            },
+            auth_placement: match record.protocol.auth_placement {
+                domain::AuthPlacement::None => ProviderAuthPlacementView::None,
+                domain::AuthPlacement::BearerHeader => ProviderAuthPlacementView::BearerHeader,
+                domain::AuthPlacement::ApiKeyHeader => ProviderAuthPlacementView::ApiKeyHeader,
+                domain::AuthPlacement::QueryParam => ProviderAuthPlacementView::QueryParam,
+            },
+            auth_header_name: record.protocol.auth_header_name.map(str::to_owned),
+            models_endpoint: record.protocol.models_endpoint.map(str::to_owned),
+            requires_additional_headers: record.protocol.requires_additional_headers,
+            additional_headers: record
+                .protocol
+                .additional_headers
+                .iter()
+                .map(|header| (header.name.into(), header.value.into()))
+                .collect(),
+        },
+        runtime_available: record.runtime_available,
+    }
+}
+
 fn domain_provider_snapshot(record: &ProviderProfile) -> AppResult<domain::ProviderSnapshot> {
-    let parameters = record
-        .parameters
-        .iter()
-        .filter(|(key, _)| key.as_str() != INTERNAL_DEFAULT_KEY)
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let (template, template_dialect) = runnable_template(&record.provider_id)?;
+    if record.dialect != template_dialect {
+        return Err(AppError::internal(
+            "invalid_provider_profile",
+            "Provider Profile dialect does not match its template",
+        ));
+    }
+    let parameters = effective_provider_parameters(record)?.stored_values();
     Ok(domain::ProviderSnapshot {
         profile_id: record.id.clone(),
+        provider_id: Some(record.provider_id.clone()),
+        template_revision: Some(template.revision),
         provider_name: record.name.clone(),
         dialect: record.dialect,
+        stream_protocol: Some(template.protocol.stream_protocol),
+        auth_placement: Some(template.protocol.auth_placement),
+        auth_header_name: template.protocol.auth_header_name.map(str::to_owned),
+        additional_headers: template
+            .protocol
+            .additional_headers
+            .iter()
+            .map(|header| (header.name.into(), header.value.into()))
+            .collect(),
         base_url: record.base_url.clone(),
         model: record.model.clone(),
         parameters,
@@ -873,13 +943,121 @@ fn parse_parameter_value(value: &str) -> Value {
     serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.into()))
 }
 
-fn provider_parameters(record: &ProviderProfile) -> AppResult<Map<String, Value>> {
-    Ok(record
+#[derive(Clone, Debug, Default, PartialEq)]
+struct EffectiveProviderParameters {
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    max_output_tokens: Option<u32>,
+    stop: Vec<String>,
+}
+
+impl EffectiveProviderParameters {
+    fn stored_values(&self) -> BTreeMap<String, String> {
+        let mut values = BTreeMap::new();
+        if let Some(value) = self.temperature {
+            values.insert("temperature".into(), json!(value).to_string());
+        }
+        if let Some(value) = self.top_p {
+            values.insert("top_p".into(), json!(value).to_string());
+        }
+        if let Some(value) = self.max_output_tokens {
+            values.insert("max_output_tokens".into(), json!(value).to_string());
+        }
+        if !self.stop.is_empty() {
+            values.insert("stop".into(), json!(self.stop).to_string());
+        }
+        values
+    }
+}
+
+fn invalid_provider_parameter(name: &str, expectation: &str) -> AppError {
+    AppError::validation(
+        "invalid_provider_parameters",
+        format!("Provider parameter `{name}` {expectation}"),
+    )
+    .with_details(json!({ "parameter": name }))
+}
+
+fn normalized_f32_parameter(name: &str, value: Value) -> AppResult<f32> {
+    let value = value
+        .as_f64()
+        .ok_or_else(|| invalid_provider_parameter(name, "must be a JSON number"))?;
+    let normalized = value as f32;
+    if !normalized.is_finite() {
+        return Err(invalid_provider_parameter(
+            name,
+            "must fit in a finite 32-bit floating-point value",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_provider_parameter_values(
+    parameters: BTreeMap<String, Value>,
+) -> AppResult<EffectiveProviderParameters> {
+    let mut effective = EffectiveProviderParameters::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "temperature" => {
+                effective.temperature = Some(normalized_f32_parameter(&name, value)?);
+            }
+            "top_p" => {
+                effective.top_p = Some(normalized_f32_parameter(&name, value)?);
+            }
+            "max_output_tokens" => {
+                effective.max_output_tokens = Some(
+                    value
+                        .as_u64()
+                        .filter(|value| *value > 0)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            invalid_provider_parameter(
+                                &name,
+                                "must be a positive 32-bit JSON integer",
+                            )
+                        })?,
+                );
+            }
+            "stop" => {
+                let values = value.as_array().ok_or_else(|| {
+                    invalid_provider_parameter(&name, "must be an array of strings")
+                })?;
+                effective.stop = values
+                    .iter()
+                    .map(|value| {
+                        value.as_str().map(str::to_owned).ok_or_else(|| {
+                            invalid_provider_parameter(&name, "must be an array of strings")
+                        })
+                    })
+                    .collect::<AppResult<_>>()?;
+            }
+            _ => {
+                return Err(invalid_provider_parameter(
+                    &name,
+                    "is not supported; allowed parameters are temperature, top_p, max_output_tokens, and stop",
+                ));
+            }
+        }
+    }
+    Ok(effective)
+}
+
+fn effective_provider_parameters(
+    record: &ProviderProfile,
+) -> AppResult<EffectiveProviderParameters> {
+    let parameters = record
         .parameters
         .iter()
-        .filter(|(key, _)| key.as_str() != INTERNAL_DEFAULT_KEY)
-        .map(|(key, value)| (key.clone(), parse_parameter_value(value)))
-        .collect())
+        .filter(|(name, _)| name.as_str() != INTERNAL_DEFAULT_KEY)
+        .map(|(name, value)| {
+            serde_json::from_str(value)
+                .map(|value| (name.clone(), value))
+                .map_err(|_| {
+                    invalid_provider_parameter(name, "must contain a canonical JSON value")
+                })
+        })
+        .collect::<AppResult<BTreeMap<_, _>>>()?;
+    normalize_provider_parameter_values(parameters)
 }
 
 fn decision_view(record: DecisionMark) -> AppResult<DecisionMarkView> {
@@ -987,6 +1165,95 @@ fn provider_dialect(value: domain::ProviderDialect) -> ProviderDialect {
     }
 }
 
+fn provider_target(snapshot: &domain::ProviderSnapshot) -> AppResult<ProviderTarget> {
+    snapshot.require_resolved_metadata().map_err(domain_error)?;
+    let dialect = provider_dialect(snapshot.dialect);
+    let stream_protocol = snapshot.stream_protocol.ok_or_else(|| {
+        AppError::internal(
+            "unresolved_provider_snapshot",
+            "Provider snapshot stream protocol is unresolved",
+        )
+    })?;
+    let template_dialect = match stream_protocol {
+        domain::StreamProtocol::OpenAiSse => ProviderDialect::OpenAiChatCompletions,
+        domain::StreamProtocol::OllamaNdjson => ProviderDialect::OllamaChat,
+        domain::StreamProtocol::AnthropicSse | domain::StreamProtocol::GoogleSse => {
+            return Err(AppError::validation(
+                "provider_protocol_unavailable",
+                "The selected Provider protocol is not available yet",
+            ));
+        }
+    };
+    if dialect != template_dialect {
+        return Err(AppError::internal(
+            "invalid_provider_profile",
+            "Provider Profile dialect does not match its template",
+        ));
+    }
+    let auth_placement = snapshot.auth_placement.ok_or_else(|| {
+        AppError::internal(
+            "unresolved_provider_snapshot",
+            "Provider snapshot authentication placement is unresolved",
+        )
+    })?;
+    let credential_placement = match auth_placement {
+        domain::AuthPlacement::None => CredentialPlacement::None,
+        domain::AuthPlacement::BearerHeader => CredentialPlacement::BearerHeader,
+        domain::AuthPlacement::ApiKeyHeader => {
+            let header_name = snapshot.auth_header_name.as_deref().ok_or_else(|| {
+                AppError::internal(
+                    "invalid_provider_template",
+                    "API key header placement requires a header name",
+                )
+            })?;
+            CredentialPlacement::Header(header_name.into())
+        }
+        domain::AuthPlacement::QueryParam => {
+            return Err(AppError::validation(
+                "provider_auth_unavailable",
+                "Query-string Provider credentials are not supported",
+            ));
+        }
+    };
+    Ok(ProviderTarget {
+        dialect,
+        base_url: snapshot.base_url.clone(),
+        credential_placement,
+        additional_headers: snapshot.additional_headers.clone(),
+    })
+}
+
+fn runnable_template(
+    provider_id: &str,
+) -> AppResult<(&'static domain::ProviderTemplate, domain::ProviderDialect)> {
+    let template = domain::provider_template(provider_id).ok_or_else(|| {
+        AppError::validation(
+            "unknown_provider_template",
+            format!("Unknown Provider Template `{provider_id}`"),
+        )
+    })?;
+    if !template.runtime_available {
+        return Err(AppError::validation(
+            "provider_protocol_unavailable",
+            format!(
+                "{} streaming support is not available yet",
+                template.display_name
+            ),
+        ));
+    }
+    let dialect = match template.protocol.stream_protocol {
+        domain::StreamProtocol::OpenAiSse => domain::ProviderDialect::OpenAiCompatible,
+        domain::StreamProtocol::OllamaNdjson => domain::ProviderDialect::Ollama,
+        domain::StreamProtocol::AnthropicSse | domain::StreamProtocol::GoogleSse => {
+            return Err(AppError::validation(
+                "provider_protocol_unavailable",
+                "The selected Provider protocol is not available yet",
+            ));
+        }
+    };
+    Ok((template, dialect))
+}
+
 fn provider_message_role(role: MessageRole) -> ProviderMessageRole {
     match role {
         MessageRole::System => ProviderMessageRole::System,
@@ -1083,32 +1350,21 @@ fn usage_map(usage: &Usage) -> BTreeMap<String, u64> {
     values
 }
 
-fn parameter_f32(parameters: &Map<String, Value>, name: &str) -> Option<f32> {
-    parameters
-        .get(name)
-        .and_then(Value::as_f64)
-        .map(|value| value as f32)
-}
-
-fn parameter_u32(parameters: &Map<String, Value>, name: &str) -> Option<u32> {
-    parameters
-        .get(name)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-}
-
-fn parameter_strings(parameters: &Map<String, Value>, name: &str) -> Vec<String> {
-    parameters
-        .get(name)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+fn canonical_provider_request(
+    run_id: String,
+    model: String,
+    messages: Vec<CanonicalMessage>,
+    parameters: &EffectiveProviderParameters,
+) -> CanonicalRequest {
+    CanonicalRequest {
+        run_id,
+        model,
+        messages,
+        temperature: parameters.temperature,
+        top_p: parameters.top_p,
+        max_output_tokens: parameters.max_output_tokens,
+        stop: parameters.stop.clone(),
+    }
 }
 
 fn chars_to_tokens(characters: usize) -> u64 {
@@ -1334,6 +1590,15 @@ impl ApplicationBackend for DefaultApplicationBackend {
         })
     }
 
+    fn list_provider_templates(&self) -> AppFuture<'_, Vec<ProviderTemplateView>> {
+        Box::pin(async move {
+            Ok(domain::provider_templates()
+                .iter()
+                .map(provider_template_view)
+                .collect())
+        })
+    }
+
     fn save_provider_profile(
         &self,
         input: SaveProviderProfileInput,
@@ -1507,6 +1772,8 @@ impl DefaultApplicationBackend {
             .get_provider_profile(&provider_profile_id)
             .await
             .map_err(repository_port_error)?;
+        let resolved_provider = domain_provider_snapshot(&profile)?;
+        let target = provider_target(&resolved_provider)?;
         let graph = self
             .repository
             .load_conversation_graph(&workspace_id)
@@ -1524,7 +1791,7 @@ impl DefaultApplicationBackend {
                     parent_run_id: parent_run_id.clone(),
                     current_prompt: prompt.clone(),
                     overrides: Self::compiler_overrides(&override_items),
-                    provider: Some(domain_provider_snapshot(&profile)?),
+                    provider: Some(resolved_provider.clone()),
                 },
                 &preview_hash,
             )
@@ -1542,7 +1809,7 @@ impl DefaultApplicationBackend {
             })?,
         };
         let snapshot_id = Uuid::new_v4().to_string();
-        let parameters = provider_parameters(&profile)?;
+        let parameters = effective_provider_parameters(&profile)?;
         let content_blocks =
             content_blocks_for_manifest(&workspace_id, &compiled.manifest.items, now);
         let turn = new_turn_id.map(|id| Turn {
@@ -1564,7 +1831,7 @@ impl DefaultApplicationBackend {
             id: snapshot_id,
             run_id: run_id.clone(),
             manifest: compiled.manifest.clone(),
-            provider: domain_provider_snapshot(&profile)?,
+            provider: resolved_provider.clone(),
             created_at: now,
         };
         let branch_pointer = turn.as_ref().map(|turn| BranchPointer {
@@ -1594,28 +1861,23 @@ impl DefaultApplicationBackend {
                     .map(|value| SessionCredential::new(value.to_owned()))
             })
             .transpose()?;
+        let request = canonical_provider_request(
+            run_id.clone(),
+            profile.model,
+            compiled
+                .messages
+                .into_iter()
+                .map(|message| CanonicalMessage {
+                    role: provider_message_role(message.role),
+                    content: message.content,
+                })
+                .collect(),
+            &parameters,
+        );
         let invocation = ProviderInvocation {
-            target: ProviderTarget {
-                dialect: provider_dialect(profile.dialect),
-                base_url: profile.base_url,
-            },
+            target,
             credential,
-            request: CanonicalRequest {
-                run_id: run_id.clone(),
-                model: profile.model,
-                messages: compiled
-                    .messages
-                    .into_iter()
-                    .map(|message| CanonicalMessage {
-                        role: provider_message_role(message.role),
-                        content: message.content,
-                    })
-                    .collect(),
-                temperature: parameter_f32(&parameters, "temperature"),
-                top_p: parameter_f32(&parameters, "top_p"),
-                max_output_tokens: parameter_u32(&parameters, "max_output_tokens"),
-                stop: parameter_strings(&parameters, "stop"),
-            },
+            request,
         };
         let cancellation = CancellationToken::new();
         self.run_registry
@@ -1965,25 +2227,21 @@ impl DefaultApplicationBackend {
         let now = now_millis();
         let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let existing = self.repository.get_provider_profile(&id).await.ok();
-        let mut parameters = input.parameters.unwrap_or_default();
-        parameters.insert(INTERNAL_DEFAULT_KEY.into(), Value::Bool(input.is_default));
+        let (_, dialect) = runnable_template(&input.provider_id)?;
+        let effective_parameters =
+            normalize_provider_parameter_values(input.parameters.unwrap_or_default())?;
+        let mut parameters = effective_parameters.stored_values();
+        parameters.insert(INTERNAL_DEFAULT_KEY.into(), input.is_default.to_string());
         let record = self
             .repository
             .save_provider_profile(ProviderProfile {
                 id,
+                provider_id: input.provider_id,
                 name: input.name,
-                dialect: match input.dialect {
-                    ProviderDialectView::OpenaiCompatible => {
-                        domain::ProviderDialect::OpenAiCompatible
-                    }
-                    ProviderDialectView::Ollama => domain::ProviderDialect::Ollama,
-                },
+                dialect,
                 base_url: input.base_url,
                 model: input.model,
-                parameters: parameters
-                    .into_iter()
-                    .map(|(key, value)| (key, value.to_string()))
-                    .collect(),
+                parameters,
                 created_at: existing.map(|profile| profile.created_at).unwrap_or(now),
                 updated_at: now,
             })
@@ -2009,15 +2267,11 @@ impl DefaultApplicationBackend {
                     .map(|secret| SessionCredential::new(secret.to_owned()))
             })
             .transpose()?;
+        let resolved_provider = domain_provider_snapshot(&profile)?;
+        let target = provider_target(&resolved_provider)?;
         let response = self
             .connection_tester
-            .test(
-                ProviderTarget {
-                    dialect: provider_dialect(profile.dialect),
-                    base_url: profile.base_url,
-                },
-                credential,
-            )
+            .test(target, credential)
             .await
             .map_err(|error| AppError {
                 code: error.code().into(),
@@ -2176,5 +2430,144 @@ mod tests {
             ),
             "降低迁移风险"
         );
+    }
+
+    #[test]
+    fn rust_authority_rejects_unknown_and_not_yet_runnable_templates() {
+        assert_eq!(
+            runnable_template("missing")
+                .expect_err("unknown templates must be rejected")
+                .code,
+            "unknown_provider_template"
+        );
+        assert_eq!(
+            runnable_template("anthropic")
+                .expect_err("templates cannot run before their protocol exists")
+                .code,
+            "provider_protocol_unavailable"
+        );
+        assert_eq!(
+            runnable_template("openrouter").unwrap().1,
+            domain::ProviderDialect::OpenAiCompatible
+        );
+
+        let unavailable_profile = ProviderProfile {
+            id: "profile-anthropic".into(),
+            provider_id: "anthropic".into(),
+            name: "Anthropic".into(),
+            dialect: domain::ProviderDialect::OpenAiCompatible,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude".into(),
+            parameters: BTreeMap::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        assert_eq!(
+            domain_provider_snapshot(&unavailable_profile)
+                .expect_err("context inspection, connection tests, and runs must fail closed")
+                .code,
+            "provider_protocol_unavailable"
+        );
+    }
+
+    #[test]
+    fn provider_parameters_reject_unknown_names_and_invalid_shapes() {
+        let invalid = [
+            BTreeMap::from([("unknown".into(), json!(true))]),
+            BTreeMap::from([("temperature".into(), json!("0.7"))]),
+            BTreeMap::from([("top_p".into(), json!(false))]),
+            BTreeMap::from([("max_output_tokens".into(), json!(0))]),
+            BTreeMap::from([("max_output_tokens".into(), json!(1.5))]),
+            BTreeMap::from([("max_output_tokens".into(), json!(u64::from(u32::MAX) + 1))]),
+            BTreeMap::from([("stop".into(), json!(["END", 2]))]),
+            BTreeMap::from([(INTERNAL_DEFAULT_KEY.into(), json!(true))]),
+        ];
+
+        for parameters in invalid {
+            let error = normalize_provider_parameter_values(parameters)
+                .expect_err("invalid Provider parameters must be rejected");
+            assert_eq!(error.code, "invalid_provider_parameters");
+            assert!(!error.retryable);
+        }
+
+        let persisted = ProviderProfile {
+            id: "profile-legacy".into(),
+            provider_id: "openai".into(),
+            name: "Legacy".into(),
+            dialect: domain::ProviderDialect::OpenAiCompatible,
+            base_url: "https://api.openai.com/v1".into(),
+            model: "model-1".into(),
+            parameters: BTreeMap::from([("temperature".into(), "not-json".into())]),
+            created_at: 1,
+            updated_at: 1,
+        };
+        assert_eq!(
+            domain_provider_snapshot(&persisted)
+                .expect_err("invalid persisted values must not reach a Receipt or request")
+                .code,
+            "invalid_provider_parameters"
+        );
+    }
+
+    #[test]
+    fn normalized_provider_parameters_are_the_exact_canonical_request_values() {
+        let effective = normalize_provider_parameter_values(BTreeMap::from([
+            ("temperature".into(), json!(0.123_456_789_f64)),
+            ("top_p".into(), json!(0.8)),
+            ("max_output_tokens".into(), json!(4096)),
+            ("stop".into(), json!(["END", "STOP"])),
+        ]))
+        .unwrap();
+        let stored = effective.stored_values();
+        let mut profile_parameters = stored.clone();
+        profile_parameters.insert(INTERNAL_DEFAULT_KEY.into(), "true".into());
+        let profile = ProviderProfile {
+            id: "profile-1".into(),
+            provider_id: "openai".into(),
+            name: "OpenAI".into(),
+            dialect: domain::ProviderDialect::OpenAiCompatible,
+            base_url: "https://api.openai.com/v1".into(),
+            model: "model-1".into(),
+            parameters: profile_parameters,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let receipt_provider = domain_provider_snapshot(&profile).unwrap();
+        let persisted_effective = effective_provider_parameters(&profile).unwrap();
+        let request = canonical_provider_request(
+            "run-1".into(),
+            "model-1".into(),
+            vec![CanonicalMessage {
+                role: ProviderMessageRole::User,
+                content: "question".into(),
+            }],
+            &persisted_effective,
+        );
+
+        assert_eq!(request.temperature, Some(0.123_456_79_f32));
+        assert_eq!(request.top_p, Some(0.8_f32));
+        assert_eq!(request.max_output_tokens, Some(4096));
+        assert_eq!(request.stop, ["END", "STOP"]);
+        assert_eq!(receipt_provider.parameters, stored);
+        assert_eq!(
+            stored.get("temperature"),
+            Some(&json!(request.temperature.unwrap()).to_string())
+        );
+        assert_eq!(
+            stored.get("top_p"),
+            Some(&json!(request.top_p.unwrap()).to_string())
+        );
+        assert_eq!(stored.get("max_output_tokens"), Some(&"4096".into()));
+        assert_eq!(stored.get("stop"), Some(&r#"["END","STOP"]"#.into()));
+    }
+
+    #[test]
+    fn empty_stop_list_is_normalized_to_an_absent_effective_parameter() {
+        let effective =
+            normalize_provider_parameter_values(BTreeMap::from([("stop".into(), json!([]))]))
+                .unwrap();
+
+        assert!(effective.stop.is_empty());
+        assert!(!effective.stored_values().contains_key("stop"));
     }
 }

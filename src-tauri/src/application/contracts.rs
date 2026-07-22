@@ -192,7 +192,18 @@ pub struct RunSnapshotView {
     pub run_id: EntityId,
     pub canonical_hash: String,
     pub created_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_revision: Option<u16>,
     pub provider_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_protocol: Option<ProviderStreamProtocolView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_placement: Option<ProviderAuthPlacementView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_header_name: Option<String>,
+    pub additional_headers: BTreeMap<String, String>,
     pub model: String,
     pub base_url: String,
     pub parameters: BTreeMap<String, Value>,
@@ -368,10 +379,54 @@ pub enum ProviderDialectView {
     Ollama,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStreamProtocolView {
+    #[serde(rename = "openai_sse")]
+    OpenAiSse,
+    OllamaNdjson,
+    AnthropicSse,
+    GoogleSse,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthPlacementView {
+    None,
+    BearerHeader,
+    ApiKeyHeader,
+    QueryParam,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolProfileView {
+    pub stream_protocol: ProviderStreamProtocolView,
+    pub auth_placement: ProviderAuthPlacementView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_header_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_endpoint: Option<String>,
+    pub requires_additional_headers: bool,
+    pub additional_headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTemplateView {
+    pub provider_id: EntityId,
+    pub revision: u16,
+    pub display_name: String,
+    pub default_base_url: String,
+    pub protocol: ProtocolProfileView,
+    pub runtime_available: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProfileView {
     pub id: EntityId,
+    pub provider_id: EntityId,
     pub name: String,
     pub dialect: ProviderDialectView,
     pub base_url: String,
@@ -386,8 +441,8 @@ pub struct ProviderProfileView {
 pub struct SaveProviderProfileInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<EntityId>,
+    pub provider_id: EntityId,
     pub name: String,
-    pub dialect: ProviderDialectView,
     pub base_url: String,
     pub model: String,
     pub is_default: bool,
@@ -491,7 +546,12 @@ pub enum RunEventView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportDecisionPacketInput, WorkspaceSummary};
+    use std::collections::BTreeMap;
+
+    use super::{
+        ExportDecisionPacketInput, ProtocolProfileView, ProviderAuthPlacementView,
+        ProviderStreamProtocolView, ProviderTemplateView, RunSnapshotView, WorkspaceSummary,
+    };
 
     #[test]
     fn decision_packet_contract_rejects_webview_supplied_paths() {
@@ -518,5 +578,63 @@ mod tests {
 
         assert_eq!(value["goal"], "Choose a migration path");
         assert_eq!(value["systemPrompt"], "Challenge unsupported assumptions");
+    }
+
+    #[test]
+    fn provider_template_contract_uses_stable_protocol_names() {
+        let value = serde_json::to_value(ProviderTemplateView {
+            provider_id: "anthropic".into(),
+            revision: 1,
+            display_name: "Anthropic".into(),
+            default_base_url: "https://api.anthropic.com".into(),
+            protocol: ProtocolProfileView {
+                stream_protocol: ProviderStreamProtocolView::AnthropicSse,
+                auth_placement: ProviderAuthPlacementView::ApiKeyHeader,
+                auth_header_name: Some("x-api-key".into()),
+                models_endpoint: None,
+                requires_additional_headers: true,
+                additional_headers: BTreeMap::from([(
+                    "anthropic-version".into(),
+                    "2023-06-01".into(),
+                )]),
+            },
+            runtime_available: false,
+        })
+        .unwrap();
+
+        assert_eq!(value["providerId"], "anthropic");
+        assert_eq!(value["protocol"]["streamProtocol"], "anthropic_sse");
+        assert_eq!(value["protocol"]["authPlacement"], "api_key_header");
+        assert_eq!(value["protocol"]["authHeaderName"], "x-api-key");
+        assert_eq!(value["runtimeAvailable"], false);
+    }
+
+    #[test]
+    fn legacy_run_snapshot_omits_only_unresolved_provider_metadata() {
+        let value = serde_json::to_value(RunSnapshotView {
+            id: "snapshot-legacy".into(),
+            run_id: "run-legacy".into(),
+            canonical_hash: "hash-legacy".into(),
+            created_at: "2026-07-22T00:00:00Z".into(),
+            provider_id: None,
+            template_revision: None,
+            provider_name: "Legacy Ollama".into(),
+            stream_protocol: None,
+            auth_placement: None,
+            auth_header_name: None,
+            additional_headers: BTreeMap::new(),
+            model: "qwen3".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            parameters: BTreeMap::from([("temperature".into(), serde_json::json!(0.7))]),
+            items: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(value.get("providerId").is_none());
+        assert!(value.get("templateRevision").is_none());
+        assert!(value.get("streamProtocol").is_none());
+        assert!(value.get("authPlacement").is_none());
+        assert!(value.get("authHeaderName").is_none());
+        assert_eq!(value["parameters"]["temperature"], 0.7);
     }
 }

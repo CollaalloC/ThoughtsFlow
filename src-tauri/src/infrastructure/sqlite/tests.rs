@@ -10,7 +10,10 @@ use crate::{
         RunFinish as PortRunFinish, RunPersistencePort,
     },
 };
-use std::collections::BTreeMap;
+use sqlx::{ConnectOptions, Connection, migrate::Migrate};
+use std::{collections::BTreeMap, path::Path};
+
+static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 fn workspace(id: &str, title: &str) -> WorkspaceRecord {
     WorkspaceRecord {
@@ -89,6 +92,12 @@ fn root_bundle(workspace_id: &str, turn_id: &str, run_id: &str) -> RunStartBundl
             manifest_id,
             workspace_id: workspace_id.into(),
             provider_profile_id: None,
+            provider_id: Some("openai-compatible".into()),
+            template_revision: Some(1),
+            stream_protocol: Some("openai_sse".into()),
+            auth_placement: Some("bearer_header".into()),
+            auth_header_name: Some("Authorization".into()),
+            additional_headers_json: "{}".into(),
             provider: "OpenAI-compatible".into(),
             model: "test-model".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -111,7 +120,7 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 2);
+    assert_eq!(schema.version, 3);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -127,6 +136,282 @@ async fn migration_creates_the_complete_strict_schema() {
             "view_state",
             "workspace",
         ]
+    );
+}
+
+async fn create_legacy_file_database(path: &Path, schema_version: i64) {
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let mut connection = options.connect().await.expect("legacy database opens");
+
+    connection
+        .ensure_migrations_table()
+        .await
+        .expect("SQLx migration history table is created");
+    for migration in TEST_MIGRATOR
+        .iter()
+        .filter(|migration| migration.version <= schema_version)
+    {
+        connection
+            .apply(migration)
+            .await
+            .expect("legacy schema migration applies");
+    }
+
+    let applied = sqlx::query_as::<_, (i64, Vec<u8>)>(
+        "SELECT version, checksum FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("legacy migration history is readable");
+    assert_eq!(
+        applied
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        (1..=schema_version).collect::<Vec<_>>()
+    );
+    for (version, checksum) in &applied {
+        let migration = TEST_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == *version)
+            .expect("applied migration remains in the project migrator");
+        assert_eq!(
+            checksum.as_slice(),
+            migration.checksum.as_ref(),
+            "legacy migration history must contain SQLx's real checksum"
+        );
+    }
+
+    sqlx::raw_sql(
+        "INSERT INTO provider_profile \
+         (id, name, dialect, base_url, default_model, created_at, updated_at) \
+         VALUES ('provider-upgrade', 'Legacy provider', 'openai_chat_completions', \
+                 'https://example.com/v1', 'legacy-model', 1, 1); \
+         INSERT INTO workspace \
+         (id, title, system_prompt, created_at, updated_at) \
+         VALUES ('workspace-upgrade', 'Legacy workspace', 'Legacy system prompt', 1, 1); \
+         INSERT INTO content_block \
+         (id, role, content, content_hash, created_at) \
+         VALUES ('prompt-upgrade', 'user', 'hello', 'prompt-hash-upgrade', 1); \
+         INSERT INTO turn \
+         (id, workspace_id, parent_run_id, prompt_block_id, title, created_at) \
+         VALUES ('turn-upgrade', 'workspace-upgrade', NULL, 'prompt-upgrade', '', 1); \
+         INSERT INTO model_run \
+         (id, turn_id, workspace_id, provider_profile_id, model, status, output_markdown, \
+          reasoning_markdown, provider_snapshot_json, created_at, finished_at) \
+         VALUES ('run-upgrade', 'turn-upgrade', 'workspace-upgrade', 'provider-upgrade', \
+                 'legacy-model', 'completed', 'answer', '', \
+                 '{\"dialect\":\"openai_chat_completions\"}', 1, 2); \
+         INSERT INTO context_manifest \
+         (id, workspace_id, compiler_version, strategy, estimated_chars, canonical_hash, \
+          warnings_json, created_at) \
+         VALUES ('manifest-upgrade', 'workspace-upgrade', '1', \
+                 'ancestor_path_with_pins', 5, 'hash-upgrade', '[]', 1); \
+         INSERT INTO context_snapshot \
+         (id, run_id, manifest_id, workspace_id, provider_profile_id, provider, model, base_url, \
+          parameters_json, request_json, canonical_hash, created_at) \
+         VALUES ('snapshot-upgrade', 'run-upgrade', 'manifest-upgrade', 'workspace-upgrade', \
+                 'provider-upgrade', 'Legacy provider', 'legacy-model', \
+                 'https://example.com/v1', '{}', '{}', 'hash-upgrade', 1);",
+    )
+    .execute(&mut connection)
+    .await
+    .expect("legacy fixture is stored before upgrade");
+
+    connection.close().await.expect("legacy database closes");
+}
+
+async fn assert_real_file_upgrade_from(schema_version: i64) {
+    let directory = tempfile::tempdir().expect("temporary directory is created");
+    let path = directory
+        .path()
+        .join(format!("thoughsflow-v{schema_version}.sqlite"));
+    create_legacy_file_database(&path, schema_version).await;
+
+    let repository = SqliteRepository::connect(&path)
+        .await
+        .expect("production repository migrator upgrades the legacy file");
+    assert_eq!(
+        repository
+            .schema_info()
+            .await
+            .expect("schema is readable")
+            .version,
+        3
+    );
+    drop(repository);
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .foreign_keys(true);
+    let mut connection = options.connect().await.expect("upgraded database opens");
+    let applied = sqlx::query_as::<_, (i64, Vec<u8>)>(
+        "SELECT version, checksum FROM _sqlx_migrations WHERE success = 1 ORDER BY version",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("upgraded migration history is readable");
+    assert_eq!(
+        applied
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    for (version, checksum) in &applied {
+        let migration = TEST_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == *version)
+            .expect("applied migration remains in the project migrator");
+        assert_eq!(checksum.as_slice(), migration.checksum.as_ref());
+    }
+
+    let metadata = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT provider_id, template_revision, stream_protocol, auth_placement, auth_header_name \
+         FROM context_snapshot WHERE id = 'snapshot-upgrade'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("legacy Receipt is readable after upgrade");
+    assert_eq!(
+        metadata,
+        (None, None, None, None, None),
+        "upgrade must not invent Provider Template semantics for a legacy Receipt"
+    );
+
+    let immutable = sqlx::query(
+        "UPDATE context_snapshot SET provider = 'rewritten' WHERE id = 'snapshot-upgrade'",
+    )
+    .execute(&mut connection)
+    .await
+    .expect_err("the immutable Receipt trigger must survive the real upgrade");
+    assert!(
+        immutable
+            .to_string()
+            .contains("context snapshots are immutable")
+    );
+
+    connection.close().await.expect("upgraded database closes");
+}
+
+#[tokio::test]
+async fn real_file_v1_database_upgrades_through_the_production_migrator() {
+    assert_real_file_upgrade_from(1).await;
+}
+
+#[tokio::test]
+async fn real_file_v2_database_upgrades_through_the_production_migrator() {
+    assert_real_file_upgrade_from(2).await;
+}
+
+#[tokio::test]
+async fn provider_template_migration_assigns_stable_ids_to_existing_profiles() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0001_core.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_profile \
+         (id, name, dialect, base_url, default_model, created_at, updated_at) \
+         VALUES ('openai-old', 'OpenAI old', 'openai_chat_completions', 'https://example.com/v1', 'gpt', 1, 1), \
+                ('ollama-old', 'Ollama old', 'ollama_chat', 'http://127.0.0.1:11434', 'qwen3', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO workspace \
+         (id, title, system_prompt, created_at, updated_at) \
+         VALUES ('workspace-old', 'Old workspace', '', 1, 1); \
+         INSERT INTO content_block \
+         (id, role, content, content_hash, created_at) \
+         VALUES ('prompt-old', 'user', 'hello', 'prompt-hash-old', 1); \
+         INSERT INTO turn \
+         (id, workspace_id, parent_run_id, prompt_block_id, title, created_at) \
+         VALUES ('turn-old', 'workspace-old', NULL, 'prompt-old', '', 1); \
+         INSERT INTO model_run \
+         (id, turn_id, workspace_id, provider_profile_id, model, status, output_markdown, \
+          reasoning_markdown, provider_snapshot_json, created_at, finished_at) \
+         VALUES ('run-old', 'turn-old', 'workspace-old', 'openai-old', 'qwen3', 'completed', \
+                 'answer', '', '{\"dialect\":\"ollama_chat\"}', 1, 2); \
+         INSERT INTO context_manifest \
+         (id, workspace_id, compiler_version, strategy, estimated_chars, canonical_hash, \
+          warnings_json, created_at) \
+         VALUES ('manifest-old', 'workspace-old', '1', 'ancestor_path_with_pins', 5, \
+                 'hash-old', '[]', 1); \
+         INSERT INTO context_snapshot \
+         (id, run_id, manifest_id, workspace_id, provider_profile_id, provider, model, base_url, \
+          parameters_json, request_json, canonical_hash, created_at) \
+         VALUES ('snapshot-old', 'run-old', 'manifest-old', 'workspace-old', 'openai-old', \
+                 'Ollama old', 'qwen3', 'http://127.0.0.1:11434', '{}', '{}', 'hash-old', 1);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0003_provider_template.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, provider_id FROM provider_profile ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("ollama-old".into(), "ollama".into()),
+            ("openai-old".into(), "openai-compatible".into()),
+        ]
+    );
+    let snapshot = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT provider_id, template_revision, stream_protocol, auth_placement, auth_header_name \
+         FROM context_snapshot WHERE id = 'snapshot-old'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot,
+        (None, None, None, None, None),
+        "legacy Receipts must not be retroactively assigned current template semantics",
+    );
+    let immutable =
+        sqlx::query("UPDATE context_snapshot SET provider = 'rewritten' WHERE id = 'snapshot-old'")
+            .execute(&pool)
+            .await
+            .expect_err("migration must restore the immutable snapshot trigger");
+    assert!(
+        immutable
+            .to_string()
+            .contains("context snapshots are immutable")
     );
 }
 
@@ -223,6 +508,7 @@ async fn repository_port_reads_legacy_unquoted_provider_parameters() {
     repository
         .save_provider_profile(&ProviderProfileRecord {
             id: "provider-legacy".into(),
+            provider_id: "ollama".into(),
             name: "Legacy profile".into(),
             dialect: "ollama_chat".into(),
             base_url: "http://127.0.0.1:11434".into(),
@@ -615,6 +901,7 @@ async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
 
     let profile = ProviderProfile {
         id: "provider-a".into(),
+        provider_id: "ollama".into(),
         name: "Local model".into(),
         dialect: ProviderDialect::Ollama,
         base_url: "http://127.0.0.1:11434".into(),
@@ -626,6 +913,12 @@ async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
     RepositoryPort::save_provider_profile(&repository, profile.clone())
         .await
         .unwrap();
+    assert_eq!(
+        RepositoryPort::get_provider_profile(&repository, &profile.id)
+            .await
+            .unwrap(),
+        profile
+    );
 
     let turn = Turn::root("turn-a", "workspace-a", "Compare the options.", 20);
     let run = ModelRun::queued(RunDraft {
@@ -663,8 +956,14 @@ async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
         manifest: manifest.clone(),
         provider: ProviderSnapshot {
             profile_id: profile.id.clone(),
+            provider_id: Some(profile.provider_id.clone()),
+            template_revision: Some(1),
             provider_name: profile.name.clone(),
             dialect: profile.dialect,
+            stream_protocol: Some(crate::domain::StreamProtocol::OllamaNdjson),
+            auth_placement: Some(crate::domain::AuthPlacement::None),
+            auth_header_name: None,
+            additional_headers: BTreeMap::new(),
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
             parameters: profile.parameters.clone(),
@@ -684,6 +983,22 @@ async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
     )
     .await
     .unwrap();
+
+    let stored_receipt = repository.get_run_receipt("run-a").await.unwrap();
+    let stored_request: serde_json::Value =
+        serde_json::from_str(&stored_receipt.snapshot.request_json).unwrap();
+    assert_eq!(
+        stored_request["parameters"]["temperature"],
+        serde_json::json!(0.2),
+        "the frozen canonical request must preserve the actual numeric parameter type"
+    );
+    let stored_run = repository.get_run("run-a").await.unwrap();
+    let stored_provider: serde_json::Value =
+        serde_json::from_str(&stored_run.provider_snapshot_json).unwrap();
+    assert_eq!(
+        stored_provider["parameters"]["temperature"],
+        serde_json::json!(0.2)
+    );
 
     assert_eq!(
         RepositoryPort::get_run_snapshot(&repository, "run-a")

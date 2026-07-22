@@ -9,6 +9,16 @@ export type RunStatus =
 
 export type DecisionStatus = "accepted" | "rejected" | "to-verify";
 export type ProviderDialect = "openai-compatible" | "ollama";
+export type ProviderStreamProtocol =
+  | "openai_sse"
+  | "ollama_ndjson"
+  | "anthropic_sse"
+  | "google_sse";
+export type ProviderAuthPlacement =
+  | "none"
+  | "bearer_header"
+  | "api_key_header"
+  | "query_param";
 
 export interface WorkspaceSummary {
   id: string;
@@ -94,7 +104,13 @@ export interface RunSnapshot {
   runId: string;
   canonicalHash: string;
   createdAt: string;
+  providerId?: string;
+  templateRevision?: number;
   providerName: string;
+  streamProtocol?: ProviderStreamProtocol;
+  authPlacement?: ProviderAuthPlacement;
+  authHeaderName?: string;
+  additionalHeaders: Record<string, string>;
   model: string;
   baseUrl: string;
   parameters: Record<string, unknown>;
@@ -103,8 +119,37 @@ export interface RunSnapshot {
 
 export interface ProviderProfile {
   id: string;
+  providerId: string;
   name: string;
   dialect: ProviderDialect;
+  baseUrl: string;
+  model: string;
+  isDefault: boolean;
+  parameters?: Record<string, unknown>;
+}
+
+export interface ProtocolProfile {
+  streamProtocol: ProviderStreamProtocol;
+  authPlacement: ProviderAuthPlacement;
+  authHeaderName?: string;
+  modelsEndpoint?: string;
+  requiresAdditionalHeaders: boolean;
+  additionalHeaders: Record<string, string>;
+}
+
+export interface ProviderTemplate {
+  providerId: string;
+  revision: number;
+  displayName: string;
+  defaultBaseUrl: string;
+  protocol: ProtocolProfile;
+  runtimeAvailable: boolean;
+}
+
+export interface SaveProviderProfileInput {
+  id?: string;
+  providerId: string;
+  name: string;
   baseUrl: string;
   model: string;
   isDefault: boolean;

@@ -40,7 +40,11 @@
 .provider-settings__grid label > span:first-child { color: #515a55; font-size: 10.5px; font-weight: 650; }
 .provider-settings__grid input, .provider-settings__grid select { width: 100%; height: 39px; padding: 0 11px; border: 1px solid var(--tf-line); border-radius: 8px; background: var(--tf-paper-strong); font-size: 12px; }
 .provider-settings__grid input::placeholder { color: #a4aaa6; }
+.provider-settings__grid select:disabled { cursor: not-allowed; color: var(--tf-ink-soft); background: #eceae3; }
+.provider-settings__field-note { color: var(--tf-ink-faint); font-size: 9.5px; line-height: 1.4; }
 .provider-settings__wide { grid-column: 1 / -1; }
+.provider-settings__protocol { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 10px 12px; border: 1px solid var(--tf-line); border-radius: 8px; background: #f5f3ec; color: var(--tf-ink-soft); font-size: 10px; }
+.provider-settings__protocol strong { margin-left: 4px; color: var(--tf-green-strong); font-family: var(--tf-font-mono); font-size: 9.5px; }
 .provider-settings__secret { position: relative; display: block; }
 .provider-settings__secret svg { position: absolute; z-index: 1; top: 12px; left: 10px; color: var(--tf-ink-faint); }
 .provider-settings__secret input { padding-left: 31px; }

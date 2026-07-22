@@ -102,6 +102,7 @@ pub enum ProviderDialect {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderProfile {
     pub id: String,
+    pub provider_id: String,
     pub name: String,
     pub dialect: ProviderDialect,
     pub base_url: String,

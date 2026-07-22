@@ -431,6 +431,27 @@ async fn build_start_bundle(
             "snapshot and Run identifiers differ".into(),
         ));
     }
+    start
+        .snapshot
+        .provider
+        .require_resolved_metadata()
+        .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?;
+    let provider_id = start
+        .snapshot
+        .provider
+        .provider_id
+        .clone()
+        .ok_or_else(|| RepositoryPortError::InvalidData("provider id is unresolved".into()))?;
+    let template_revision = start.snapshot.provider.template_revision.ok_or_else(|| {
+        RepositoryPortError::InvalidData("Provider Template revision is unresolved".into())
+    })?;
+    let stream_protocol =
+        start.snapshot.provider.stream_protocol.ok_or_else(|| {
+            RepositoryPortError::InvalidData("stream protocol is unresolved".into())
+        })?;
+    let auth_placement = start.snapshot.provider.auth_placement.ok_or_else(|| {
+        RepositoryPortError::InvalidData("authentication placement is unresolved".into())
+    })?;
 
     let workspace_id = if let Some(turn) = &start.turn {
         turn.workspace_id.clone()
@@ -511,24 +532,48 @@ async fn build_start_bundle(
     }
 
     let state = start.run.state_snapshot();
+    let effective_parameters = start
+        .snapshot
+        .provider
+        .parameters
+        .iter()
+        .map(|(name, encoded)| {
+            serde_json::from_str::<Value>(encoded)
+                .map(|value| (name.clone(), value))
+                .map_err(|error| {
+                    RepositoryPortError::InvalidData(format!(
+                        "Provider parameter `{name}` is not canonical JSON: {error}"
+                    ))
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let provider_json = json!({
         "profile_id": start.snapshot.provider.profile_id,
+        "provider_id": &provider_id,
+        "template_revision": template_revision,
         "provider_name": start.snapshot.provider.provider_name,
         "dialect": dialect_to_str(start.snapshot.provider.dialect),
+        "stream_protocol": stream_protocol_to_str(stream_protocol),
+        "auth_placement": auth_placement_to_str(auth_placement),
+        "auth_header_name": start.snapshot.provider.auth_header_name,
+        "additional_headers": start.snapshot.provider.additional_headers,
         "base_url": start.snapshot.provider.base_url,
         "model": start.snapshot.provider.model,
-        "parameters": start.snapshot.provider.parameters,
+        "parameters": effective_parameters,
     })
     .to_string();
-    let parameters_json = serde_json::to_string(&start.snapshot.provider.parameters)
+    let parameters_json = serde_json::to_string(&effective_parameters)
         .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?;
+    let additional_headers_json =
+        serde_json::to_string(&start.snapshot.provider.additional_headers)
+            .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?;
     let request_json = json!({
         "messages": start.snapshot.manifest.items.iter().map(|item| json!({
             "role": role_to_str(item.role),
             "content": item.content,
         })).collect::<Vec<_>>(),
         "model": start.snapshot.provider.model,
-        "parameters": start.snapshot.provider.parameters,
+        "parameters": effective_parameters,
     })
     .to_string();
     let manifest_id = format!("manifest:{}", start.snapshot.id);
@@ -589,6 +634,12 @@ async fn build_start_bundle(
         manifest_id,
         workspace_id: workspace_id.clone(),
         provider_profile_id: non_empty(start.snapshot.provider.profile_id),
+        provider_id: Some(provider_id),
+        template_revision: Some(i64::from(template_revision)),
+        stream_protocol: Some(stream_protocol_to_str(stream_protocol).into()),
+        auth_placement: Some(auth_placement_to_str(auth_placement).into()),
+        auth_header_name: start.snapshot.provider.auth_header_name,
+        additional_headers_json,
         provider: start.snapshot.provider.provider_name,
         model: start.snapshot.provider.model,
         base_url: start.snapshot.provider.base_url,
@@ -640,6 +691,7 @@ fn receipt_to_domain(
             })?,
     )?;
     let parameters = decode_parameters(&receipt.snapshot.parameters_json)?;
+    let additional_headers = decode_parameters(&receipt.snapshot.additional_headers_json)?;
     let items = receipt
         .items
         .into_iter()
@@ -669,8 +721,34 @@ fn receipt_to_domain(
         },
         provider: ProviderSnapshot {
             profile_id: receipt.snapshot.provider_profile_id.unwrap_or_default(),
+            provider_id: receipt.snapshot.provider_id,
+            template_revision: receipt
+                .snapshot
+                .template_revision
+                .map(|revision| {
+                    u16::try_from(revision).map_err(|_| {
+                        RepositoryPortError::InvalidData(
+                            "invalid Provider Template revision".into(),
+                        )
+                    })
+                })
+                .transpose()?,
             provider_name: receipt.snapshot.provider,
             dialect,
+            stream_protocol: receipt
+                .snapshot
+                .stream_protocol
+                .as_deref()
+                .map(stream_protocol_from_str)
+                .transpose()?,
+            auth_placement: receipt
+                .snapshot
+                .auth_placement
+                .as_deref()
+                .map(auth_placement_from_str)
+                .transpose()?,
+            auth_header_name: receipt.snapshot.auth_header_name,
+            additional_headers,
             base_url: receipt.snapshot.base_url,
             model: receipt.snapshot.model,
             parameters,
@@ -758,6 +836,7 @@ fn provider_profile_to_record(
 ) -> Result<ProviderProfileRecord, RepositoryPortError> {
     Ok(ProviderProfileRecord {
         id: profile.id.clone(),
+        provider_id: profile.provider_id.clone(),
         name: profile.name.clone(),
         dialect: dialect_to_str(profile.dialect).into(),
         base_url: profile.base_url.clone(),
@@ -774,6 +853,7 @@ fn provider_profile_to_domain(
 ) -> Result<ProviderProfile, RepositoryPortError> {
     Ok(ProviderProfile {
         id: record.id,
+        provider_id: record.provider_id,
         name: record.name,
         dialect: dialect_from_str(&record.dialect)?,
         base_url: record.base_url,
@@ -983,6 +1063,52 @@ fn dialect_from_str(value: &str) -> Result<ProviderDialect, RepositoryPortError>
     }
 }
 
+fn stream_protocol_to_str(value: crate::domain::StreamProtocol) -> &'static str {
+    match value {
+        crate::domain::StreamProtocol::OpenAiSse => "openai_sse",
+        crate::domain::StreamProtocol::OllamaNdjson => "ollama_ndjson",
+        crate::domain::StreamProtocol::AnthropicSse => "anthropic_sse",
+        crate::domain::StreamProtocol::GoogleSse => "google_sse",
+    }
+}
+
+fn stream_protocol_from_str(
+    value: &str,
+) -> Result<crate::domain::StreamProtocol, RepositoryPortError> {
+    match value {
+        "openai_sse" => Ok(crate::domain::StreamProtocol::OpenAiSse),
+        "ollama_ndjson" => Ok(crate::domain::StreamProtocol::OllamaNdjson),
+        "anthropic_sse" => Ok(crate::domain::StreamProtocol::AnthropicSse),
+        "google_sse" => Ok(crate::domain::StreamProtocol::GoogleSse),
+        other => Err(RepositoryPortError::InvalidData(format!(
+            "unknown Provider stream protocol `{other}`"
+        ))),
+    }
+}
+
+fn auth_placement_to_str(value: crate::domain::AuthPlacement) -> &'static str {
+    match value {
+        crate::domain::AuthPlacement::None => "none",
+        crate::domain::AuthPlacement::BearerHeader => "bearer_header",
+        crate::domain::AuthPlacement::ApiKeyHeader => "api_key_header",
+        crate::domain::AuthPlacement::QueryParam => "query_param",
+    }
+}
+
+fn auth_placement_from_str(
+    value: &str,
+) -> Result<crate::domain::AuthPlacement, RepositoryPortError> {
+    match value {
+        "none" => Ok(crate::domain::AuthPlacement::None),
+        "bearer_header" => Ok(crate::domain::AuthPlacement::BearerHeader),
+        "api_key_header" => Ok(crate::domain::AuthPlacement::ApiKeyHeader),
+        "query_param" => Ok(crate::domain::AuthPlacement::QueryParam),
+        other => Err(RepositoryPortError::InvalidData(format!(
+            "unknown Provider auth placement `{other}`"
+        ))),
+    }
+}
+
 fn source_kind_to_str(kind: ContextSourceKind) -> &'static str {
     match kind {
         ContextSourceKind::System => "system",
@@ -1044,5 +1170,79 @@ fn port_error(error: RepositoryError) -> RepositoryPortError {
         }
         RepositoryError::Database(error) => RepositoryPortError::Unavailable(error.to_string()),
         RepositoryError::Migration(error) => RepositoryPortError::Unavailable(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_receipt_keeps_provider_metadata_unresolved_and_parameters_intact() {
+        let receipt = StoredRunReceipt {
+            snapshot: ContextSnapshotRecord {
+                id: "snapshot-legacy".into(),
+                run_id: "run-legacy".into(),
+                manifest_id: "manifest-legacy".into(),
+                workspace_id: "workspace-legacy".into(),
+                provider_profile_id: Some("profile-legacy".into()),
+                provider_id: None,
+                template_revision: None,
+                stream_protocol: None,
+                auth_placement: None,
+                auth_header_name: None,
+                additional_headers_json: "{}".into(),
+                provider: "Legacy Ollama".into(),
+                model: "qwen3".into(),
+                base_url: "http://127.0.0.1:11434".into(),
+                parameters_json: r#"{"temperature":0.7}"#.into(),
+                request_json: "{}".into(),
+                canonical_hash: "hash-legacy".into(),
+                created_at: 1,
+            },
+            manifest: ContextManifestRecord {
+                id: "manifest-legacy".into(),
+                workspace_id: "workspace-legacy".into(),
+                compiler_version: "1".into(),
+                strategy: "ancestor_path_with_pins".into(),
+                estimated_chars: 0,
+                canonical_hash: "hash-legacy".into(),
+                warnings_json: "[]".into(),
+                created_at: 1,
+            },
+            items: Vec::new(),
+        };
+        let run = ModelRunRecord {
+            id: "run-legacy".into(),
+            turn_id: "turn-legacy".into(),
+            workspace_id: "workspace-legacy".into(),
+            provider_profile_id: Some("profile-legacy".into()),
+            model: "qwen3".into(),
+            status: RunStatusRecord::Completed,
+            output_markdown: "answer".into(),
+            reasoning_markdown: String::new(),
+            provider_snapshot_json: r#"{"dialect":"ollama_chat"}"#.into(),
+            usage_json: None,
+            error_json: None,
+            created_at: 1,
+            started_at: Some(1),
+            finished_at: Some(2),
+            checkpointed_at: Some(2),
+        };
+
+        let restored = receipt_to_domain(receipt, &run).unwrap();
+
+        assert_eq!(restored.provider.provider_id, None);
+        assert_eq!(restored.provider.template_revision, None);
+        assert_eq!(restored.provider.stream_protocol, None);
+        assert_eq!(restored.provider.auth_placement, None);
+        assert_eq!(
+            restored
+                .provider
+                .parameters
+                .get("temperature")
+                .map(String::as_str),
+            Some("0.7")
+        );
     }
 }

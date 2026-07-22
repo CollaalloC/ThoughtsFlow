@@ -32,6 +32,7 @@ fn register_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
         compare_runs,
         mark_decision,
         export_decision_packet,
+        list_provider_templates,
         list_provider_profiles,
         save_provider_profile,
         set_session_credential,

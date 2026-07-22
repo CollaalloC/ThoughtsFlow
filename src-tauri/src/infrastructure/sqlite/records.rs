@@ -147,6 +147,12 @@ pub struct ContextSnapshotRecord {
     pub manifest_id: String,
     pub workspace_id: String,
     pub provider_profile_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub template_revision: Option<i64>,
+    pub stream_protocol: Option<String>,
+    pub auth_placement: Option<String>,
+    pub auth_header_name: Option<String>,
+    pub additional_headers_json: String,
     pub provider: String,
     pub model: String,
     pub base_url: String,
@@ -166,6 +172,7 @@ pub struct StoredRunReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderProfileRecord {
     pub id: String,
+    pub provider_id: String,
     pub name: String,
     pub dialect: String,
     pub base_url: String,

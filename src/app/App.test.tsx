@@ -23,6 +23,7 @@ const workspace: WorkspaceSummary = {
 
 const provider: ProviderProfile = {
   id: "provider-1",
+  providerId: "ollama",
   name: "Local fixture",
   dialect: "ollama",
   baseUrl: "http://127.0.0.1:11434",
@@ -142,6 +143,7 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     compareRuns: vi.fn().mockResolvedValue(comparison),
     markDecision: vi.fn(),
     exportDecisionPacket: vi.fn(),
+    listProviderTemplates: vi.fn().mockResolvedValue([]),
     listProviderProfiles: vi.fn().mockResolvedValue([provider]),
     saveProviderProfile: vi.fn().mockResolvedValue(provider),
     setSessionCredential: vi.fn().mockResolvedValue(undefined),

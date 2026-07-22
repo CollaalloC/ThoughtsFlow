@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{ContentBlock, DomainError, MessageRole, ModelRun, ProviderDialect, RunStatus, Turn};
+use super::{
+    AuthPlacement, ContentBlock, DomainError, MessageRole, ModelRun, ProviderDialect, RunStatus,
+    StreamProtocol, Turn,
+};
 
-pub const CONTEXT_COMPILER_VERSION: &str = "1";
+pub const CONTEXT_COMPILER_VERSION: &str = "3";
 
 #[derive(Clone, Debug)]
 pub struct ConversationGraph {
@@ -226,11 +229,57 @@ pub struct CompiledContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSnapshot {
     pub profile_id: String,
+    pub provider_id: Option<String>,
+    pub template_revision: Option<u16>,
     pub provider_name: String,
     pub dialect: ProviderDialect,
+    pub stream_protocol: Option<StreamProtocol>,
+    pub auth_placement: Option<AuthPlacement>,
+    pub auth_header_name: Option<String>,
+    pub additional_headers: BTreeMap<String, String>,
     pub base_url: String,
     pub model: String,
     pub parameters: BTreeMap<String, String>,
+}
+
+impl ProviderSnapshot {
+    pub fn require_resolved_metadata(&self) -> Result<(), DomainError> {
+        if self
+            .provider_id
+            .as_deref()
+            .is_none_or(|provider_id| provider_id.trim().is_empty())
+        {
+            return Err(DomainError::UnresolvedProviderMetadata {
+                field: "Provider Template identity",
+            });
+        }
+        if self.template_revision.is_none_or(|revision| revision == 0) {
+            return Err(DomainError::UnresolvedProviderMetadata {
+                field: "Provider Template revision",
+            });
+        }
+        if self.stream_protocol.is_none() {
+            return Err(DomainError::UnresolvedProviderMetadata {
+                field: "stream protocol",
+            });
+        }
+        let auth_placement =
+            self.auth_placement
+                .ok_or(DomainError::UnresolvedProviderMetadata {
+                    field: "authentication placement",
+                })?;
+        if auth_placement != AuthPlacement::None
+            && self
+                .auth_header_name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err(DomainError::UnresolvedProviderMetadata {
+                field: "authentication field name",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,6 +312,9 @@ impl ContextCompiler {
         graph: &ConversationGraph,
         request: ContextCompileRequest,
     ) -> Result<ContextPreview, DomainError> {
+        if let Some(provider) = request.provider.as_ref() {
+            provider.require_resolved_metadata()?;
+        }
         let excluded: BTreeSet<_> = request
             .overrides
             .excluded_source_ids
@@ -362,7 +414,7 @@ impl ContextCompiler {
             &self.policy.compiler_version,
             &items,
             request.provider.as_ref(),
-        );
+        )?;
         let messages = items
             .iter()
             .map(|item| CanonicalMessage {
@@ -465,29 +517,106 @@ fn hash_manifest(
     compiler_version: &str,
     items: &[RunContextItem],
     provider: Option<&ProviderSnapshot>,
-) -> String {
+) -> Result<String, DomainError> {
     let mut canonical = Vec::new();
-    append_field(&mut canonical, compiler_version);
+    append_named_field(
+        &mut canonical,
+        "manifest.compiler_version",
+        compiler_version,
+    );
+    append_named_field(
+        &mut canonical,
+        "provider.present",
+        if provider.is_some() { "1" } else { "0" },
+    );
     if let Some(provider) = provider {
-        append_field(&mut canonical, &provider.profile_id);
-        append_field(&mut canonical, &provider.provider_name);
-        append_field(&mut canonical, dialect_name(provider.dialect));
-        append_field(&mut canonical, &provider.base_url);
-        append_field(&mut canonical, &provider.model);
+        provider.require_resolved_metadata()?;
+        append_named_field(&mut canonical, "provider.profile_id", &provider.profile_id);
+        append_optional_named_field(
+            &mut canonical,
+            "provider.provider_id",
+            provider.provider_id.as_deref(),
+        );
+        append_optional_named_field(
+            &mut canonical,
+            "provider.template_revision",
+            provider
+                .template_revision
+                .map(|revision| revision.to_string())
+                .as_deref(),
+        );
+        append_named_field(&mut canonical, "provider.name", &provider.provider_name);
+        append_named_field(
+            &mut canonical,
+            "provider.dialect",
+            dialect_name(provider.dialect),
+        );
+        append_optional_named_field(
+            &mut canonical,
+            "provider.stream_protocol",
+            provider.stream_protocol.map(stream_protocol_name),
+        );
+        append_optional_named_field(
+            &mut canonical,
+            "provider.auth_placement",
+            provider.auth_placement.map(auth_placement_name),
+        );
+        append_optional_named_field(
+            &mut canonical,
+            "provider.auth_header_name",
+            provider.auth_header_name.as_deref(),
+        );
+        append_named_field(
+            &mut canonical,
+            "provider.additional_headers.count",
+            &provider.additional_headers.len().to_string(),
+        );
+        for (name, value) in &provider.additional_headers {
+            append_named_field(&mut canonical, "provider.additional_header.name", name);
+            append_named_field(&mut canonical, "provider.additional_header.value", value);
+        }
+        append_named_field(&mut canonical, "provider.base_url", &provider.base_url);
+        append_named_field(&mut canonical, "provider.model", &provider.model);
+        append_named_field(
+            &mut canonical,
+            "provider.parameters.count",
+            &provider.parameters.len().to_string(),
+        );
         for (key, value) in &provider.parameters {
-            append_field(&mut canonical, key);
-            append_field(&mut canonical, value);
+            append_named_field(&mut canonical, "provider.parameter.name", key);
+            append_named_field(&mut canonical, "provider.parameter.value", value);
         }
     }
+    append_named_field(
+        &mut canonical,
+        "manifest.items.count",
+        &items.len().to_string(),
+    );
     for item in items {
-        append_field(&mut canonical, &item.position.to_string());
-        append_field(&mut canonical, source_kind_name(item.source_kind));
-        append_field(&mut canonical, item.source_id.as_deref().unwrap_or(""));
-        append_field(&mut canonical, role_name(item.role));
-        append_field(&mut canonical, &item.content);
-        append_field(&mut canonical, reason_name(item.inclusion_reason));
+        append_named_field(
+            &mut canonical,
+            "manifest.item.position",
+            &item.position.to_string(),
+        );
+        append_named_field(
+            &mut canonical,
+            "manifest.item.source_kind",
+            source_kind_name(item.source_kind),
+        );
+        append_optional_named_field(
+            &mut canonical,
+            "manifest.item.source_id",
+            item.source_id.as_deref(),
+        );
+        append_named_field(&mut canonical, "manifest.item.role", role_name(item.role));
+        append_named_field(&mut canonical, "manifest.item.content", &item.content);
+        append_named_field(
+            &mut canonical,
+            "manifest.item.inclusion_reason",
+            reason_name(item.inclusion_reason),
+        );
     }
-    sha256_hex(&canonical)
+    Ok(sha256_hex(&canonical))
 }
 
 fn dialect_name(dialect: ProviderDialect) -> &'static str {
@@ -497,11 +626,45 @@ fn dialect_name(dialect: ProviderDialect) -> &'static str {
     }
 }
 
+fn stream_protocol_name(protocol: StreamProtocol) -> &'static str {
+    match protocol {
+        StreamProtocol::OpenAiSse => "openai_sse",
+        StreamProtocol::OllamaNdjson => "ollama_ndjson",
+        StreamProtocol::AnthropicSse => "anthropic_sse",
+        StreamProtocol::GoogleSse => "google_sse",
+    }
+}
+
+fn auth_placement_name(placement: AuthPlacement) -> &'static str {
+    match placement {
+        AuthPlacement::None => "none",
+        AuthPlacement::BearerHeader => "bearer_header",
+        AuthPlacement::ApiKeyHeader => "api_key_header",
+        AuthPlacement::QueryParam => "query_param",
+    }
+}
+
 fn append_field(target: &mut Vec<u8>, value: &str) {
     target.extend_from_slice(value.len().to_string().as_bytes());
     target.push(b':');
     target.extend_from_slice(value.as_bytes());
     target.push(b';');
+}
+
+fn append_named_field(target: &mut Vec<u8>, name: &str, value: &str) {
+    append_field(target, name);
+    append_field(target, value);
+}
+
+fn append_optional_named_field(target: &mut Vec<u8>, name: &str, value: Option<&str>) {
+    append_named_field(
+        target,
+        &format!("{name}.present"),
+        if value.is_some() { "1" } else { "0" },
+    );
+    if let Some(value) = value {
+        append_named_field(target, name, value);
+    }
 }
 
 fn source_kind_name(kind: ContextSourceKind) -> &'static str {
