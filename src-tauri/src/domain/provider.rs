@@ -147,7 +147,7 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
     },
     ProviderTemplate {
         provider_id: "anthropic",
-        revision: 1,
+        revision: 2,
         display_name: "Anthropic",
         default_base_url: "https://api.anthropic.com",
         protocol: ProtocolProfile {
@@ -159,11 +159,11 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
             additional_headers: ANTHROPIC_HEADERS,
         },
         model_catalog: ProviderModelCatalogStrategy::Static(ANTHROPIC_MODELS),
-        runtime_available: false,
+        runtime_available: true,
     },
     ProviderTemplate {
         provider_id: "google",
-        revision: 1,
+        revision: 2,
         display_name: "Google Gemini",
         default_base_url: "https://generativelanguage.googleapis.com/v1beta",
         protocol: ProtocolProfile {
@@ -175,7 +175,7 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
             additional_headers: NO_ADDITIONAL_HEADERS,
         },
         model_catalog: ProviderModelCatalogStrategy::RemoteGoogle,
-        runtime_available: false,
+        runtime_available: true,
     },
     ProviderTemplate {
         provider_id: "azure-openai",

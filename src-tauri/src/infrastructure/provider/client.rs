@@ -9,8 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     infrastructure::provider::{
-        OllamaNdjsonDecoder, OpenAiSseDecoder, ProviderStreamDecoder,
-        decode_http_error_with_redaction, provider_models_url, provider_request_url,
+        AnthropicSseDecoder, GoogleSseDecoder, OllamaNdjsonDecoder, OpenAiSseDecoder,
+        ProviderStreamDecoder, decode_http_error_with_redaction, provider_models_url,
+        provider_request_url,
     },
     ports::provider::{
         CanonicalMessage, CanonicalRequest, CredentialPlacement, DiscoveredModel, MessageRole,
@@ -74,10 +75,16 @@ impl ReqwestProviderGateway {
             return send_redacted_terminal(&events, &mut redactor, RunEvent::RunCancelled).await;
         }
 
-        let url = provider_request_url(&invocation.target.base_url, invocation.target.dialect)?;
-        let body = request_body(&invocation.request, invocation.target.dialect);
+        let url = provider_request_url(
+            &invocation.target.base_url,
+            invocation.target.dialect,
+            &invocation.request.model,
+        )?;
+        let body = request_body(&invocation.request, invocation.target.dialect)?;
         let accept = match invocation.target.dialect {
-            ProviderDialect::OpenAiChatCompletions => "text/event-stream",
+            ProviderDialect::OpenAiChatCompletions
+            | ProviderDialect::AnthropicMessages
+            | ProviderDialect::GoogleGenerativeAi => "text/event-stream",
             ProviderDialect::OllamaChat => "application/x-ndjson",
         };
         let mut request = self
@@ -135,6 +142,7 @@ impl ReqwestProviderGateway {
                 &events,
                 &mut redactor,
                 decode_redacted_http_error(
+                    invocation.target.dialect,
                     status,
                     content_type.as_deref(),
                     &body,
@@ -160,6 +168,8 @@ impl ReqwestProviderGateway {
         let mut decoder: Box<dyn ProviderStreamDecoder> = match invocation.target.dialect {
             ProviderDialect::OpenAiChatCompletions => Box::new(OpenAiSseDecoder::new()),
             ProviderDialect::OllamaChat => Box::new(OllamaNdjsonDecoder::new()),
+            ProviderDialect::AnthropicMessages => Box::new(AnthropicSseDecoder::new()),
+            ProviderDialect::GoogleGenerativeAi => Box::new(GoogleSseDecoder::new()),
         };
         let mut bytes = response.bytes_stream();
         loop {
@@ -424,6 +434,8 @@ impl ProviderConnectionTester for ReqwestProviderGateway {
             let catalog = match target.dialect {
                 ProviderDialect::OpenAiChatCompletions => ProviderModelCatalogKind::OpenAi,
                 ProviderDialect::OllamaChat => ProviderModelCatalogKind::Ollama,
+                ProviderDialect::AnthropicMessages => ProviderModelCatalogKind::Anthropic,
+                ProviderDialect::GoogleGenerativeAi => ProviderModelCatalogKind::Google,
             };
             let endpoint = provider_models_url(&target.base_url, catalog)?;
             let mut request = self.client.get(endpoint).timeout(CONNECTION_TEST_TIMEOUT);
@@ -483,6 +495,7 @@ impl ProviderModelCatalog for ReqwestProviderGateway {
                     .unwrap_or_default();
                 return Err(redact_provider_error(
                     decode_redacted_http_error(
+                        query.target.dialect,
                         status,
                         content_type.as_deref(),
                         &body,
@@ -540,7 +553,7 @@ fn parse_model_catalog(
         ProviderError::InvalidResponse("model catalog root must be an object".to_owned())
     })?;
     let collection_name = match catalog {
-        ProviderModelCatalogKind::OpenAi => "data",
+        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Anthropic => "data",
         ProviderModelCatalogKind::Ollama | ProviderModelCatalogKind::Google => "models",
     };
     let entries = root
@@ -582,7 +595,9 @@ fn parse_discovered_model(
 ) -> Option<DiscoveredModel> {
     let entry = entry.as_object()?;
     let id = match catalog {
-        ProviderModelCatalogKind::OpenAi => string_field(entry, &["id"]),
+        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Anthropic => {
+            string_field(entry, &["id"])
+        }
         ProviderModelCatalogKind::Ollama => string_field(entry, &["model", "name"]),
         ProviderModelCatalogKind::Google => string_field(entry, &["name"]),
     }?;
@@ -595,7 +610,9 @@ fn parse_discovered_model(
     }
 
     let display_name = match catalog {
-        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Ollama => {
+        ProviderModelCatalogKind::OpenAi
+        | ProviderModelCatalogKind::Ollama
+        | ProviderModelCatalogKind::Anthropic => {
             string_field(entry, &["display_name", "displayName"]).unwrap_or(&id)
         }
         ProviderModelCatalogKind::Google => string_field(entry, &["displayName"]).unwrap_or(&id),
@@ -613,7 +630,9 @@ fn parse_discovered_model(
     };
 
     let context_window = match catalog {
-        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Ollama => u64_field(
+        ProviderModelCatalogKind::OpenAi
+        | ProviderModelCatalogKind::Ollama
+        | ProviderModelCatalogKind::Anthropic => u64_field(
             entry,
             &["context_window", "contextWindow", "context_length"],
         ),
@@ -679,6 +698,7 @@ fn contains_unsafe_text_control(value: &str) -> bool {
 }
 
 fn decode_redacted_http_error(
+    dialect: ProviderDialect,
     status: u16,
     content_type: Option<&str>,
     body: &[u8],
@@ -687,7 +707,7 @@ fn decode_redacted_http_error(
     let secret = credential
         .filter(|credential| !credential.is_empty())
         .map(SessionCredential::expose_secret);
-    decode_http_error_with_redaction(status, content_type, body, |value| {
+    decode_http_error_with_redaction(dialect, status, content_type, body, |value| {
         redact_bounded_value(value, secret)
     })
 }
@@ -868,20 +888,22 @@ async fn collect_error_body(
     Ok(Some(body))
 }
 
-fn request_body(request: &CanonicalRequest, dialect: ProviderDialect) -> Value {
-    let messages = request
-        .messages
-        .iter()
-        .map(canonical_message)
-        .collect::<Vec<_>>();
-    let mut body = Map::from_iter([
-        ("model".to_owned(), json!(request.model)),
-        ("messages".to_owned(), Value::Array(messages)),
-        ("stream".to_owned(), Value::Bool(true)),
-    ]);
-
+fn request_body(
+    request: &CanonicalRequest,
+    dialect: ProviderDialect,
+) -> Result<Value, ProviderError> {
     match dialect {
         ProviderDialect::OpenAiChatCompletions => {
+            let messages = request
+                .messages
+                .iter()
+                .map(canonical_message)
+                .collect::<Vec<_>>();
+            let mut body = Map::from_iter([
+                ("model".to_owned(), json!(request.model)),
+                ("messages".to_owned(), Value::Array(messages)),
+                ("stream".to_owned(), Value::Bool(true)),
+            ]);
             body.insert(
                 "stream_options".to_owned(),
                 json!({ "include_usage": true }),
@@ -892,8 +914,19 @@ fn request_body(request: &CanonicalRequest, dialect: ProviderDialect) -> Value {
             if !request.stop.is_empty() {
                 body.insert("stop".to_owned(), json!(request.stop));
             }
+            Ok(Value::Object(body))
         }
         ProviderDialect::OllamaChat => {
+            let messages = request
+                .messages
+                .iter()
+                .map(canonical_message)
+                .collect::<Vec<_>>();
+            let mut body = Map::from_iter([
+                ("model".to_owned(), json!(request.model)),
+                ("messages".to_owned(), Value::Array(messages)),
+                ("stream".to_owned(), Value::Bool(true)),
+            ]);
             let mut options = Map::new();
             insert_optional(&mut options, "temperature", request.temperature);
             insert_optional(&mut options, "top_p", request.top_p);
@@ -904,7 +937,105 @@ fn request_body(request: &CanonicalRequest, dialect: ProviderDialect) -> Value {
             if !options.is_empty() {
                 body.insert("options".to_owned(), Value::Object(options));
             }
+            Ok(Value::Object(body))
         }
+        ProviderDialect::AnthropicMessages => anthropic_request_body(request),
+        ProviderDialect::GoogleGenerativeAi => Ok(google_request_body(request)),
+    }
+}
+
+fn anthropic_request_body(request: &CanonicalRequest) -> Result<Value, ProviderError> {
+    let max_tokens = request.max_output_tokens.ok_or_else(|| {
+        ProviderError::InvalidResponse(
+            "Anthropic requires max_output_tokens to be resolved before the request is sent".into(),
+        )
+    })?;
+    let system = request
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::System)
+        .map(|message| json!({ "type": "text", "text": message.content }))
+        .collect::<Vec<_>>();
+    let messages = request
+        .messages
+        .iter()
+        .filter_map(|message| match message.role {
+            MessageRole::System => None,
+            MessageRole::User => Some(json!({ "role": "user", "content": message.content })),
+            MessageRole::Assistant => {
+                Some(json!({ "role": "assistant", "content": message.content }))
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut body = Map::from_iter([
+        ("model".to_owned(), json!(request.model)),
+        ("messages".to_owned(), Value::Array(messages)),
+        ("stream".to_owned(), Value::Bool(true)),
+        ("max_tokens".to_owned(), json!(max_tokens)),
+    ]);
+    if !system.is_empty() {
+        body.insert("system".to_owned(), Value::Array(system));
+    }
+    insert_optional(&mut body, "temperature", request.temperature);
+    insert_optional(&mut body, "top_p", request.top_p);
+    if !request.stop.is_empty() {
+        body.insert("stop_sequences".to_owned(), json!(request.stop));
+    }
+    Ok(Value::Object(body))
+}
+
+fn google_request_body(request: &CanonicalRequest) -> Value {
+    let system_parts = request
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::System)
+        .map(|message| json!({ "text": message.content }))
+        .collect::<Vec<_>>();
+
+    let mut grouped_contents: Vec<(&str, Vec<Value>)> = Vec::new();
+    for message in request
+        .messages
+        .iter()
+        .filter(|message| message.role != MessageRole::System)
+    {
+        let role = match message.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "model",
+            MessageRole::System => unreachable!("system messages were filtered above"),
+        };
+        let part = json!({ "text": message.content });
+        match grouped_contents.last_mut() {
+            Some((previous_role, parts)) if *previous_role == role => parts.push(part),
+            _ => grouped_contents.push((role, vec![part])),
+        }
+    }
+    let contents = grouped_contents
+        .into_iter()
+        .map(|(role, parts)| json!({ "role": role, "parts": parts }))
+        .collect::<Vec<_>>();
+    let mut body = Map::from_iter([("contents".to_owned(), Value::Array(contents))]);
+    if !system_parts.is_empty() {
+        body.insert(
+            "systemInstruction".to_owned(),
+            json!({ "parts": system_parts }),
+        );
+    }
+    let mut generation_config = Map::new();
+    insert_optional(&mut generation_config, "temperature", request.temperature);
+    insert_optional(&mut generation_config, "topP", request.top_p);
+    insert_optional(
+        &mut generation_config,
+        "maxOutputTokens",
+        request.max_output_tokens,
+    );
+    if !request.stop.is_empty() {
+        generation_config.insert("stopSequences".to_owned(), json!(request.stop));
+    }
+    if !generation_config.is_empty() {
+        body.insert(
+            "generationConfig".to_owned(),
+            Value::Object(generation_config),
+        );
     }
     Value::Object(body)
 }
@@ -938,14 +1069,124 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::ports::provider::{
-        CanonicalRequest, CredentialPlacement, ProviderConnectionTester, ProviderDialect,
-        ProviderGateway, ProviderInvocation, ProviderModelCatalog, ProviderModelCatalogKind,
-        ProviderModelQuery, ProviderTarget, RunEvent, SessionCredential,
+        CanonicalMessage, CanonicalRequest, CredentialPlacement, MessageRole,
+        ProviderConnectionTester, ProviderDialect, ProviderError, ProviderGateway,
+        ProviderInvocation, ProviderModelCatalog, ProviderModelCatalogKind, ProviderModelQuery,
+        ProviderTarget, RunEvent, SessionCredential,
     };
 
     use super::{ProviderEventRedactor, ReqwestProviderGateway};
 
     const TEST_CREDENTIAL: &str = "sk-sensitive-token";
+
+    fn canonical_request(max_output_tokens: Option<u32>) -> CanonicalRequest {
+        CanonicalRequest {
+            run_id: "run-provider-contract".to_owned(),
+            model: "provider-model".to_owned(),
+            messages: vec![
+                CanonicalMessage {
+                    role: MessageRole::System,
+                    content: "Primary policy".to_owned(),
+                },
+                CanonicalMessage {
+                    role: MessageRole::User,
+                    content: "Question".to_owned(),
+                },
+                CanonicalMessage {
+                    role: MessageRole::System,
+                    content: "Pinned policy".to_owned(),
+                },
+                CanonicalMessage {
+                    role: MessageRole::Assistant,
+                    content: "Earlier answer".to_owned(),
+                },
+            ],
+            temperature: Some(0.25),
+            top_p: Some(0.75),
+            max_output_tokens,
+            stop: vec!["END".to_owned()],
+        }
+    }
+
+    #[test]
+    fn anthropic_request_uses_top_level_system_and_requires_explicit_effective_max_tokens() {
+        let body = super::request_body(
+            &canonical_request(Some(4096)),
+            ProviderDialect::AnthropicMessages,
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "model": "provider-model",
+                "stream": true,
+                "system": [
+                    { "type": "text", "text": "Primary policy" },
+                    { "type": "text", "text": "Pinned policy" }
+                ],
+                "messages": [
+                    { "role": "user", "content": "Question" },
+                    { "role": "assistant", "content": "Earlier answer" }
+                ],
+                "temperature": 0.25,
+                "top_p": 0.75,
+                "max_tokens": 4096,
+                "stop_sequences": ["END"]
+            })
+        );
+
+        assert!(matches!(
+            super::request_body(
+                &canonical_request(None),
+                ProviderDialect::AnthropicMessages,
+            ),
+            Err(ProviderError::InvalidResponse(message))
+                if message.contains("max_output_tokens")
+        ));
+    }
+
+    #[test]
+    fn google_request_uses_camel_case_system_instruction_contents_and_generation_config() {
+        let mut request = canonical_request(Some(8192));
+        request.messages.insert(
+            2,
+            CanonicalMessage {
+                role: MessageRole::User,
+                content: "Pinned question".to_owned(),
+            },
+        );
+        let body = super::request_body(&request, ProviderDialect::GoogleGenerativeAi).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "systemInstruction": {
+                    "parts": [
+                        { "text": "Primary policy" },
+                        { "text": "Pinned policy" }
+                    ]
+                },
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            { "text": "Question" },
+                            { "text": "Pinned question" }
+                        ]
+                    },
+                    { "role": "model", "parts": [{ "text": "Earlier answer" }] }
+                ],
+                "generationConfig": {
+                    "temperature": 0.25,
+                    "topP": 0.75,
+                    "maxOutputTokens": 8192,
+                    "stopSequences": ["END"]
+                }
+            })
+        );
+        assert!(body.get("system_instruction").is_none());
+        assert!(body.get("model").is_none());
+        assert!(body.get("stream").is_none());
+    }
 
     fn openai_invocation(base_url: String, credential: Option<&str>) -> ProviderInvocation {
         ProviderInvocation {
@@ -968,6 +1209,172 @@ mod tests {
         }
     }
 
+    fn native_invocation(
+        base_url: String,
+        dialect: ProviderDialect,
+        model: &str,
+        credential_header: &str,
+        additional_headers: std::collections::BTreeMap<String, String>,
+        max_output_tokens: u32,
+    ) -> ProviderInvocation {
+        let mut request = canonical_request(Some(max_output_tokens));
+        request.model = model.into();
+        ProviderInvocation {
+            target: ProviderTarget {
+                dialect,
+                base_url,
+                credential_placement: CredentialPlacement::Header(credential_header.into()),
+                additional_headers,
+            },
+            credential: Some(SessionCredential::new(TEST_CREDENTIAL)),
+            request,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_provider_requests_send_exact_paths_headers_and_bodies() {
+        let error_body = r#"{"error":{"message":"contract captured"}}"#.to_owned();
+        let (anthropic_base, anthropic_request, anthropic_server) = spawn_single_response(
+            "400 Bad Request",
+            vec![("Content-Type".into(), "application/json".into())],
+            error_body.clone(),
+        );
+        let anthropic = native_invocation(
+            format!("{anthropic_base}/tenant"),
+            ProviderDialect::AnthropicMessages,
+            "claude-sonnet-5",
+            "x-api-key",
+            std::collections::BTreeMap::from([("anthropic-version".into(), "2023-06-01".into())]),
+            4_096,
+        );
+        let expected_anthropic_body =
+            super::request_body(&anthropic.request, ProviderDialect::AnthropicMessages).unwrap();
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+        gateway
+            .stream(anthropic, CancellationToken::new(), sender)
+            .await
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RunEvent::RunFailed {
+                status: Some(400),
+                ..
+            })
+        ));
+        let raw = anthropic_request.recv().unwrap();
+        let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("POST /tenant/v1/messages HTTP/1.1"));
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("accept: text/event-stream"));
+        assert!(headers.contains("x-api-key: sk-sensitive-token"));
+        assert!(headers.contains("anthropic-version: 2023-06-01"));
+        assert!(!headers.contains("authorization:"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            expected_anthropic_body
+        );
+        anthropic_server.join().unwrap();
+
+        let (google_base, google_request, google_server) = spawn_single_response(
+            "400 Bad Request",
+            vec![("Content-Type".into(), "application/json".into())],
+            error_body,
+        );
+        let google = native_invocation(
+            format!("{google_base}/tenant/v1beta"),
+            ProviderDialect::GoogleGenerativeAi,
+            "models/gemini 2.5-pro",
+            "x-goog-api-key",
+            std::collections::BTreeMap::new(),
+            8_192,
+        );
+        let expected_google_body =
+            super::request_body(&google.request, ProviderDialect::GoogleGenerativeAi).unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+        gateway
+            .stream(google, CancellationToken::new(), sender)
+            .await
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RunEvent::RunFailed {
+                status: Some(400),
+                ..
+            })
+        ));
+        let raw = google_request.recv().unwrap();
+        let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with(
+            "POST /tenant/v1beta/models/gemini%202.5-pro:streamGenerateContent?alt=sse HTTP/1.1"
+        ));
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("accept: text/event-stream"));
+        assert!(headers.contains("x-goog-api-key: sk-sensitive-token"));
+        assert!(!headers.contains("authorization:"));
+        assert!(!headers.contains("anthropic-version:"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            expected_google_body
+        );
+        google_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_http_429_machine_codes_reach_run_failed_events() {
+        let cases = [
+            (
+                ProviderDialect::AnthropicMessages,
+                "claude-fixture",
+                "x-api-key",
+                r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+                "rate_limit_error",
+            ),
+            (
+                ProviderDialect::GoogleGenerativeAi,
+                "gemini-fixture",
+                "x-goog-api-key",
+                r#"{"error":{"code":429,"message":"quota exhausted","status":"RESOURCE_EXHAUSTED"}}"#,
+                "RESOURCE_EXHAUSTED",
+            ),
+        ];
+
+        for (dialect, model, credential_header, body, expected_code) in cases {
+            let (base_url, _, server) = spawn_single_response(
+                "429 Too Many Requests",
+                vec![("Content-Type".into(), "application/json".into())],
+                body.to_owned(),
+            );
+            let invocation = native_invocation(
+                base_url,
+                dialect,
+                model,
+                credential_header,
+                std::collections::BTreeMap::new(),
+                1_024,
+            );
+            let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+            let (sender, mut receiver) = mpsc::channel(2);
+
+            gateway
+                .stream(invocation, CancellationToken::new(), sender)
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                receiver.recv().await,
+                Some(RunEvent::RunFailed {
+                    code,
+                    retryable: true,
+                    status: Some(429),
+                    ..
+                }) if code == expected_code
+            ));
+            assert!(receiver.recv().await.is_none());
+            server.join().unwrap();
+        }
+    }
+
     fn model_query(
         base_url: String,
         catalog: ProviderModelCatalogKind,
@@ -977,9 +1384,9 @@ mod tests {
             target: ProviderTarget {
                 dialect: match catalog {
                     ProviderModelCatalogKind::Ollama => ProviderDialect::OllamaChat,
-                    ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Google => {
-                        ProviderDialect::OpenAiChatCompletions
-                    }
+                    ProviderModelCatalogKind::Anthropic => ProviderDialect::AnthropicMessages,
+                    ProviderModelCatalogKind::Google => ProviderDialect::GoogleGenerativeAi,
+                    ProviderModelCatalogKind::OpenAi => ProviderDialect::OpenAiChatCompletions,
                 },
                 base_url,
                 credential_placement,

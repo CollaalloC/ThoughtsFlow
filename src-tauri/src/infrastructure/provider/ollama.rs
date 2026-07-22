@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::{
-    infrastructure::provider::decoder::ProviderStreamDecoder,
+    infrastructure::provider::decoder::{ProviderStreamDecoder, append_stream_frame_fragment},
     ports::provider::{ProviderError, RunEvent, Usage},
 };
 
@@ -77,13 +77,25 @@ impl ProviderStreamDecoder for OllamaNdjsonDecoder {
         if self.terminal {
             return Ok(Vec::new());
         }
-        self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.buffer.drain(..=newline).collect::<Vec<_>>();
-            line.pop();
-            self.process_line(&line, &mut events)?;
+        let mut remaining = chunk;
+        while let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
+            append_stream_frame_fragment(
+                &mut self.buffer,
+                &remaining[..newline],
+                "Ollama NDJSON record",
+            )?;
+            let mut line = std::mem::take(&mut self.buffer);
+            let result = self.process_line(&line, &mut events);
+            line.clear();
+            self.buffer = line;
+            result?;
+            if self.terminal {
+                return Ok(events);
+            }
+            remaining = &remaining[newline + 1..];
         }
+        append_stream_frame_fragment(&mut self.buffer, remaining, "Ollama NDJSON record")?;
         Ok(events)
     }
 
@@ -138,11 +150,58 @@ struct OllamaMessage {
 #[cfg(test)]
 mod tests {
     use crate::{
-        infrastructure::provider::ProviderStreamDecoder,
-        ports::provider::{RunEvent, Usage},
+        infrastructure::provider::{
+            ProviderStreamDecoder, decoder::MAX_PROVIDER_STREAM_FRAME_BYTES,
+        },
+        ports::provider::{ProviderError, RunEvent, Usage},
     };
 
     use super::OllamaNdjsonDecoder;
+
+    #[test]
+    fn ollama_ndjson_rejects_an_oversized_unterminated_record() {
+        let mut decoder = OllamaNdjsonDecoder::new();
+        assert!(
+            decoder
+                .push(&vec![b'x'; MAX_PROVIDER_STREAM_FRAME_BYTES])
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(matches!(
+            decoder.push(b"x").unwrap_err(),
+            ProviderError::InvalidResponse(message)
+                if message == "Ollama NDJSON record exceeds the 1048576-byte stream frame limit"
+        ));
+    }
+
+    #[test]
+    fn ollama_ndjson_accepts_a_valid_record_at_the_limit() {
+        let mut record = b"{\"message\":{\"content\":\"".to_vec();
+        let suffix = b"\"},\"done\":false}";
+        let content_len = MAX_PROVIDER_STREAM_FRAME_BYTES - record.len() - suffix.len();
+        record.extend(std::iter::repeat_n(b'x', content_len));
+        record.extend_from_slice(suffix);
+        assert_eq!(record.len(), MAX_PROVIDER_STREAM_FRAME_BYTES);
+        record.push(b'\n');
+
+        let mut decoder = OllamaNdjsonDecoder::new();
+        let events = decoder.push(&record).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [RunEvent::TextDelta { text }] if text.len() == content_len
+        ));
+    }
+
+    #[test]
+    fn ollama_ndjson_accepts_many_small_records_in_one_large_network_chunk() {
+        let record = b"{\"message\":{},\"done\":false}\n";
+        let chunk = record.repeat(MAX_PROVIDER_STREAM_FRAME_BYTES / record.len() + 1);
+        assert!(chunk.len() > MAX_PROVIDER_STREAM_FRAME_BYTES);
+
+        let mut decoder = OllamaNdjsonDecoder::new();
+        assert!(decoder.push(&chunk).unwrap().is_empty());
+    }
 
     #[test]
     fn ollama_ndjson_decodes_arbitrary_chunks_empty_lines_usage_and_done() {

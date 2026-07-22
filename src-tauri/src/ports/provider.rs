@@ -9,6 +9,8 @@ use tokio_util::sync::CancellationToken;
 pub enum ProviderDialect {
     OpenAiChatCompletions,
     OllamaChat,
+    AnthropicMessages,
+    GoogleGenerativeAi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +293,7 @@ pub trait ProviderConnectionTester: Send + Sync {
 pub enum ProviderModelCatalogKind {
     OpenAi,
     Ollama,
+    Anthropic,
     Google,
 }
 

@@ -182,16 +182,18 @@ impl SqliteRepository {
     ) -> RepositoryResult<ProviderProfileRecord> {
         sqlx::query(
             "INSERT INTO provider_profile \
-             (id, provider_id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (id, provider_id, name, dialect, protocol_dialect, base_url, default_model, parameters_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
-                 provider_id = excluded.provider_id, name = excluded.name, dialect = excluded.dialect, \
+                 provider_id = excluded.provider_id, name = excluded.name, \
+                 dialect = excluded.dialect, protocol_dialect = excluded.protocol_dialect, \
                  base_url = excluded.base_url, default_model = excluded.default_model, \
                  parameters_json = excluded.parameters_json, updated_at = excluded.updated_at",
         )
         .bind(&profile.id)
         .bind(&profile.provider_id)
         .bind(&profile.name)
+        .bind(legacy_profile_dialect(&profile.dialect))
         .bind(&profile.dialect)
         .bind(&profile.base_url)
         .bind(&profile.default_model)
@@ -205,7 +207,7 @@ impl SqliteRepository {
 
     pub async fn get_provider_profile(&self, id: &str) -> RepositoryResult<ProviderProfileRecord> {
         let row = sqlx::query(
-            "SELECT id, provider_id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at \
+            "SELECT id, provider_id, name, protocol_dialect AS dialect, base_url, default_model, parameters_json, created_at, updated_at \
              FROM provider_profile WHERE id = ?",
         )
         .bind(id)
@@ -217,7 +219,7 @@ impl SqliteRepository {
 
     pub async fn list_provider_profiles(&self) -> RepositoryResult<Vec<ProviderProfileRecord>> {
         let rows = sqlx::query(
-            "SELECT id, provider_id, name, dialect, base_url, default_model, parameters_json, created_at, updated_at \
+            "SELECT id, provider_id, name, protocol_dialect AS dialect, base_url, default_model, parameters_json, created_at, updated_at \
              FROM provider_profile ORDER BY name COLLATE NOCASE, id",
         )
         .fetch_all(&self.pool)
@@ -1030,6 +1032,13 @@ fn provider_profile_from_row(row: &SqliteRow) -> RepositoryResult<ProviderProfil
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn legacy_profile_dialect(dialect: &str) -> &str {
+    match dialect {
+        "ollama_chat" => "ollama_chat",
+        _ => "openai_chat_completions",
+    }
 }
 
 fn content_block_from_row(row: &SqliteRow) -> RepositoryResult<ContentBlockRecord> {

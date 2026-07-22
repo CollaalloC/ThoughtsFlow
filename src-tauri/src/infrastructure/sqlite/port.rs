@@ -1050,6 +1050,8 @@ fn dialect_to_str(dialect: ProviderDialect) -> &'static str {
     match dialect {
         ProviderDialect::OpenAiCompatible => "openai_chat_completions",
         ProviderDialect::Ollama => "ollama_chat",
+        ProviderDialect::Anthropic => "anthropic_messages",
+        ProviderDialect::GoogleGenerativeAi => "google_generative_ai",
     }
 }
 
@@ -1057,6 +1059,8 @@ fn dialect_from_str(value: &str) -> Result<ProviderDialect, RepositoryPortError>
     match value {
         "openai_chat_completions" => Ok(ProviderDialect::OpenAiCompatible),
         "ollama_chat" => Ok(ProviderDialect::Ollama),
+        "anthropic_messages" => Ok(ProviderDialect::Anthropic),
+        "google_generative_ai" => Ok(ProviderDialect::GoogleGenerativeAi),
         other => Err(RepositoryPortError::InvalidData(format!(
             "unknown provider dialect `{other}`"
         ))),

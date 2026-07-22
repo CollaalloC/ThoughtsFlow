@@ -1,4 +1,34 @@
-use crate::ports::provider::{ProviderError, RunEvent};
+use crate::ports::provider::{ProviderDialect, ProviderError, RunEvent};
+
+pub(crate) const MAX_PROVIDER_STREAM_FRAME_BYTES: usize = 1024 * 1024;
+
+pub(crate) fn checked_stream_frame_size(
+    current: usize,
+    additional: usize,
+    frame_name: &'static str,
+) -> Result<usize, ProviderError> {
+    let size = current.checked_add(additional).ok_or_else(|| {
+        ProviderError::InvalidResponse(format!(
+            "{frame_name} exceeds the {MAX_PROVIDER_STREAM_FRAME_BYTES}-byte stream frame limit"
+        ))
+    })?;
+    if size > MAX_PROVIDER_STREAM_FRAME_BYTES {
+        return Err(ProviderError::InvalidResponse(format!(
+            "{frame_name} exceeds the {MAX_PROVIDER_STREAM_FRAME_BYTES}-byte stream frame limit"
+        )));
+    }
+    Ok(size)
+}
+
+pub(crate) fn append_stream_frame_fragment(
+    buffer: &mut Vec<u8>,
+    fragment: &[u8],
+    frame_name: &'static str,
+) -> Result<(), ProviderError> {
+    checked_stream_frame_size(buffer.len(), fragment.len(), frame_name)?;
+    buffer.extend_from_slice(fragment);
+    Ok(())
+}
 
 pub trait ProviderStreamDecoder: Send {
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<RunEvent>, ProviderError>;
@@ -6,11 +36,17 @@ pub trait ProviderStreamDecoder: Send {
     fn is_terminal(&self) -> bool;
 }
 
-pub fn decode_http_error(status: u16, content_type: Option<&str>, body: &[u8]) -> ProviderError {
-    decode_http_error_with_redaction(status, content_type, body, str::to_owned)
+pub fn decode_http_error(
+    dialect: ProviderDialect,
+    status: u16,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> ProviderError {
+    decode_http_error_with_redaction(dialect, status, content_type, body, str::to_owned)
 }
 
 pub fn decode_http_error_with_redaction<F>(
+    dialect: ProviderDialect,
     status: u16,
     content_type: Option<&str>,
     body: &[u8],
@@ -27,7 +63,7 @@ where
         .unwrap_or_else(|| sanitize_plain_error(body, content_type, &redact_bounded));
     let provider_code = parsed
         .as_ref()
-        .and_then(|value| extract_error_code(value, &redact_bounded));
+        .and_then(|value| extract_error_code(dialect, value, &redact_bounded));
 
     ProviderError::Http {
         status,
@@ -53,18 +89,35 @@ where
         .filter(|message| !message.is_empty())
 }
 
-fn extract_error_code<F>(value: &serde_json::Value, redact_bounded: &F) -> Option<String>
+fn extract_error_code<F>(
+    dialect: ProviderDialect,
+    value: &serde_json::Value,
+    redact_bounded: &F,
+) -> Option<String>
 where
     F: Fn(&str) -> String,
 {
-    value
-        .pointer("/error/code")
-        .or_else(|| value.get("code"))
-        .and_then(|code| match code {
-            serde_json::Value::String(code) => Some(redact_bounded(code)),
-            serde_json::Value::Number(code) => Some(code.to_string()),
-            _ => None,
-        })
+    let candidates = match dialect {
+        ProviderDialect::OpenAiChatCompletions => {
+            [value.pointer("/error/code"), value.pointer("/error/type")]
+        }
+        ProviderDialect::AnthropicMessages => [value.pointer("/error/type"), None],
+        ProviderDialect::GoogleGenerativeAi => [value.pointer("/error/status"), None],
+        ProviderDialect::OllamaChat => [value.pointer("/error/code"), value.get("code")],
+    };
+    candidates.into_iter().flatten().find_map(|code| {
+        let raw = match code {
+            serde_json::Value::String(code) => code.clone(),
+            serde_json::Value::Number(code) => code.to_string(),
+            _ => return None,
+        };
+        // Provider credentials are opaque. Redact the exact decoded field
+        // before trimming or truncating can transform a whitespace-bearing
+        // secret.
+        let redacted = redact_bounded(&raw);
+        let normalized = truncate(redacted.trim(), 512);
+        (!normalized.is_empty()).then_some(normalized)
+    })
 }
 
 fn sanitize_plain_error<F>(body: &[u8], content_type: Option<&str>, redact_bounded: &F) -> String
@@ -121,14 +174,123 @@ fn truncate(input: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::ports::provider::ProviderError;
+    use crate::ports::provider::{ProviderDialect, ProviderError};
 
     use super::{decode_http_error, decode_http_error_with_redaction};
+
+    #[test]
+    fn provider_error_machine_codes_follow_the_authoritative_dialect() {
+        let body =
+            br#"{"error":{"code":"openai_code","type":"anthropic_type","status":"GOOGLE_STATUS"}}"#;
+        let cases = [
+            (ProviderDialect::OpenAiChatCompletions, "openai_code"),
+            (ProviderDialect::AnthropicMessages, "anthropic_type"),
+            (ProviderDialect::GoogleGenerativeAi, "GOOGLE_STATUS"),
+            (ProviderDialect::OllamaChat, "openai_code"),
+        ];
+
+        for (dialect, expected) in cases {
+            let ProviderError::Http { provider_code, .. } =
+                decode_http_error(dialect, 429, Some("application/json"), body)
+            else {
+                panic!("expected an HTTP error");
+            };
+            assert_eq!(provider_code.as_deref(), Some(expected));
+        }
+
+        let ProviderError::Http { provider_code, .. } = decode_http_error(
+            ProviderDialect::OpenAiChatCompletions,
+            429,
+            Some("application/json"),
+            br#"{"error":{"type":"rate_limit_error"}}"#,
+        ) else {
+            panic!("expected an HTTP error");
+        };
+        assert_eq!(provider_code.as_deref(), Some("rate_limit_error"));
+
+        let ProviderError::Http { provider_code, .. } = decode_http_error(
+            ProviderDialect::OllamaChat,
+            500,
+            Some("application/json"),
+            br#"{"code":"ollama_generic"}"#,
+        ) else {
+            panic!("expected an HTTP error");
+        };
+        assert_eq!(provider_code.as_deref(), Some("ollama_generic"));
+
+        let ProviderError::Http { provider_code, .. } = decode_http_error(
+            ProviderDialect::OpenAiChatCompletions,
+            429,
+            Some("application/json"),
+            br#"{"error":{"code":null,"type":"rate_limit_error"}}"#,
+        ) else {
+            panic!("expected an HTTP error");
+        };
+        assert_eq!(provider_code.as_deref(), Some("rate_limit_error"));
+    }
+
+    #[test]
+    fn provider_error_machine_codes_redact_before_normalization_and_degrade_safely() {
+        let secret = " key  with spaces ";
+        for (dialect, body) in [
+            (
+                ProviderDialect::AnthropicMessages,
+                br#"{"error":{"type":" key  with spaces "}}"#.as_slice(),
+            ),
+            (
+                ProviderDialect::GoogleGenerativeAi,
+                br#"{"error":{"status":" key  with spaces "}}"#.as_slice(),
+            ),
+        ] {
+            let ProviderError::Http { provider_code, .. } = decode_http_error_with_redaction(
+                dialect,
+                429,
+                Some("application/json"),
+                body,
+                |value| value.replace(secret, "[SAFE]"),
+            ) else {
+                panic!("expected an HTTP error");
+            };
+            assert_eq!(provider_code.as_deref(), Some("[SAFE]"));
+        }
+
+        let long_code = "x".repeat(600);
+        let body =
+            serde_json::json!({ "error": { "status": format!("  {long_code}  ") } }).to_string();
+        let ProviderError::Http { provider_code, .. } = decode_http_error(
+            ProviderDialect::GoogleGenerativeAi,
+            429,
+            Some("application/json"),
+            body.as_bytes(),
+        ) else {
+            panic!("expected an HTTP error");
+        };
+        let provider_code = provider_code.expect("a string status should be retained");
+        assert_eq!(provider_code.chars().count(), 513);
+        assert!(provider_code.ends_with('…'));
+
+        for body in [
+            br#"{"error":{"status":{"nested":true}}}"#.as_slice(),
+            br#"{"error":{"message":"missing status"}}"#.as_slice(),
+            b"{not-json".as_slice(),
+        ] {
+            let ProviderError::Http { provider_code, .. } = decode_http_error(
+                ProviderDialect::GoogleGenerativeAi,
+                429,
+                Some("application/json"),
+                body,
+            ) else {
+                panic!("expected an HTTP error");
+            };
+            assert_eq!(provider_code, None);
+        }
+    }
 
     #[test]
     fn provider_error_bodies_are_normalized_without_exposing_response_markup() {
         assert_eq!(
             decode_http_error(
+                ProviderDialect::OpenAiChatCompletions,
                 429,
                 Some("application/json"),
                 br#"{"error":{"message":"rate limit reached","type":"rate_limit_error","code":"rpm"}}"#,
@@ -142,6 +304,7 @@ mod tests {
         );
         assert_eq!(
             decode_http_error(
+                ProviderDialect::OpenAiChatCompletions,
                 500,
                 Some("application/json"),
                 br#"{"error":"runner crashed"}"#,
@@ -154,7 +317,12 @@ mod tests {
             }
         );
         assert_eq!(
-            decode_http_error(401, Some("text/html"), b"<h1>Unauthorized</h1>"),
+            decode_http_error(
+                ProviderDialect::OpenAiChatCompletions,
+                401,
+                Some("text/html"),
+                b"<h1>Unauthorized</h1>",
+            ),
             ProviderError::Http {
                 status: 401,
                 provider_code: None,
@@ -164,13 +332,14 @@ mod tests {
         );
         assert_eq!(
             decode_http_error(
+                ProviderDialect::OpenAiChatCompletions,
                 400,
                 Some("application/json"),
                 br#"{"error":{"message":"bad request","code":""}}"#,
             ),
             ProviderError::Http {
                 status: 400,
-                provider_code: Some(String::new()),
+                provider_code: None,
                 message: "bad request".to_owned(),
                 retryable: false,
             }
@@ -183,6 +352,7 @@ mod tests {
         let redact = |value: &str| value.replace(whitespace_secret, "[SAFE]");
         assert_eq!(
             decode_http_error_with_redaction(
+                ProviderDialect::OpenAiChatCompletions,
                 401,
                 Some("application/json"),
                 br#"{"error":{"message":"before  key  with spaces  after","code":" key  with spaces "}}"#,
@@ -200,6 +370,7 @@ mod tests {
         let boundary_message = format!("{}{}", "x".repeat(510), boundary_secret);
         let body = serde_json::json!({ "error": { "message": boundary_message } }).to_string();
         let error = decode_http_error_with_redaction(
+            ProviderDialect::OpenAiChatCompletions,
             500,
             Some("application/json"),
             body.as_bytes(),
@@ -216,10 +387,13 @@ mod tests {
     fn raw_html_and_plain_text_are_redacted_before_lossy_normalization() {
         let repeated_whitespace_secret = "key  with  spaces";
         let html = format!("<p>before {repeated_whitespace_secret} after</p>");
-        let html_error =
-            decode_http_error_with_redaction(429, Some("text/html"), html.as_bytes(), |value| {
-                value.replace(repeated_whitespace_secret, "[SAFE]")
-            });
+        let html_error = decode_http_error_with_redaction(
+            ProviderDialect::OpenAiChatCompletions,
+            429,
+            Some("text/html"),
+            html.as_bytes(),
+            |value| value.replace(repeated_whitespace_secret, "[SAFE]"),
+        );
         assert_eq!(
             html_error,
             ProviderError::Http {
@@ -232,10 +406,13 @@ mod tests {
 
         let markup_secret = "<em>secret</em>";
         let plain = format!("provider reflected {markup_secret}");
-        let plain_error =
-            decode_http_error_with_redaction(401, Some("text/plain"), plain.as_bytes(), |value| {
-                value.replace(markup_secret, "[SAFE]")
-            });
+        let plain_error = decode_http_error_with_redaction(
+            ProviderDialect::OpenAiChatCompletions,
+            401,
+            Some("text/plain"),
+            plain.as_bytes(),
+            |value| value.replace(markup_secret, "[SAFE]"),
+        );
         assert_eq!(
             plain_error,
             ProviderError::Http {

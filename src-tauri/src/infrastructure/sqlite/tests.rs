@@ -120,7 +120,7 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 3);
+    assert_eq!(schema.version, 4);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -240,7 +240,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .await
             .expect("schema is readable")
             .version,
-        3
+        4
     );
     drop(repository);
 
@@ -259,7 +259,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![1, 2, 3, 4]
     );
     for (version, checksum) in &applied {
         let migration = TEST_MIGRATOR
@@ -314,6 +314,164 @@ async fn real_file_v1_database_upgrades_through_the_production_migrator() {
 #[tokio::test]
 async fn real_file_v2_database_upgrades_through_the_production_migrator() {
     assert_real_file_upgrade_from(2).await;
+}
+
+#[tokio::test]
+async fn real_file_v3_database_upgrades_through_the_production_migrator() {
+    assert_real_file_upgrade_from(3).await;
+}
+
+#[tokio::test]
+async fn provider_dialect_migration_preserves_rows_foreign_keys_and_strictness() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0001_core.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0002_workspace_goal.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0003_provider_template.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO provider_profile \
+         (id, provider_id, name, dialect, base_url, default_model, created_at, updated_at) \
+         VALUES ('provider-old', 'openai-compatible', 'Old provider', \
+                 'openai_chat_completions', 'https://example.com/v1', 'old-model', 1, 1); \
+         INSERT INTO workspace \
+         (id, title, goal, system_prompt, created_at, updated_at) \
+         VALUES ('workspace-old', 'Old workspace', '', '', 1, 1); \
+         INSERT INTO content_block \
+         (id, role, content, content_hash, created_at) \
+         VALUES ('prompt-old', 'user', 'hello', 'prompt-hash-old', 1); \
+         INSERT INTO turn \
+         (id, workspace_id, parent_run_id, prompt_block_id, title, created_at) \
+         VALUES ('turn-old', 'workspace-old', NULL, 'prompt-old', '', 1); \
+         INSERT INTO model_run \
+         (id, turn_id, workspace_id, provider_profile_id, model, status, output_markdown, \
+          reasoning_markdown, provider_snapshot_json, created_at, finished_at) \
+         VALUES ('run-old', 'turn-old', 'workspace-old', 'provider-old', 'old-model', \
+                 'completed', 'answer', '', '{}', 1, 2);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0004_provider_dialects.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("dialect migration expands the parent table atomically");
+
+    let old = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT provider_id, protocol_dialect, default_model FROM provider_profile WHERE id = 'provider-old'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        old,
+        (
+            "openai-compatible".into(),
+            "openai_chat_completions".into(),
+            "old-model".into()
+        )
+    );
+    let strict: i64 =
+        sqlx::query_scalar("SELECT strict FROM pragma_table_list WHERE name = 'provider_profile'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(strict, 1);
+    let foreign_key_errors: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pragma_foreign_key_check")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(foreign_key_errors, 0);
+
+    sqlx::query(
+        "INSERT INTO provider_profile \
+         (id, provider_id, name, dialect, protocol_dialect, base_url, default_model, created_at, updated_at) \
+         VALUES ('provider-anthropic', 'anthropic', 'Anthropic', 'openai_chat_completions', \
+                 'anthropic_messages', 'https://api.anthropic.com', 'claude', 3, 3), \
+                ('provider-google', 'google', 'Google', 'openai_chat_completions', \
+                 'google_generative_ai', 'https://generativelanguage.googleapis.com/v1beta', \
+                 'gemini', 3, 3)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let invalid = sqlx::query(
+        "INSERT INTO provider_profile \
+         (id, provider_id, name, dialect, protocol_dialect, base_url, default_model, created_at, updated_at) \
+         VALUES ('provider-invalid', 'invalid', 'Invalid', 'openai_chat_completions', \
+                 'query_injected', 'https://example.com', 'model', 3, 3)",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("the widened CHECK must still fail closed for unknown dialects");
+    assert!(invalid.to_string().contains("CHECK constraint failed"));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_profile")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 3, "the rejected statement must roll back completely");
+    assert!(
+        sqlx::query("DELETE FROM provider_profile WHERE id = 'provider-old'")
+            .execute(&pool)
+            .await
+            .is_err(),
+        "the existing model_run foreign key must survive the table rebuild"
+    );
+}
+
+#[tokio::test]
+async fn repository_round_trips_every_provider_dialect_through_the_strict_schema() {
+    let repository = SqliteRepository::connect_in_memory().await.unwrap();
+    let profiles = [
+        (
+            "profile-openai",
+            "openai",
+            ProviderDialect::OpenAiCompatible,
+        ),
+        ("profile-ollama", "ollama", ProviderDialect::Ollama),
+        ("profile-anthropic", "anthropic", ProviderDialect::Anthropic),
+        (
+            "profile-google",
+            "google",
+            ProviderDialect::GoogleGenerativeAi,
+        ),
+    ];
+
+    for (index, (id, provider_id, dialect)) in profiles.into_iter().enumerate() {
+        let profile = ProviderProfile {
+            id: id.into(),
+            provider_id: provider_id.into(),
+            name: format!("Provider {index}"),
+            dialect,
+            base_url: "https://provider.example.com/v1".into(),
+            model: "model".into(),
+            parameters: BTreeMap::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        RepositoryPort::save_provider_profile(&repository, profile.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            RepositoryPort::get_provider_profile(&repository, id)
+                .await
+                .unwrap(),
+            profile
+        );
+    }
 }
 
 #[tokio::test]

@@ -8,7 +8,11 @@ export type RunStatus =
   | "interrupted";
 
 export type DecisionStatus = "accepted" | "rejected" | "to-verify";
-export type ProviderDialect = "openai-compatible" | "ollama";
+export type ProviderDialect =
+  | "openai-compatible"
+  | "ollama"
+  | "anthropic"
+  | "google-generative-ai";
 export type ProviderStreamProtocol =
   | "openai_sse"
   | "ollama_ndjson"

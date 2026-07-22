@@ -605,12 +605,14 @@ fn provider_template_catalog_exposes_protocol_and_auth_without_secrets() {
             value: "2023-06-01",
         }]
     );
-    assert!(!anthropic.runtime_available);
+    assert_eq!(anthropic.revision, 2);
+    assert!(anthropic.runtime_available);
 
     let google = provider_template("google").expect("Google template");
     assert_eq!(google.protocol.stream_protocol, StreamProtocol::GoogleSse);
     assert_eq!(google.protocol.auth_header_name, Some("x-goog-api-key"));
-    assert!(!google.runtime_available);
+    assert_eq!(google.revision, 2);
+    assert!(google.runtime_available);
 
     let ollama = provider_template("ollama").expect("Ollama template");
     assert_eq!(ollama.revision, 2);

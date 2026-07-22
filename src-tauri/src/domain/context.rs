@@ -623,6 +623,8 @@ fn dialect_name(dialect: ProviderDialect) -> &'static str {
     match dialect {
         ProviderDialect::OpenAiCompatible => "openai_compatible",
         ProviderDialect::Ollama => "ollama",
+        ProviderDialect::Anthropic => "anthropic",
+        ProviderDialect::GoogleGenerativeAi => "google_generative_ai",
     }
 }
 

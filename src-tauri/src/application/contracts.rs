@@ -377,6 +377,8 @@ pub struct ExportResult {
 pub enum ProviderDialectView {
     OpenaiCompatible,
     Ollama,
+    Anthropic,
+    GoogleGenerativeAi,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -613,7 +615,7 @@ mod tests {
     fn provider_template_contract_uses_stable_protocol_names() {
         let value = serde_json::to_value(ProviderTemplateView {
             provider_id: "anthropic".into(),
-            revision: 1,
+            revision: 2,
             display_name: "Anthropic".into(),
             default_base_url: "https://api.anthropic.com".into(),
             protocol: ProtocolProfileView {
@@ -627,7 +629,7 @@ mod tests {
                     "2023-06-01".into(),
                 )]),
             },
-            runtime_available: false,
+            runtime_available: true,
         })
         .unwrap();
 
@@ -635,7 +637,7 @@ mod tests {
         assert_eq!(value["protocol"]["streamProtocol"], "anthropic_sse");
         assert_eq!(value["protocol"]["authPlacement"], "api_key_header");
         assert_eq!(value["protocol"]["authHeaderName"], "x-api-key");
-        assert_eq!(value["runtimeAvailable"], false);
+        assert_eq!(value["runtimeAvailable"], true);
     }
 
     #[test]

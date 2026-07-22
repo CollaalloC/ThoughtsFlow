@@ -35,6 +35,7 @@ use super::*;
 const DEFAULT_PROVIDER_ID: &str = "provider-local-ollama";
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a careful technical reasoning partner. Make assumptions explicit and preserve competing options.";
 const DEFAULT_MAX_CONTEXT_CHARS: usize = 100_000;
+const DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS: u32 = 4_096;
 const INTERNAL_DEFAULT_KEY: &str = "_thoughsflowIsDefault";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -873,6 +874,8 @@ fn provider_profile_view(record: ProviderProfile) -> AppResult<ProviderProfileVi
         dialect: match record.dialect {
             domain::ProviderDialect::OpenAiCompatible => ProviderDialectView::OpenaiCompatible,
             domain::ProviderDialect::Ollama => ProviderDialectView::Ollama,
+            domain::ProviderDialect::Anthropic => ProviderDialectView::Anthropic,
+            domain::ProviderDialect::GoogleGenerativeAi => ProviderDialectView::GoogleGenerativeAi,
         },
         base_url: record.base_url,
         model: record.model,
@@ -1062,7 +1065,12 @@ fn effective_provider_parameters(
                 })
         })
         .collect::<AppResult<BTreeMap<_, _>>>()?;
-    normalize_provider_parameter_values(parameters)
+    let mut effective = normalize_provider_parameter_values(parameters)?;
+    if record.dialect == domain::ProviderDialect::Anthropic && effective.max_output_tokens.is_none()
+    {
+        effective.max_output_tokens = Some(DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS);
+    }
+    Ok(effective)
 }
 
 fn decision_view(record: DecisionMark) -> AppResult<DecisionMarkView> {
@@ -1167,6 +1175,8 @@ fn provider_dialect(value: domain::ProviderDialect) -> ProviderDialect {
     match value {
         domain::ProviderDialect::OpenAiCompatible => ProviderDialect::OpenAiChatCompletions,
         domain::ProviderDialect::Ollama => ProviderDialect::OllamaChat,
+        domain::ProviderDialect::Anthropic => ProviderDialect::AnthropicMessages,
+        domain::ProviderDialect::GoogleGenerativeAi => ProviderDialect::GoogleGenerativeAi,
     }
 }
 
@@ -1182,12 +1192,8 @@ fn provider_target(snapshot: &domain::ProviderSnapshot) -> AppResult<ProviderTar
     let template_dialect = match stream_protocol {
         domain::StreamProtocol::OpenAiSse => ProviderDialect::OpenAiChatCompletions,
         domain::StreamProtocol::OllamaNdjson => ProviderDialect::OllamaChat,
-        domain::StreamProtocol::AnthropicSse | domain::StreamProtocol::GoogleSse => {
-            return Err(AppError::validation(
-                "provider_protocol_unavailable",
-                "The selected Provider protocol is not available yet",
-            ));
-        }
+        domain::StreamProtocol::AnthropicSse => ProviderDialect::AnthropicMessages,
+        domain::StreamProtocol::GoogleSse => ProviderDialect::GoogleGenerativeAi,
     };
     if dialect != template_dialect {
         return Err(AppError::internal(
@@ -1316,9 +1322,9 @@ fn provider_model_catalog_plan(
     };
     let dialect = match catalog {
         ProviderModelCatalogKind::Ollama => ProviderDialect::OllamaChat,
-        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Google => {
-            ProviderDialect::OpenAiChatCompletions
-        }
+        ProviderModelCatalogKind::OpenAi => ProviderDialect::OpenAiChatCompletions,
+        ProviderModelCatalogKind::Anthropic => ProviderDialect::AnthropicMessages,
+        ProviderModelCatalogKind::Google => ProviderDialect::GoogleGenerativeAi,
     };
     Ok(ProviderModelCatalogPlan::Remote(ProviderModelQuery {
         target: ProviderTarget {
@@ -1375,12 +1381,8 @@ fn runnable_template(
     let dialect = match template.protocol.stream_protocol {
         domain::StreamProtocol::OpenAiSse => domain::ProviderDialect::OpenAiCompatible,
         domain::StreamProtocol::OllamaNdjson => domain::ProviderDialect::Ollama,
-        domain::StreamProtocol::AnthropicSse | domain::StreamProtocol::GoogleSse => {
-            return Err(AppError::validation(
-                "provider_protocol_unavailable",
-                "The selected Provider protocol is not available yet",
-            ));
-        }
+        domain::StreamProtocol::AnthropicSse => domain::ProviderDialect::Anthropic,
+        domain::StreamProtocol::GoogleSse => domain::ProviderDialect::GoogleGenerativeAi,
     };
     Ok((template, dialect))
 }
@@ -2606,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_authority_rejects_unknown_and_not_yet_runnable_templates() {
+    fn rust_authority_enables_implemented_protocols_and_rejects_unavailable_templates() {
         assert_eq!(
             runnable_template("missing")
                 .expect_err("unknown templates must be rejected")
@@ -2614,7 +2616,7 @@ mod tests {
             "unknown_provider_template"
         );
         assert_eq!(
-            runnable_template("anthropic")
+            runnable_template("azure-openai")
                 .expect_err("templates cannot run before their protocol exists")
                 .code,
             "provider_protocol_unavailable"
@@ -2624,23 +2626,33 @@ mod tests {
             domain::ProviderDialect::OpenAiCompatible
         );
 
-        let unavailable_profile = ProviderProfile {
+        assert_eq!(
+            runnable_template("anthropic").unwrap().1,
+            domain::ProviderDialect::Anthropic
+        );
+        assert_eq!(
+            runnable_template("google").unwrap().1,
+            domain::ProviderDialect::GoogleGenerativeAi
+        );
+
+        let anthropic_profile = ProviderProfile {
             id: "profile-anthropic".into(),
             provider_id: "anthropic".into(),
             name: "Anthropic".into(),
-            dialect: domain::ProviderDialect::OpenAiCompatible,
+            dialect: domain::ProviderDialect::Anthropic,
             base_url: "https://api.anthropic.com".into(),
             model: "claude".into(),
             parameters: BTreeMap::new(),
             created_at: 1,
             updated_at: 1,
         };
+        let snapshot = domain_provider_snapshot(&anthropic_profile)
+            .expect("an implemented protocol must resolve to a frozen Provider snapshot");
         assert_eq!(
-            domain_provider_snapshot(&unavailable_profile)
-                .expect_err("context inspection, connection tests, and runs must fail closed")
-                .code,
-            "provider_protocol_unavailable"
+            snapshot.stream_protocol,
+            Some(domain::StreamProtocol::AnthropicSse)
         );
+        assert_eq!(snapshot.template_revision, Some(2));
     }
 
     #[test]
@@ -2676,7 +2688,7 @@ mod tests {
     }
 
     #[test]
-    fn model_catalog_resolution_does_not_enable_unavailable_streaming_protocols() {
+    fn model_catalog_resolution_keeps_discovery_and_runtime_protocols_typed() {
         let ProviderModelCatalogPlan::Static(anthropic) =
             provider_model_catalog_plan("anthropic", "https://api.anthropic.com")
                 .expect("Anthropic has a reviewed static model catalog")
@@ -2685,10 +2697,8 @@ mod tests {
         };
         assert_eq!(anthropic[0].id, "claude-fable-5");
         assert_eq!(
-            runnable_template("anthropic")
-                .expect_err("model discovery must not enable Anthropic runs")
-                .code,
-            "provider_protocol_unavailable"
+            runnable_template("anthropic").unwrap().1,
+            domain::ProviderDialect::Anthropic
         );
 
         let ProviderModelCatalogPlan::Remote(google) = provider_model_catalog_plan(
@@ -2703,11 +2713,10 @@ mod tests {
             google.target.credential_placement,
             CredentialPlacement::Header("x-goog-api-key".into())
         );
+        assert_eq!(google.target.dialect, ProviderDialect::GoogleGenerativeAi);
         assert_eq!(
-            runnable_template("google")
-                .expect_err("model discovery must not enable Google runs")
-                .code,
-            "provider_protocol_unavailable"
+            runnable_template("google").unwrap().1,
+            domain::ProviderDialect::GoogleGenerativeAi
         );
     }
 
@@ -2819,6 +2828,65 @@ mod tests {
         );
         assert_eq!(stored.get("max_output_tokens"), Some(&"4096".into()));
         assert_eq!(stored.get("stop"), Some(&r#"["END","STOP"]"#.into()));
+    }
+
+    #[test]
+    fn anthropic_default_max_tokens_is_frozen_before_receipt_hash_and_request() {
+        let profile = ProviderProfile {
+            id: "profile-anthropic".into(),
+            provider_id: "anthropic".into(),
+            name: "Anthropic".into(),
+            dialect: domain::ProviderDialect::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-sonnet-5".into(),
+            parameters: BTreeMap::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let provider = domain_provider_snapshot(&profile).unwrap();
+        assert_eq!(
+            provider.parameters.get("max_output_tokens"),
+            Some(&DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS.to_string())
+        );
+
+        let effective = effective_provider_parameters(&profile).unwrap();
+        let request = canonical_provider_request(
+            "run-anthropic".into(),
+            profile.model.clone(),
+            vec![CanonicalMessage {
+                role: ProviderMessageRole::User,
+                content: "question".into(),
+            }],
+            &effective,
+        );
+        assert_eq!(
+            request.max_output_tokens,
+            Some(DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS)
+        );
+
+        let graph = domain::ConversationGraph::try_new(Vec::new(), Vec::new(), Vec::new()).unwrap();
+        let compiler = ContextCompiler::new(ContextPolicy::default());
+        let preview = |provider| {
+            compiler
+                .inspect(
+                    &graph,
+                    ContextCompileRequest {
+                        workspace_id: "workspace".into(),
+                        system_prompt: "policy".into(),
+                        parent_run_id: None,
+                        current_prompt: "question".into(),
+                        overrides: domain::ContextOverrides::default(),
+                        provider: Some(provider),
+                    },
+                )
+                .unwrap()
+        };
+        let default_hash = preview(provider.clone()).preview_hash;
+        let mut explicit_provider = provider;
+        explicit_provider
+            .parameters
+            .insert("max_output_tokens".into(), "8192".into());
+        assert_ne!(default_hash, preview(explicit_provider).preview_hash);
     }
 
     #[test]

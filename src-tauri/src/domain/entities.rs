@@ -97,6 +97,8 @@ pub struct ContentBlock {
 pub enum ProviderDialect {
     OpenAiCompatible,
     Ollama,
+    Anthropic,
+    GoogleGenerativeAi,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

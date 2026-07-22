@@ -79,7 +79,7 @@ describe("ProviderSettings", () => {
         },
         {
           providerId: "anthropic",
-          revision: 1,
+          revision: 2,
           displayName: "Anthropic",
           defaultBaseUrl: "https://api.anthropic.com",
           protocol: {
@@ -89,7 +89,7 @@ describe("ProviderSettings", () => {
             requiresAdditionalHeaders: true,
             additionalHeaders: { "anthropic-version": "2023-06-01" },
           },
-          runtimeAvailable: false,
+          runtimeAvailable: true,
         },
         {
           providerId: "ollama",
@@ -132,7 +132,7 @@ describe("ProviderSettings", () => {
     expect(anthropicOption).toBeEnabled();
     fireEvent.change(selector, { target: { value: "anthropic" } });
     expect(screen.getByText("x-api-key: …")).toBeVisible();
-    expect(screen.getByRole("button", { name: "协议即将支持" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存 Provider" })).toBeEnabled();
     fireEvent.change(selector, { target: { value: "openai" } });
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.openai.com/v1");
     expect(screen.getByText(/openai_sse/)).toBeVisible();
@@ -471,7 +471,7 @@ describe("ProviderSettings", () => {
   it("explains that an audited static model catalog does not issue a remote GET", async () => {
     const anthropicTemplate: ProviderTemplate = {
       providerId: "anthropic",
-      revision: 1,
+      revision: 2,
       displayName: "Anthropic",
       defaultBaseUrl: "https://api.anthropic.com",
       protocol: {
@@ -482,7 +482,7 @@ describe("ProviderSettings", () => {
         requiresAdditionalHeaders: true,
         additionalHeaders: { "anthropic-version": "2023-06-01" },
       },
-      runtimeAvailable: false,
+      runtimeAvailable: true,
     };
     const bridge = createProviderSettingsBridge({
       listProviderTemplates: vi.fn().mockResolvedValue([anthropicTemplate]),

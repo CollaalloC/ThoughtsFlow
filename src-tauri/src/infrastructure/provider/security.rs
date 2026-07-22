@@ -42,6 +42,7 @@ pub fn validate_base_url(base_url: &str) -> Result<Url, ProviderError> {
 pub fn provider_request_url(
     base_url: &str,
     dialect: ProviderDialect,
+    model: &str,
 ) -> Result<Url, ProviderError> {
     let mut url = validate_base_url(base_url)?;
     let base_path = url.path().trim_end_matches('/');
@@ -55,9 +56,70 @@ pub fn provider_request_url(
             format!("{base_path}/chat")
         }
         ProviderDialect::OllamaChat => format!("{base_path}/api/chat"),
+        ProviderDialect::AnthropicMessages if base_path.ends_with("/v1/messages") => {
+            base_path.to_owned()
+        }
+        ProviderDialect::AnthropicMessages if base_path.ends_with("/v1") => {
+            format!("{base_path}/messages")
+        }
+        ProviderDialect::AnthropicMessages => format!("{base_path}/v1/messages"),
+        ProviderDialect::GoogleGenerativeAi => {
+            let model = normalized_google_model(model)?;
+            let prefix =
+                if base_path.ends_with("/v1beta/models") || base_path.ends_with("/v1/models") {
+                    base_path.trim_end_matches("/models").to_owned()
+                } else if base_path.ends_with("/v1beta") || base_path.ends_with("/v1") {
+                    base_path.to_owned()
+                } else {
+                    format!("{base_path}/v1beta")
+                };
+            url.set_path(&prefix);
+            url.path_segments_mut()
+                .map_err(|_| {
+                    ProviderError::InvalidEndpoint(
+                        "Google Provider URL cannot contain path segments".into(),
+                    )
+                })?
+                .push("models")
+                .push(&format!("{model}:streamGenerateContent"));
+            url.set_query(Some("alt=sse"));
+            return Ok(url);
+        }
     };
     url.set_path(&path);
     Ok(url)
+}
+
+fn normalized_google_model(model: &str) -> Result<&str, ProviderError> {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    let invalid = model.is_empty()
+        || model == "."
+        || model == ".."
+        || model.starts_with("models/")
+        || model.trim() != model
+        || model.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '/' | '\\' | '?' | '#' | '%' | ':')
+                || is_bidi_control(character)
+        });
+    if invalid {
+        return Err(ProviderError::InvalidEndpoint(
+            "Google model must be one unambiguous model identifier, with at most one `models/` prefix"
+                .into(),
+        ));
+    }
+    Ok(model)
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// Builds the metadata-only model catalog endpoint without discarding a
@@ -88,8 +150,21 @@ pub fn provider_models_url(
             format!("{base_path}/tags")
         }
         ProviderModelCatalogKind::Ollama => format!("{base_path}/api/tags"),
+        ProviderModelCatalogKind::Anthropic if base_path.ends_with("/v1/models") => {
+            base_path.to_owned()
+        }
+        ProviderModelCatalogKind::Anthropic if base_path.ends_with("/v1/messages") => {
+            let prefix = base_path.trim_end_matches("/messages");
+            format!("{prefix}/models")
+        }
+        ProviderModelCatalogKind::Anthropic if base_path.ends_with("/v1") => {
+            format!("{base_path}/models")
+        }
+        ProviderModelCatalogKind::Anthropic => format!("{base_path}/v1/models"),
         ProviderModelCatalogKind::Google if base_path.ends_with("/models") => base_path.to_owned(),
-        ProviderModelCatalogKind::Google if base_path.ends_with("/v1beta") => {
+        ProviderModelCatalogKind::Google
+            if base_path.ends_with("/v1beta") || base_path.ends_with("/v1") =>
+        {
             format!("{base_path}/models")
         }
         ProviderModelCatalogKind::Google => format!("{base_path}/v1beta/models"),
@@ -159,17 +234,122 @@ mod tests {
             provider_request_url(
                 "https://models.example.com/v1",
                 ProviderDialect::OpenAiChatCompletions,
+                "ignored",
             )
             .unwrap()
             .as_str(),
             "https://models.example.com/v1/chat/completions"
         );
         assert_eq!(
-            provider_request_url("http://localhost:11434", ProviderDialect::OllamaChat)
-                .unwrap()
-                .as_str(),
+            provider_request_url(
+                "http://localhost:11434",
+                ProviderDialect::OllamaChat,
+                "ignored",
+            )
+            .unwrap()
+            .as_str(),
             "http://localhost:11434/api/chat"
         );
+    }
+
+    #[test]
+    fn anthropic_request_paths_preserve_prefixes_and_accept_a_frozen_endpoint() {
+        let cases = [
+            (
+                "https://api.anthropic.com",
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1",
+                "https://proxy.example.com/tenant/v1/messages",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1/messages/",
+                "https://proxy.example.com/tenant/v1/messages",
+            ),
+        ];
+
+        for (base_url, expected) in cases {
+            assert_eq!(
+                provider_request_url(base_url, ProviderDialect::AnthropicMessages, "ignored")
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn google_request_paths_normalize_one_models_prefix_and_encode_the_model_segment() {
+        let cases = [
+            (
+                "https://generativelanguage.googleapis.com",
+                "gemini 2.5-pro",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini%202.5-pro:streamGenerateContent?alt=sse",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta",
+                "models/gemini-2.5-pro",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1",
+                "gemini-2.5-pro",
+                "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1beta",
+                "gemini-2.5-flash",
+                "https://proxy.example.com/tenant/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1/models/",
+                "models/gemini-2.5-flash",
+                "https://proxy.example.com/tenant/v1/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1beta/models/",
+                "gemini-2.5-flash",
+                "https://proxy.example.com/tenant/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            ),
+        ];
+
+        for (base_url, model, expected) in cases {
+            assert_eq!(
+                provider_request_url(base_url, ProviderDialect::GoogleGenerativeAi, model)
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn google_request_path_rejects_ambiguous_or_injectable_model_ids() {
+        for model in [
+            "",
+            "models/",
+            "models/models/gemini-pro",
+            "../gemini-pro",
+            "gemini/../pro",
+            "gemini\\pro",
+            "gemini?key=secret",
+            "gemini#fragment",
+            "gemini%2Fpro",
+            "gemini%252Fpro",
+            "gemini:streamGenerateContent",
+            "gemini\u{202e}pro",
+            "gemini\npro",
+        ] {
+            assert!(matches!(
+                provider_request_url(
+                    "https://generativelanguage.googleapis.com/v1beta",
+                    ProviderDialect::GoogleGenerativeAi,
+                    model,
+                ),
+                Err(ProviderError::InvalidEndpoint(_))
+            ));
+        }
     }
 
     #[test]
@@ -206,6 +386,16 @@ mod tests {
                 "http://localhost:11434/prefix/api/tags",
             ),
             (
+                "https://api.anthropic.com",
+                ProviderModelCatalogKind::Anthropic,
+                "https://api.anthropic.com/v1/models",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1/messages",
+                ProviderModelCatalogKind::Anthropic,
+                "https://proxy.example.com/tenant/v1/models",
+            ),
+            (
                 "https://generativelanguage.googleapis.com",
                 ProviderModelCatalogKind::Google,
                 "https://generativelanguage.googleapis.com/v1beta/models",
@@ -216,9 +406,19 @@ mod tests {
                 "https://generativelanguage.googleapis.com/v1beta/models",
             ),
             (
+                "https://generativelanguage.googleapis.com/v1",
+                ProviderModelCatalogKind::Google,
+                "https://generativelanguage.googleapis.com/v1/models",
+            ),
+            (
                 "https://generativelanguage.googleapis.com/v1beta/models/",
                 ProviderModelCatalogKind::Google,
                 "https://generativelanguage.googleapis.com/v1beta/models",
+            ),
+            (
+                "https://proxy.example.com/tenant/v1/models/",
+                ProviderModelCatalogKind::Google,
+                "https://proxy.example.com/tenant/v1/models",
             ),
         ];
 
