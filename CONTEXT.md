@@ -24,6 +24,14 @@ _Avoid_: Vendor, transport
 A secret held only for the lifetime of the Rust process and associated with one Provider Profile.
 _Avoid_: API key record, saved credential
 
+**Model Catalog**:
+A bounded, normalized list of model metadata obtained through the Rust-owned strategy of a Provider Template; it is not persisted as authoritative application data.
+_Avoid_: Model database, cached models, Provider response
+
+**Model Discovery**:
+A metadata-only lookup against a Model Catalog that never includes workspace Context and persists only a model explicitly selected when saving a Provider Profile.
+_Avoid_: Model run, connection test, context request
+
 ## Reasoning Lineage
 
 **Turn**:

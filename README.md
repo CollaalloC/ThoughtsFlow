@@ -9,6 +9,7 @@ ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。�
 - 创建、打开、重命名和归档本地工作区；
 - 工作区目标与模型 `system prompt` 分开保存；未设置目标时的界面提示不会进入模型 Context；
 - Generic OpenAI-compatible Chat Completions（SSE）与 Ollama `/api/chat`（NDJSON）真实流式请求；
+- Provider 模型发现：OpenAI-compatible、OpenRouter 与 OpenAI 使用模型列表 API，Ollama 使用 `/api/tags`，Google 使用 `/v1beta/models`，Anthropic 使用 Rust 内置的审核列表；
 - 同一 Turn 多个不可覆盖的 Run、精确回答分支与兄弟分支 Context 隔离；
 - 发送前 Context 检查、pin/exclude、超限阻断和 preview hash 复核；
 - 发送后不可变 Context Snapshot/Receipt，包含有序内容、来源、Provider、Model、Base URL、参数与 canonical hash；
@@ -41,7 +42,9 @@ npm run tauri -- build
 
 Rust Core 内置并唯一维护 7 个权威模板：OpenAI、Generic OpenAI-compatible、Ollama、Anthropic、Google、Azure OpenAI 和 OpenRouter；前端不能改写其协议或认证位置。选择模板会填入默认 Base URL，用户仍可覆盖为代理或自托管端点。新的 Context Receipt 会锁定模板 ID/revision、实际协议、非敏感认证位置、静态头与最终生效参数；API Key 不进入 Receipt。迁移前生成的历史 Receipt 保留其原有参数，新增模板元数据明确显示为 `legacy/unknown`，不会用当前模板反向推断或伪造历史事实。
 
-远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码，Provider 请求也不会跟随 3xx 重定向。API Key 只保存在当前 Rust 进程内存，退出应用后清除，不写入 SQLite、前端持久状态、日志或导出文件。若 Provider 原样回显当前会话凭据，Rust 会在内容进入 `RunEvent` 或 SQLite 前进行跨 delta 的精确脱敏；该防线只匹配已知凭据原文，不能识别经过变形或编码的泄露。
+“发现模型”既可使用已保存 Profile，也可在保存前检查当前 draft。前者由 Rust 从 SQLite 与会话凭据存储解析权威目标；后者只把模板 ID、Base URL 和可选的本次会话凭据交给 Rust，由内置模板决定认证头、路径和响应格式。远程目录只向界面显示的 Host 发送模型元数据 GET，Anthropic 的内置审核列表不会联网；两者都不携带工作区 Context。原始目录响应和发现结果不写入 SQLite；只有用户选中模型并显式保存 Profile 后，模型 ID 才会持久化。Azure OpenAI 没有可移植的模型目录，当前会明确提示不支持发现。
+
+远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码，Provider 请求也不会跟随 3xx 重定向。API Key 只保存在当前 Rust 进程内存，退出应用后清除，不写入 SQLite、前端持久状态、日志或导出文件。模型发现所需的 draft 凭据只通过一次命令进入 Rust，不进入可序列化应用 DTO；已保存 Profile 的发现则复用 Rust 内存中的凭据。若 Provider 原样回显当前会话凭据，Rust 会在内容进入 `RunEvent`、错误、模型列表或 SQLite 前进行精确脱敏；该防线只匹配已知凭据原文，不能识别经过变形或编码的泄露。
 
 ## 数据、隐私与恢复
 
@@ -67,8 +70,8 @@ Decision Packet 只能由 Rust 文件适配器在上述 `exports` 目录创建�
 ## 验证
 
 ```bash
-npm run test:run
-npm run build
+npm run check
+npm run test:fixtures
 npm run test:e2e
 
 cd src-tauri
@@ -100,7 +103,7 @@ React UI
 
 组件不直接调用 SQL、Provider、API Key 或任意文件系统；所有 IPC 通过 `src/platform/desktop-bridge.ts`。唯一业务拓扑是 `Turn.parent_run_id`，路线图位置只属于 `ViewState`，不能改变 Context 编译结果。
 
-应用服务只依赖 `RepositoryPort`、运行热路径专用的 `RunPersistencePort`、`ProviderGateway`、`ProviderConnectionTester` 与 `DecisionPacketWriter`；SQLite、Reqwest 和本地文件系统实现由 Tauri 组合根注入。Tauri 结构化命令错误在 DesktopBridge 统一转换为 `DesktopBridgeError`，保留 `code`、`retryable` 和 `details`。
+应用服务只依赖 `RepositoryPort`、运行热路径专用的 `RunPersistencePort`、`ProviderGateway`、`ProviderConnectionTester`、只读 `ProviderModelCatalog` 与 `DecisionPacketWriter`；SQLite、Reqwest 和本地文件系统实现由 Tauri 组合根注入。Tauri 结构化命令错误在 DesktopBridge 统一转换为 `DesktopBridgeError`，保留 `code`、`retryable` 和 `details`。
 
 ## 当前限制
 
