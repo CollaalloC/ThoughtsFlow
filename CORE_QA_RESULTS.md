@@ -1,19 +1,21 @@
 # ThoughsFlow Core QA Results
 
-验证日期：2026-07-22（Asia/Shanghai）
+验证日期：2026-07-23（Asia/Shanghai）
 
 ## 自动化验证
 
 | 检查 | 结果 | 证据 |
 |---|---:|---|
-| React / TypeScript 组件与性能测试 | 通过 | `npm run test:run`：6 个测试文件、18 个测试通过 |
-| TypeScript 与 production build | 通过 | `npm run build`；Vite 生产包成功生成 |
+| React / TypeScript 组件与性能测试 | 通过 | `npm run test:run`：8 个测试文件、38 个测试通过 |
+| Provider fixture 合约测试 | 通过 | `npm run test:fixtures`：8 个测试通过，覆盖四种 dialect 的目录、流、分片、错误、断流与取消 |
+| TypeScript 与 production build | 通过 | `npm run build`；Vite 生产包成功生成，主 chunk 392.27 kB |
 | Rust 格式 | 通过 | `cargo fmt --all -- --check` |
 | Rust 静态检查 | 通过 | `cargo clippy --all-targets -- -D warnings` |
-| Rust 测试 | 通过 | `cargo test --all-targets`：45 个测试通过 |
+| Rust 测试 | 通过 | `cargo test --all-targets`：147 个测试通过 |
 | 1,000 Turn 路线图 | 通过 | 固定数据集在 jsdom 中打开并选择精确 `run-999`；单跑 2.13 秒 |
 | Playwright 旅程发现 | 通过 | Chromium / WebKit 各发现 8 条核心旅程，共 16 条 |
-| Playwright 原生旅程执行 | 未在当前环境执行 | 默认命令明确跳过；需要 `THOUGHSFLOW_E2E_NATIVE=1` 与 `THOUGHSFLOW_E2E_BASE_URL`，重启旅程还需要 `THOUGHSFLOW_E2E_RESTART_URL` |
+| Playwright 原生旅程执行 | 未在当前环境执行 | `npm run test:e2e`：16 条明确跳过；需要 `THOUGHSFLOW_E2E_NATIVE=1` 与 `THOUGHSFLOW_E2E_BASE_URL`，重启旅程还需要 `THOUGHSFLOW_E2E_RESTART_URL` |
+| macOS release bundle | 通过 | `CI=true npm run tauri -- build`：生成 `.app` 与 Apple Silicon `.dmg` |
 
 ## macOS 原生冒烟
 
@@ -34,9 +36,10 @@
 - 对两个真实 Run 执行回答与 Context Diff，分别保存采纳/否决理由，并成功导出 Markdown Decision Packet；未设置工作区目标时，`Problem` 回落到被比较的真实 Turn Prompt。
 - 初始窗口配置为 1440×900，并向 1280×800 方向手工缩放检查；Focus、Inspector 和 Composer 未出现横向滚动条。当前 Computer Use 截图服务会把窗口归一化为 1229×768，因此这里记录的是原生视觉冒烟，不宣称像素级截图比对。
 
-原生构建产物：
+最新原生构建产物：
 
-`src-tauri/target/debug/bundle/macos/ThoughsFlow.app`
+- `src-tauri/target/release/bundle/macos/ThoughsFlow.app`
+- `src-tauri/target/release/bundle/dmg/ThoughsFlow_0.1.0_aarch64.dmg`
 
 ## 已验证的核心语义
 
@@ -44,14 +47,15 @@
 - 重试创建新 Run，不覆盖历史回答或 Snapshot。
 - preview hash 变化阻止发送；Snapshot 保存实际内容和顺序。
 - Provider 发送前的事务落盘、checkpoint、取消、断流和启动恢复。
-- OpenAI-compatible SSE 与 Ollama NDJSON 的任意分片、错误体、usage 和非正常结束。
+- OpenAI-compatible SSE、Ollama NDJSON、Anthropic Messages SSE 与 Google Gemini SSE 的任意分片、错误体、usage 和非正常结束。
+- Anthropic/Google 的真实 Reqwest 请求路径、认证头、静态头、请求体和 HTTP 429 机器码归一化；三种 SSE 与 Ollama NDJSON 的未完成 frame 均有 1 MiB 硬上限。
 - SQLite STRICT schema、外键、事务回滚、不可变触发器和 terminal Run 保护。
-- 远程 HTTP、内嵌凭据和非 HTTP(S) scheme 拒绝；API Key 仅保存在 Rust 进程内存。
+- 远程 HTTP、内嵌凭据和非 HTTP(S) scheme 拒绝；API Key 交接后仅保存在 Rust 进程内存，不进入 SQLite、Receipt、日志或导出。
 - Run Compare、Context Diff、决策标记与 Markdown Decision Packet 导出契约。
 
 ## 未声称的验证
 
-- 没有真实云 Provider 凭据，因此没有对外部付费模型做现场请求。
+- 没有真实云 Provider 凭据，因此没有对 Anthropic、Google 或其他外部付费模型做现场请求；新协议由 Rust loopback 合约服务与 Node fixture 验证。
 - 当前 macOS 环境没有可驱动 Tauri WebView 且支持硬重启的 Playwright/WebDriver harness；8 条旅程已实现但默认诚实跳过。
 - 没有 Windows/Linux 实机运行证据；不声称三平台安装验证。
-- production JavaScript 主包约 583 kB，Vite 会给出 chunk-size warning；它不阻塞当前核心闭环，但后续可按工作面做懒加载。
+- production JavaScript 主包为 392.27 kB；路线图、决策与设置工作面已按需加载。

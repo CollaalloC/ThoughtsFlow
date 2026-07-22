@@ -8,7 +8,7 @@ ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。�
 
 - 创建、打开、重命名和归档本地工作区；
 - 工作区目标与模型 `system prompt` 分开保存；未设置目标时的界面提示不会进入模型 Context；
-- Generic OpenAI-compatible Chat Completions（SSE）与 Ollama `/api/chat`（NDJSON）真实流式请求；
+- Generic OpenAI-compatible Chat Completions（SSE）、Ollama `/api/chat`（NDJSON）、Anthropic Messages（SSE）与 Google Gemini `streamGenerateContent`（SSE）真实流式请求；
 - Provider 模型发现：OpenAI-compatible、OpenRouter 与 OpenAI 使用模型列表 API，Ollama 使用 `/api/tags`，Google 使用 `/v1beta/models`，Anthropic 使用 Rust 内置的审核列表；
 - 同一 Turn 多个不可覆盖的 Run、精确回答分支与兄弟分支 Context 隔离；
 - 发送前 Context 检查、pin/exclude、超限阻断和 preview hash 复核；
@@ -38,13 +38,15 @@ npm run tauri -- build
 
 - `OpenAI`、`OpenRouter` 或 `Generic OpenAI-compatible`：模板提供默认端点、Bearer 认证位置与 SSE 协议；
 - `Ollama`：模板默认 `http://127.0.0.1:11434`，本地端点使用原生 `/api/chat` NDJSON，不需要 API Key；改为远端或代理端点时可设置 Bearer 会话凭据，只有内存中存在非空凭据才会发送认证头；
-- Anthropic、Google 与 Azure OpenAI 模板会展示其协议和认证要求，但在对应流式协议完成前不可保存为可运行 Profile。
+- `Anthropic`：使用 `/v1/messages`、`x-api-key` 与固定的 `anthropic-version: 2023-06-01`；未显式配置 `max_output_tokens` 时，Rust 会在 Context 预览与 Receipt hash 生成前冻结有效默认值 `4096`；
+- `Google Gemini`：使用 `/v1beta/models/{model}:streamGenerateContent?alt=sse` 与 `x-goog-api-key`，模型 ID 可来自发现结果或手动输入；
+- `Azure OpenAI`：模板仍只展示目标协议与认证要求，当前没有可运行的部署/版本化端点适配器。
 
 Rust Core 内置并唯一维护 7 个权威模板：OpenAI、Generic OpenAI-compatible、Ollama、Anthropic、Google、Azure OpenAI 和 OpenRouter；前端不能改写其协议或认证位置。选择模板会填入默认 Base URL，用户仍可覆盖为代理或自托管端点。新的 Context Receipt 会锁定模板 ID/revision、实际协议、非敏感认证位置、静态头与最终生效参数；API Key 不进入 Receipt。迁移前生成的历史 Receipt 保留其原有参数，新增模板元数据明确显示为 `legacy/unknown`，不会用当前模板反向推断或伪造历史事实。
 
 “发现模型”既可使用已保存 Profile，也可在保存前检查当前 draft。前者由 Rust 从 SQLite 与会话凭据存储解析权威目标；后者只把模板 ID、Base URL 和可选的本次会话凭据交给 Rust，由内置模板决定认证头、路径和响应格式。远程目录只向界面显示的 Host 发送模型元数据 GET，Anthropic 的内置审核列表不会联网；两者都不携带工作区 Context。原始目录响应和发现结果不写入 SQLite；只有用户选中模型并显式保存 Profile 后，模型 ID 才会持久化。Azure OpenAI 没有可移植的模型目录，当前会明确提示不支持发现。
 
-远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码，Provider 请求也不会跟随 3xx 重定向。API Key 只保存在当前 Rust 进程内存，退出应用后清除，不写入 SQLite、前端持久状态、日志或导出文件。模型发现所需的 draft 凭据只通过一次命令进入 Rust，不进入可序列化应用 DTO；已保存 Profile 的发现则复用 Rust 内存中的凭据。若 Provider 原样回显当前会话凭据，Rust 会在内容进入 `RunEvent`、错误、模型列表或 SQLite 前进行精确脱敏；该防线只匹配已知凭据原文，不能识别经过变形或编码的泄露。
+远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码、query 或 fragment，Provider 请求也不会跟随 3xx 重定向。API Key 在提交前会短暂停留于 WebView 密码输入状态；交接后只由当前 Rust 进程保留，退出应用即清除，不写入 SQLite、前端持久状态、日志、Receipt 或导出文件。模型发现所需的 draft 凭据只通过一次命令进入 Rust；已保存 Profile 的发现则复用 Rust 内存中的凭据。若 Provider 原样回显当前会话凭据，Rust 会在内容进入 `RunEvent`、错误、模型列表或 SQLite 前进行精确脱敏；该防线只匹配已知凭据原文，不能识别经过变形或编码的泄露。
 
 ## 数据、隐私与恢复
 
@@ -107,7 +109,8 @@ React UI
 
 ## 当前限制
 
-- 仅支持 OpenAI-compatible Chat Completions 与 Ollama native 两种 dialect；
+- 当前运行 dialect 为 OpenAI-compatible Chat Completions、Ollama native、Anthropic Messages 与 Google Gemini `streamGenerateContent`；Azure OpenAI 尚不可运行；
+- Google 的 `thoughtSignature` 会被识别为不透明协议元数据且不会误显示为 reasoning，但当前不持久化或回送；纯文本多轮通常仍可调用，复杂推理质量可能受影响，工具调用所要求的签名连续性也不在本轮范围内；
 - 没有登录、云同步、多人协作、移动端、Agent/MCP、工具执行、RAG、附件或完整知识库；
 - Context token 数为保守估算，不是 Provider tokenizer 的精确计数；超限会阻止发送，不做静默截断或摘要；
 - Context pin/exclude 是“下一次发送”的会话态调整；已锁定 Receipt 永远不变；
