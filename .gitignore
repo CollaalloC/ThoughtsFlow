@@ -6,3 +6,10 @@ dist/
 .env.*
 !.env.example
 .omp/
+.codegraph/
+.serena/
+src-tauri/target/
+src-tauri/gen/schemas/
+coverage/
+playwright-report/
+test-results/

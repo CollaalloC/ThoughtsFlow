@@ -1,0 +1,130 @@
+.app-shell {
+  min-height: 100vh;
+  color: #202826;
+  background: #f3f0e8;
+}
+.app-shell__bar {
+  position: sticky;
+  z-index: 30;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 48px;
+  padding: 0 16px;
+  background: rgb(255 253 248 / 96%);
+  border-bottom: 1px solid #d9d5ca;
+  backdrop-filter: blur(10px);
+}
+
+.app-shell__navigation {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.app-shell__navigation button,
+.app-shell__view-header > button,
+.app-shell__error > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: #59625e;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font: 600 11px/1.25 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.app-shell__navigation button:hover,
+.app-shell__navigation button[aria-current="page"],
+.app-shell__view-header > button:hover {
+  color: #294f47;
+  background: #e8eee9;
+  border-color: #cdd9d3;
+}
+
+.app-shell__navigation button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.app-shell__content {
+  min-height: calc(100vh - 49px);
+}
+
+.app-shell__workspace-view {
+  min-height: calc(100vh - 49px);
+  padding: 16px;
+}
+
+.app-shell__view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.app-shell__view-header > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-shell__view-header span {
+  color: #315c52;
+  font: 700 9px/1.2 ui-monospace, SFMono-Regular, monospace;
+  letter-spacing: 0.09em;
+}
+
+.app-shell__view-header strong {
+  font: 650 12px/1.3 ui-sans-serif, system-ui, sans-serif;
+}
+
+.app-shell__error {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 40px 12px;
+}
+
+.app-shell__error > button {
+  color: #fff;
+  background: #315c52;
+}
+
+@media (max-width: 720px) {
+  .app-shell__bar {
+    align-items: flex-start;
+    padding-block: 8px;
+  }
+
+  .app-shell__navigation {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .app-shell__navigation button {
+    padding-inline: 7px;
+  }
+
+  .app-shell__workspace-view {
+    padding: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell *,
+  .app-shell *::before,
+  .app-shell *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

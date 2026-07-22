@@ -1,0 +1,85 @@
+:root {
+  color: #202622;
+  background: #efede6;
+  font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --tf-paper: #fbfaf6;
+  --tf-paper-strong: #fffefb;
+  --tf-ground: #efede6;
+  --tf-ground-deep: #e7e4db;
+  --tf-ink: #202622;
+  --tf-ink-soft: #66706a;
+  --tf-ink-faint: #8b938e;
+  --tf-line: #d8d5cb;
+  --tf-line-soft: #e6e3da;
+  --tf-green: #247064;
+  --tf-green-strong: #17584f;
+  --tf-green-soft: #e2eeea;
+  --tf-blue: #4564d8;
+  --tf-blue-soft: #e9edff;
+  --tf-amber: #a86e2d;
+  --tf-amber-soft: #f5eadb;
+  --tf-red: #b4574e;
+  --tf-red-soft: #fae9e7;
+  --tf-shadow-sm: 0 1px 2px rgb(32 38 34 / 5%);
+  --tf-shadow-md: 0 14px 38px rgb(32 38 34 / 12%);
+  --tf-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+  color: inherit;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--tf-blue) 72%, white);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.tf-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
