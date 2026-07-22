@@ -7,6 +7,7 @@ ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。�
 ## 已实现的核心闭环
 
 - 创建、打开、重命名和归档本地工作区；
+- 工作区目标与模型 `system prompt` 分开保存；未设置目标时的界面提示不会进入模型 Context；
 - Generic OpenAI-compatible Chat Completions（SSE）与 Ollama `/api/chat`（NDJSON）真实流式请求；
 - 同一 Turn 多个不可覆盖的 Run、精确回答分支与兄弟分支 Context 隔离；
 - 发送前 Context 检查、pin/exclude、超限阻断和 preview hash 复核；
@@ -45,7 +46,7 @@ npm run tauri -- build
 
 ```text
 <app_data_dir>/thoughsflow.sqlite3
-<app_data_dir>/exports/decision-packet-<workspace>-<timestamp>.md
+<app_data_dir>/exports/decision-packet-<uuid>.md
 ```
 
 macOS 的默认位置通常是：
@@ -57,6 +58,8 @@ macOS 的默认位置通常是：
 “数据保存在本机”只描述 SQLite 和导出文件的位置。每轮发送前，Composer 与 Inspector 会另行显示本轮 Context 将发往的 Provider、Model 和 Host；调用远程 Provider 时，相应 Context 会离开本机。
 
 Run、Manifest 与 Snapshot 在 Provider I/O 前由同一数据库事务落盘。流式输出约每 400ms 或累计 4KB 做 checkpoint；应用启动时，数据库中的 `queued`、`connecting` 或 `streaming` Run 会变为 `interrupted`，已有部分输出不会丢失。首版没有数据库透明加密，也不承诺删除后物理不可恢复。
+
+Decision Packet 只能由 Rust 文件适配器在上述 `exports` 目录创建新文件；WebView 命令不接受目标路径，也不会覆盖已有文件。
 
 ## 验证
 
@@ -93,6 +96,8 @@ React UI
 ```
 
 组件不直接调用 SQL、Provider、API Key 或任意文件系统；所有 IPC 通过 `src/platform/desktop-bridge.ts`。唯一业务拓扑是 `Turn.parent_run_id`，路线图位置只属于 `ViewState`，不能改变 Context 编译结果。
+
+应用服务只依赖 `RepositoryPort`、运行热路径专用的 `RunPersistencePort`、`ProviderGateway`、`ProviderConnectionTester` 与 `DecisionPacketWriter`；SQLite、Reqwest 和本地文件系统实现由 Tauri 组合根注入。Tauri 结构化命令错误在 DesktopBridge 统一转换为 `DesktopBridgeError`，保留 `code`、`retryable` 和 `details`。
 
 ## 当前限制
 

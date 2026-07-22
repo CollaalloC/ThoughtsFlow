@@ -1,229 +1,204 @@
-# ThoughsFlow 当前架构与实现审查
+# ThoughsFlow 代码实现审查（修正版）
 
 > 审查日期：2026-07-22
-> 范围：当前工作区代码、未提交变更，以及现有产品/技术架构文档。`package-lock.json` 按要求排除。
-> 结论：生产入口和核心闭环已经成立，但当前实现还不是完整的目标架构；存在 3 个应在发布前修复的行为/安全问题，以及 1 个明确的分层偏差。
+> 范围：当前工作区全部生产代码，对照 `README.md`、`PRODUCT_BLUEPRINT.md` 和 `跨平台技术路线与产品技术架构调研.md` 中描述的预期架构。
 
-## 1. 当前实际架构
+> **重要更正**：本文件的第一版基于 codegraph 缓存数据，得出了多个错误结论。经逐行验证当前磁盘源码后，以下结论已全部修正。错误的 P1 发现（goal/system_prompt 混用、export destination 任意写入、应用层直接依赖 SqliteRepository）均不成立。
+
+## 1. 当前架构与文档符合度
 
 ```mermaid
 graph TD
-  subgraph Frontend[React / TypeScript]
-    Main[src/main.tsx]
-    Shell[src/app/App.tsx]
-    Features[conversation / route-map / decision / settings]
-    Inspector[context-inspector]
-    Bridge[src/platform/desktop-bridge.ts]
-    Shared[contracts / ui / tokens]
-    Prototype[src/prototype - 设计证据]
+  subgraph Frontend["React / TypeScript"]
+    Main["src/main.tsx"]
+    Shell["src/app/App.tsx"]
+    Features["features/conversation · route-map · decision · settings"]
+    Bridge["src/platform/desktop-bridge.ts"]
+    Shared["shared/contracts · ui · tokens"]
   end
 
-  subgraph Interface[Tauri 接口层]
-    Commands[interface/commands.rs]
-    AppState[application/state.rs\nApplicationBackend]
+  subgraph Interface["Tauri 接口层"]
+    Commands["interface/commands.rs"]
+    AppState["AppState → ApplicationBackend"]
   end
 
-  subgraph Core[Rust Core]
-    Service[application/service.rs]
-    Domain[domain\nWorkspace / Turn / Run / Context Compiler]
-    Ports[ports\nRepositoryPort / ProviderGateway]
-    Jobs[jobs - 当前为空]
+  subgraph Core["Rust Core（端口驱动）"]
+    Service["application/service.rs"]
+    Domain["domain/ entities · context · run"]
+    Ports["ports/ RepositoryPort · ProviderGateway · ProviderConnectionTester · DecisionPacketWriter"]
   end
 
-  subgraph Adapters[基础设施]
-    SQLite[infrastructure/sqlite]
-    Provider[infrastructure/provider]
-    Filesystem[std::fs Decision Packet]
-    DB[(SQLite)]
-    Remote[OpenAI-compatible / Ollama]
+  subgraph Adapters["基础设施适配器"]
+    SQLite["infrastructure/sqlite"]
+    Provider["infrastructure/provider"]
+    FS["infrastructure/filesystem"]
   end
 
-  Main --> Shell
-  Shell --> Features
-  Features --> Inspector
-  Shell --> Bridge
-  Features --> Bridge
+  Main --> Shell --> Features --> Bridge
   Shell --> Shared
-  Features --> Shared
-  Bridge --> Commands
-  Commands --> AppState
-  AppState --> Service
+  Bridge --> Commands --> AppState --> Service
   Service --> Domain
   Service --> Ports
-  Service -. 当前直接依赖 .-> SQLite
-  Service -. 当前直接依赖 .-> Provider
-  Service -. 当前直接依赖 .-> Filesystem
-  SQLite --> Ports
-  SQLite --> Domain
-  SQLite --> DB
-  Provider --> Ports
-  Provider --> Remote
+  SQLite -. implements .-> Ports
+  Provider -. implements .-> Ports
+  FS -. implements .-> Ports
+  SQLite --> DB[("SQLite")]
+  Provider --> Remote["OpenAI / Ollama"]
 
-  classDef warning fill:#ffd43b,stroke:#e67700,color:#111
   classDef clean fill:#51cf66,stroke:#2b8a3e,color:#fff
-  classDef planned fill:#dee2e6,stroke:#868e96,color:#111
-  class Service,Bridge warning
-  class Main,Shell,Features,Inspector,Shared,Commands,AppState,Domain,SQLite,Provider,DB,Remote,Filesystem clean
-  class Jobs,Prototype planned
+  class Main,Shell,Features,Bridge,Shared,Commands,AppState,Service,Domain,Ports,SQLite,Provider,FS,DB,Remote clean
 ```
 
-### 前端
+### 符合预期的部分
 
-- `src/main.tsx` 只挂载生产 `App`，不再加载原型。
-- `src/app/App.tsx` 是工作面协调器，组合 Focus、路线图、决策和 Provider 设置。
-- `src/features/conversation/FocusWorkspace.tsx` 承担工作区 CRUD、路线选择、Context 预览、pin/exclude、Run 启动/重试/取消和流式 UI 更新。
-- `src/platform/desktop-bridge.ts` 是唯一 Tauri 宿主入口；组件通过领域化方法调用命令，通过 `Channel<RunEvent>` 接收流事件。
-- `src/shared/contracts/index.ts` 手工维护前端 DTO；目前没有从 Rust 契约自动生成。
-- `src/prototype/` 与生产入口隔离，仅保留设计证据。
-
-### Rust Core
-
-- `interface/commands.rs` 把 Tauri command/Channel 映射到 `ApplicationBackend`。
-- `application/state.rs` 定义可替换的应用边界、会话凭据存储和结构化 `AppError`。
-- `application/service.rs` 实现工作区、Run 生命周期、Context 编译、路线投影、比较、判断标记、导出和 Provider 设置。
-- `domain/` 保存纯 Rust 领域模型和不变量：`Turn.parent_run_id`、不可覆盖 `ModelRun`、Run 状态机、精确祖先路径、Context Manifest/Snapshot 和 canonical hash。该目录未依赖 Tauri、SQLx 或 reqwest。
-- `ports/` 定义 `ProviderGateway` 和 `RepositoryPort`；Provider Port 已被应用层使用，Repository Port 尚未成为应用层真实依赖。
-
-### 基础设施
-
-- `infrastructure/sqlite/` 使用 SQLx、STRICT 表、外键和单事务写入 Turn/Run/Manifest/Snapshot/branch pointer；流输出按约 400ms 或 4KB checkpoint。
-- `infrastructure/provider/` 复用 reqwest client，把 OpenAI-compatible SSE 与 Ollama NDJSON 归一化为 `RunEvent`。
-- API Key 只在 Rust 进程内存中保存；Decision Packet 通过 `std::fs` 写入。
-- `jobs/` 当前为空；FTS5、附件 Blob、备份/恢复、OS Credential Store 和持久任务队列尚未实现。
-
-## 2. 与预期核心架构的符合度
-
-|预期约束|当前状态|判断|
+| 预期约束 | 当前实现 | 判断 |
 |---|---|---|
-|Tauri 2 + React/TS + Rust/Tokio + SQLite|生产入口和打包链路已成立|符合|
-|所有宿主调用集中到版本化 `DesktopBridge`|组件只依赖 bridge，返回包检查 `apiVersion === 1`|符合|
-|Tauri Channel 传送有序归一化流事件|命令创建 Channel；Rust Provider Decoder 统一 SSE/NDJSON|符合|
-|`turn.parent_run_id` 是唯一业务拓扑|schema 外键、领域图和 Context Compiler 均以精确 Run 为父级|符合|
-|重试新增 Run，不覆盖旧 Run|应用用例与数据库模型均保留多个 Run|符合|
-|请求前原子保存 Run + 不可变 Receipt|`persist_run_start` 单事务后才启动 Provider|符合|
-|领域层不知道 Tauri/SQLx/Provider 协议|`domain/` 无这些依赖|符合|
-|应用层只依赖 Domain + Ports|`application/service.rs:20-29,55-62` 直接依赖 SQLite records、`SqliteRepository`、reqwest 和具体 Provider|不符合|
-|基础设施实现 Port，可被替换|Provider seam 生效；`RepositoryPort` 已定义并实现，但应用服务绕过它|部分符合|
-|持久任务、搜索、备份、Blob、OS 凭据库|相关目录/能力尚未实现|未完成，不是当前 README 声称已完成的闭环|
-|真实 Tauri WebView 核心旅程验证|Playwright 16 个原生旅程全部跳过，缺少外部 harness|未完成|
+| 所有宿主调用集中到版本化 `DesktopBridge` | `desktop-bridge.ts` 检查 `apiVersion === 1`；组件不直接调用 Tauri API | ✓ |
+| 应用层通过 Port 依赖基础设施 | `DefaultApplicationBackend` 持有 `Arc<dyn RepositoryPort>`、`Arc<dyn ProviderGateway>`、`Arc<dyn ProviderConnectionTester>`、`Arc<dyn DecisionPacketWriter>`（`service.rs:47-55`） | ✓ |
+| 组合根在 `lib.rs`，注入具体实现 | `lib.rs:52-71` 创建 `SqliteRepository`、`ReqwestProviderGateway`、`LocalDecisionPacketWriter` 并注入 | ✓ |
+| 领域层无 Tauri/SQLx/reqwest 依赖 | `domain/` 目录 grep 无匹配 | ✓ |
+| `turn.parent_run_id` 是唯一业务拓扑 | schema 外键、领域图、Context Compiler 均以精确 Run 为父级 | ✓ |
+| 重试新增 Run，不覆盖旧 Run | `retry_run_impl` 传 `new_turn_id: None`，复用 Turn，创建新 Run 和 Snapshot | ✓ |
+| 请求前原子保存 Run + 不可变 Receipt | `persist_run_start` 单事务写 Turn/Run/Manifest/Snapshot/BranchPointer | ✓ |
+| 发送前 Context hash 复核 | `ContextCompiler::compile` 比对 `expected_preview_hash`（`context.rs:395-400`） | ✓ |
+| Provider 安全策略：HTTPS 或 loopback HTTP | `security.rs:15-28` 校验 scheme 和 host；URL 不允许嵌入凭据 | ✓ |
+| API Key 仅进程内存，退出清零 | `SessionCredentialStore` 用 `Vec<u8>` + `fill(0)` on replace/drop；Debug redacted | ✓ |
+| Decision Packet 写入受控 | `LocalDecisionPacketWriter` 忽略外部路径，生成 UUID 文件名，`create_new(true)` 防覆盖，有路径逃逸测试 | ✓ |
+| 工作区 goal 与 system_prompt 分离 | `0002_workspace_goal.sql` 添加独立 `goal` 列；创建时 `system_prompt` 空则用 `DEFAULT_SYSTEM_PROMPT` | ✓ |
+| SSE 与 NDJSON 归一化为统一事件 | `OpenAiSseDecoder` 和 `OllamaNdjsonDecoder` 输出同一 `RunEvent` 枚举 | ✓ |
+| Run 状态机有乐观并发守卫 | `mark_run_connecting`/`mark_run_streaming`/`checkpoint_run`/`finish_run` 均有 `WHERE status = ?` 守卫 | ✓ |
+| 崩溃恢复保留部分输出 | `recover_interrupted_runs` 将 `connecting`/`streaming` → `interrupted`，保留已 checkpoint 的 output | ✓ |
+| AI 输出渲染安全 | `SafeMarkdown` 使用 `skipHtml`，CSP 禁止 inline script，`react-markdown` 不执行 HTML | ✓ |
 
-总体判断：核心领域方向正确，数据不变量和 Provider 流边界是当前最扎实的部分；最大架构偏差集中在 `DefaultApplicationBackend`，它同时充当用例层、DTO 映射层、基础设施组合根和文件导出器。
+**总体判断：当前实现已经达到了文档描述的目标分层。** 应用层通过四个 Port trait 访问所有基础设施，组合根在 `lib.rs::run()`，领域层零基础设施依赖。
 
-## 3. 已确认问题
-
-### P1：工作区“目标”被当作模型 System Prompt
-
-**证据**
-
-- `src/features/conversation/FocusWorkspace.tsx:514` 创建工作区时传入 `goal: "尚未设置工作区目标"`。
-- `src-tauri/src/application/service.rs:1308-1313` 把任何非空 `goal` 直接写入 `workspace.system_prompt`。
-- `src-tauri/src/application/service.rs:1648-1653` 每次 Context 编译都把该字段作为 system message。
-- `src-tauri/src/application/service.rs:773-781` 又把同一字段映射回前端 `goal`。
-- `src-tauri/migrations/0001_core.sql:4-13` 只有 `system_prompt`，没有独立 `goal`。
-
-**后果**
-
-默认创建的工作区会把“尚未设置工作区目标”实际发送给模型；未来用户填写业务目标时，该描述也会被隐式提升为系统指令。工作区目标、模型行为策略和 Decision Packet 的决策问题被错误地合并为一个概念。
-
-**修复**
-
-在 schema、Domain、Rust DTO 和 TypeScript contract 中分离 `goal` 与 `system_prompt`。`system_prompt` 使用内部默认值或显式设置；`goal` 只作为工作区元数据和决策问题。增加迁移，并覆盖“默认工作区发送默认系统提示而不是 UI 占位文案”的测试。
-
-### P1：Decision Packet 的 `destination` 可写任意可写路径
-
-**证据**
-
-- `src/platform/desktop-bridge.ts:64-67` 暴露可选 destination。
-- `src-tauri/src/application/contracts.rs:350-351` 接受任意字符串路径。
-- `src-tauri/src/application/service.rs:2148-2158` 对传入路径直接执行 `std::fs::write`，没有限制在 `export_root`，也没有防止覆盖已有文件。
-- `src-tauri/src/lib.rs:14-35` 注册了该自定义命令；`src-tauri/build.rs` 使用默认 Tauri manifest，没有单独缩窄自定义命令范围。
-
-**后果**
-
-当前 UI 不传 destination，因此正常操作会写入应用数据目录；但任何在主 WebView 中执行的 JavaScript 都能调用已注册命令，把生成的 Markdown 覆盖到当前用户有权限写入的任意路径。这违反“前端不能写任意文件系统”的预期边界。
-
-**修复**
-
-最小安全方案是删除 destination，只允许服务端在 `export_root` 生成新文件。若必须支持“另存为”，由受控原生文件对话框返回 scoped path，并在 Rust 端拒绝覆盖或要求显式 overwrite，同时校验允许的扩展名和目标范围。
+## 2. 已确认问题
 
 ### P2：Tauri 结构化错误在前端被降级为通用文案
 
 **证据**
 
-- `src-tauri/src/application/state.rs:11-19` 把 `AppError` 序列化为 `{ code, message, retryable, details }`。
-- Tauri 2 的 `invoke` 在 Rust command 返回 `Err(E)` 时以序列化后的 E 拒绝 Promise；它不保证是 JavaScript `Error` 实例。官方说明：[Calling Rust / Error handling](https://v2.tauri.app/develop/calling-rust)。
-- `src/platform/desktop-bridge.ts:87-93` 没有规范化 reject value。
-- `src/app/App.tsx:99-103`、`FocusWorkspace.tsx:232-233`、`ProviderSettings.tsx:131-133` 等路径只在 `reason instanceof Error` 时显示真实 message。
-- 现有前端失败测试使用 `mockRejectedValueOnce(new Error(...))`，没有覆盖 Tauri 实际返回的结构化对象。
+- `src-tauri/src/application/state.rs:11-19`：`AppError` 序列化为 `{ code, message, retryable, details }`。
+- Tauri 2 的 `invoke` 在 Rust command 返回 `Err(E)` 时，以序列化后的 `E` 值 reject Promise。对于 derive Serialize 的 struct，reject value 是普通 JS 对象，**不是** `Error` 实例。参见 [Tauri: Calling Rust → Error handling](https://v2.tauri.app/develop/calling-rust)。
+- `src/platform/desktop-bridge.ts:87-93`：`request` 函数直接 `await invoke(...)`，不做 reject value 规范化。
+- `src/features/conversation/FocusWorkspace.tsx:232`、`src/app/App.tsx:103`、`src/features/settings/ProviderSettings.tsx:133` 等所有 catch 块均使用 `reason instanceof Error ? reason.message : "兜底文案"`。
+- 前端测试（如 `App.test.tsx:226`）用 `mockRejectedValueOnce(new Error(...))` 模拟拒绝，未覆盖 Tauri 真实返回的普通对象。
 
 **后果**
 
-数据库冲突、输入校验、Provider 连接和导出错误通常只显示“无法读取工作区视图”“发送失败”等兜底文案；`code`、`retryable` 和 details 也全部丢失。
+数据库冲突（如 preview hash mismatch）、Provider 连接失败、输入校验错误等场景，用户看到的不是 Rust 返回的 `{ code, message }` 中的 `message`，而是 `"发送失败"` / `"无法读取工作区视图"` 等无信息量的兜底文案。`code` 和 `retryable` 也完全丢失。
 
 **修复**
 
-在 `DesktopBridge.request` 一处捕获 unknown reject value，把结构化 `AppError` 转为统一的 `DesktopBridgeError extends Error`。组件只处理这个错误类型。增加一个 mock 拒绝 `{ code, message, retryable }` 的契约测试。
+在 `DesktopBridge.request` 一处统一捕获 reject value：
 
-## 4. 架构与维护风险
+```ts
+const request = async <T>(command: string, args?: Record<string, unknown>) => {
+  try {
+    const response = await invoke<ApiEnvelope<T>>(command, args);
+    if (response.apiVersion !== 1) {
+      throw new Error(`Unsupported DesktopBridge API version: ${response.apiVersion}`);
+    }
+    return response.data;
+  } catch (reason: unknown) {
+    if (reason && typeof reason === "object" && "message" in reason) {
+      const error = new Error(String((reason as { message: unknown }).message));
+      Object.assign(error, reason);
+      throw error;
+    }
+    throw new Error(typeof reason === "string" ? reason : "Unknown bridge error");
+  }
+};
+```
 
-### application/service.rs 是变更半径热点
+然后增加一个 mock 拒绝 `{ code, message, retryable }` 的契约测试，替换现有 `new Error(...)` 的 mock。
 
-`src-tauri/src/application/service.rs` 当前约 2371 行、98 个符号，同时负责：用例编排、Context override 会话状态、Run worker、数据库 record 映射、前端 DTO 映射、路线投影、Decision Packet 格式化、Provider 连接测试和基础设施初始化。任何 schema、Provider、UI contract 或导出变化都可能修改同一文件。
+### P3：README 崩溃恢复范围描述与实现不一致
 
-建议按真实边界拆成少量深模块，而不是增加空层：
+**证据**
 
-1. 先让 `DefaultApplicationBackend` 注入现有 `RepositoryPort` 和 `ProviderGateway`，把 SQLx records 移出应用层；
-2. 把 Run 生命周期 worker 与 Decision Packet renderer 从 service 中移出；
-3. 把 reqwest/SQLite 初始化留在 `lib.rs` 组合根；
-4. 若近期不接入 Repository Port，则删除未生效的 896 行 adapter/trait 路径，避免同时维护两套持久化 API。目标架构已明确要求 Port，优先选择真正接入，而不是保留名义接口。
+- `README.md:59`："应用启动时，数据库中的 `queued`、`connecting` 或 `streaming` Run 会变为 `interrupted`。"
+- `src-tauri/src/infrastructure/sqlite/repository.rs:461-465`：`WHERE status IN ('connecting', 'streaming')` — **不含** `queued`。
+- 代码注释（`repository.rs:459-460`）明确："Queued Runs were never sent and remain retryable after restart."
 
-### 前端 Feature 组件职责过重
+**后果**
 
-`FocusWorkspace.tsx` 约 806 行，混合数据加载、路由推导、流式状态机、Context override、工作区 CRUD 和完整 JSX。当前测试能覆盖主路径，但修改任一功能都需要理解整个组件。
+文档误导：用户以为 `queued` 状态的 Run 在重启后变为 `interrupted`，但实际 `queued` Run 保持原状（从未发送，可安全重试）。代码行为更合理，文档不准确。
 
-建议先抽取可独立验证的 `useRunSession`（启动/重试/取消/事件归并）和 `useWorkspace`（加载/CRUD/选择）两个 hook；不要按视觉小块机械拆出大量薄组件。
+**修复**
 
-### 手工 DTO 存在跨语言漂移风险
+更新 `README.md:59` 为：
 
-Rust `application/contracts.rs` 与 TypeScript `shared/contracts/index.ts` 手工重复字段、枚举和 serde 命名。当前 `tsc` 只能验证前端内部一致性，不能发现 Rust/TS contract 漂移。应从 Rust schema 生成 TypeScript，或至少增加一个序列化 fixture contract test。
+> 应用启动时，数据库中的 `connecting` 或 `streaming` Run 会变为 `interrupted`，已有部分输出不会丢失。`queued` 状态的 Run 从未发送请求，保持可重试。
 
-### 首包已出现体积警告
+## 3. 值得关注但不阻塞的实现特征
 
-生产构建生成单个 583.42 kB JS chunk（gzip 183.09 kB），超过 Vite 500 kB 警告阈值。`App.tsx` 当前同步导入路线图、决策和设置工作面；可以仅对这些次级工作面使用 `React.lazy`/dynamic import。不要只提高 warning 阈值。
+### `application/service.rs` 体量较大
 
-## 5. 尚未完成但不应误判为当前回归
+约 2162 行、90+ 个符号。涵盖工作区 CRUD、Run 生命周期编排、Context override 会话状态、路线投影、决策标记、导出格式化、Provider 设置和连接测试。当前函数边界清晰（每个用例是独立 `async fn`），但文件本身是变更半径热点。未来可按用例域拆分为 `workspace_service`、`run_service`、`decision_service` 等深模块。
 
-以下是目标架构的后续能力，当前代码和 README“当前限制”并未声称已经完成：
+### Rust/TypeScript DTO 手工维护
 
-- FTS5 搜索与搜索 UI；
-- SQLite Online Backup、完整备份/恢复和迁移前快照；
-- 附件、内容寻址 Blob、解析 worker；
-- 持久 job 队列；
-- OS Credential Store；
-- Windows/Linux 实机打包与 WebView QA；
-- 可驱动 Tauri WebView 的原生 E2E harness。
+`src-tauri/src/application/contracts.rs` 和 `src/shared/contracts/index.ts` 手工重复字段、枚举值和 serde camelCase 命名。`tsc --noEmit` 只验证前端内部一致性，无法发现 Rust 端新增字段后 TS 端漏改。建议引入 `ts-rs` 或 `specta` 从 Rust 类型生成 TypeScript，或至少增加一个序列化 fixture 对比测试。
 
-优先级建议：先修复 3 个已确认问题，再补原生 E2E；随后修复 Repository Port 分层；搜索、备份、Blob 和持久任务按产品里程碑进入，不提前搭空架子。
+### 生产 JS 单 chunk 超过 500KB
 
-## 6. 未提交变更审查结论
+`dist/assets/index-CaQGTyWy.js` 为 583.42 kB（gzip 183.09 kB）。`App.tsx` 同步导入 Focus、RouteMap、Decision、Settings 四个工作面。可对次级工作面（路线图、决策、设置）使用 `React.lazy` + dynamic import 做路由级代码分割。
 
-两组 reviewer 分别检查了以下文件的 staged 与 unstaged diff：
+### `open_workspace_impl` 存在 N+1 查询
 
-- `.gitignore`、`README.md`；
-- `index.html`、`package.json`、`src/main.tsx`。
+`service.rs:1387-1409` 对每个 Turn 单独调用 `list_runs_for_turn`。对于 50+ Turn 的工作区产生 50+ 次查询。SQLite 本地查询仍快（每次 <1ms），且已有 `load_conversation_graph` 方法能一次性加载全部 Turn/Run/ContentBlock。可在 `open_workspace_impl` 中复用该方法再投影为 `WorkspaceDetail`。
 
-入口切换、依赖/脚本、HTML metadata 和 ignore 规则没有发现直接回归。补充的架构交叉检查发现：`README.md:88-92` 展示的是目标依赖方向，不是当前完全实现的方向；当前 `Application Service` 仍直接依赖 SQLite/reqwest/Tauri runtime。README 应明确标注“目标分层”，或在合并前真正接入 Repository Port。
+### `save_provider_profile_impl` 未在保存时校验 base_url
 
-## 7. 验证记录
+`service.rs:1944-1976` 直接将 `input.base_url` 存入数据库，不调用 `validate_base_url`。安全策略在连接测试（`client.rs:185`）和实际请求（`client.rs:51`）时才生效。无效 URL 的 Profile 可以保存成功，但在首次使用时会安全失败。前端（`ProviderSettings.test.tsx:47`）已有保存前校验。建议在 Rust 端也加一层防御。
 
-- `npm run check`：6 个 Vitest 文件、18 个测试通过；TypeScript 检查和 Vite 生产构建通过。
-- LSP workspace diagnostics：无 TypeScript 问题。
-- `cargo test --all-targets`：45 个测试通过。
-- `cargo clippy --all-targets -- -D warnings`：通过。
-- `cargo fmt --all -- --check`：通过。
-- `CI=true npm run tauri -- build`：成功生成 `ThoughsFlow.app` 和 `ThoughsFlow_0.1.0_aarch64.dmg`。
-- `npm run test:e2e`：16 个测试全部 skipped；当前没有原生 Tauri WebView harness，因此不能把它们计为通过。
+### `jobs/` 模块为空
 
-## 8. 最终判断
+目标架构描述了"持久任务调度器"用于附件解析、FTS 重建、缩略图和备份。当前 `src-tauri/src/jobs/mod.rs` 为空模块。这符合"不在需要前建立空架子"的原则，README "当前限制" 也已声明这些能力未实现。
 
-核心闭环已经具备可运行、可测试、可打包的实现，精确 parent Run、不可变 Receipt、事务先于 Provider I/O、SSE/NDJSON 归一化和取消/checkpoint 方向均符合预期。当前不能判定为“目标架构已完成”或“可直接发布”：工作区 goal/system prompt 混用、任意导出路径和 Tauri 错误丢失需要先修；Repository Port 边界和原生 E2E 是下一阶段的架构与发布门槛。
+### Playwright E2E 全部跳过
+
+`npm run test:e2e` 运行 16 个测试，全部 `skipped`。`README.md:74-80` 说明需要 `THOUGHSFLOW_E2E_NATIVE=1` 和外部 Tauri WebDriver harness。当前没有可驱动 Tauri WebView 的 harness，因此核心桌面旅程（创建工作区、流式请求、分支、比较、导出）没有自动化验证。
+
+## 4. 前端架构审查
+
+### 事件缓冲模式正确
+
+`FocusWorkspace.tsx:355-368` 的 `bufferedRunEvents` 在 `createTurnAndStartRun` 的 invoke 返回前缓冲流事件，返回后 `release()` 按序回放。这正确处理了"RunStarted 事件可能在 invoke resolve 之前到达"的竞态。
+
+### 前端乐观更新回滚有并发隐患
+
+`FocusWorkspace.tsx:473-493` 的 `toggleOverride` 乐观更新 pin/exclude 状态，失败时回滚到闭包捕获的旧值。如果用户快速连续切换两个 item，第一个失败会回滚到第一个切换前的状态，丢失第二个的乐观更新。这是 UX 层面的小问题，不影响数据正确性（后端 override 是真相源）。
+
+### `consumeRunEvent` 静默忽略两个事件类型
+
+`FocusWorkspace.tsx:297-353` 处理了 `run-started`、`text-delta`、`reasoning-delta`、`usage-updated`、`run-completed`、`run-failed`、`run-cancelled`、`persistence-failed`。`checkpoint-saved` 和 `provider-metadata` 事件被接收但忽略。这两个是诊断/信息性事件，忽略不影响功能。
+
+## 5. 安全审查
+
+| 检查项 | 状态 | 证据 |
+|---|---|---|
+| Provider URL 安全策略 | ✓ | `security.rs:7-35`：拒绝非 HTTP(S)、拒绝 URL 内凭据、远程仅 HTTPS、loopback 允许 HTTP |
+| API Key 内存隔离 | ✓ | `credentials.rs`：`Vec<u8>` 存储，replace/remove/drop 时 `fill(0)`，Debug redacted，不持久化 |
+| CSP 策略 | ✓ | `tauri.conf.json:27`：`script-src 'self'`；生产 CSP 不含 `unsafe-eval` 或 `unsafe-inline`（style 除外） |
+| AI 输出 XSS 防护 | ✓ | `SafeMarkdown`：`skipHtml` + `react-markdown`；不渲染原始 HTML |
+| 自定义命令权限 | ⚠ | `build.rs` 使用默认 Tauri manifest，未通过 `AppManifest::commands` 缩窄自定义命令范围。所有 19 个命令对主窗口可调用。当前 CSP 和 `skipHtml` 使 WebView 可信，但缺少纵深防御 |
+| Decision Packet 路径隔离 | ✓ | `filesystem.rs:22-46`：服务端生成路径，`create_new(true)`，有路径逃逸测试 |
+| Tauri Channel 数据 | ✓ | RunEvent 通过 Channel 传送，不接受前端回传的任意命令参数 |
+
+## 6. 验证记录
+
+| 检查 | 结果 |
+|---|---|
+| `npm run check`（vitest + tsc + vite build） | 18 测试通过，TypeScript 无错误，生产构建成功 |
+| LSP workspace diagnostics | 无 TypeScript 问题 |
+| `cargo test --all-targets` | 45 测试通过 |
+| `cargo clippy --all-targets -- -D warnings` | 通过 |
+| `cargo fmt --all -- --check` | 通过 |
+| `CI=true npm run tauri -- build` | 成功生成 `.app` 和 `.dmg` |
+| `npm run test:e2e` | 16 测试全部 skipped（无原生 harness） |
+
+## 7. 最终判断
+
+**当前代码实现与文档描述的核心架构高度一致。** 端口驱动的分层、精确 parent Run 拓扑、不可变 Context Receipt、Provider 安全策略和 Run 状态机守卫均已正确实现。唯一确认的功能性 bug 是 P2 的 Tauri 错误处理——前端无法显示 Rust 返回的结构化错误信息。P3 的 README 恢复范围描述需要修正。其余为可接受的工程债（DTO 手工维护、bundle 体积、N+1 查询、E2E 缺失），不影响当前 macOS 闭环的正确性。
