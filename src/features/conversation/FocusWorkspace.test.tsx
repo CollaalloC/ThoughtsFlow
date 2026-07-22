@@ -122,6 +122,7 @@ function bridgeFixture() {
         isDefault: true,
       },
     ]),
+    listProviderModels: vi.fn().mockResolvedValue([]),
     saveProviderProfile: vi.fn(),
     setSessionCredential: vi.fn(),
     testProviderConnection: vi.fn(),

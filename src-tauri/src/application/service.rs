@@ -18,9 +18,11 @@ use crate::{
         Workspace,
     },
     ports::provider::{
-        CanonicalMessage, CanonicalRequest, CredentialPlacement,
+        CanonicalMessage, CanonicalRequest, CredentialPlacement, DiscoveredModel,
         MessageRole as ProviderMessageRole, ProviderConnectionTester, ProviderDialect,
-        ProviderGateway, ProviderInvocation, ProviderTarget, RunEvent, SessionCredential, Usage,
+        ProviderError, ProviderGateway, ProviderInvocation, ProviderModelCatalog,
+        ProviderModelCatalogKind, ProviderModelQuery, ProviderTarget, RunEvent, SessionCredential,
+        Usage,
     },
     ports::{
         CheckpointOutcome, DecisionPacketWriter, PersistRunStart, RepositoryPort,
@@ -52,6 +54,7 @@ pub struct DefaultApplicationBackend {
     run_persistence: Arc<dyn RunPersistencePort>,
     provider: Arc<dyn ProviderGateway>,
     connection_tester: Arc<dyn ProviderConnectionTester>,
+    model_catalog: Arc<dyn ProviderModelCatalog>,
     compiler: ContextCompiler,
     run_registry: Arc<Mutex<HashMap<String, CancellationToken>>>,
     context_overrides: Arc<Mutex<HashMap<OverrideKey, HashMap<String, OverrideItem>>>>,
@@ -63,6 +66,7 @@ impl DefaultApplicationBackend {
         repository: Arc<R>,
         provider: Arc<dyn ProviderGateway>,
         connection_tester: Arc<dyn ProviderConnectionTester>,
+        model_catalog: Arc<dyn ProviderModelCatalog>,
         decision_packet_writer: Arc<dyn DecisionPacketWriter>,
     ) -> Self
     where
@@ -73,6 +77,7 @@ impl DefaultApplicationBackend {
             run_persistence: repository,
             provider,
             connection_tester,
+            model_catalog,
             compiler: ContextCompiler::new(ContextPolicy {
                 compiler_version: domain::CONTEXT_COMPILER_VERSION.into(),
                 max_chars: DEFAULT_MAX_CONTEXT_CHARS,
@@ -1223,6 +1228,132 @@ fn provider_target(snapshot: &domain::ProviderSnapshot) -> AppResult<ProviderTar
     })
 }
 
+#[derive(Debug)]
+enum ProviderModelCatalogPlan {
+    Static(&'static [domain::StaticProviderModel]),
+    Remote(ProviderModelQuery),
+}
+
+#[derive(Debug)]
+enum ProviderModelSource {
+    SavedProfile(String),
+    Draft(ProviderModelDraftInput),
+}
+
+fn provider_model_source(input: ListProviderModelsInput) -> AppResult<ProviderModelSource> {
+    match (input.provider_profile_id, input.draft) {
+        (Some(provider_profile_id), None) if !provider_profile_id.trim().is_empty() => {
+            Ok(ProviderModelSource::SavedProfile(provider_profile_id))
+        }
+        (None, Some(draft))
+            if !draft.provider_id.trim().is_empty() && !draft.base_url.trim().is_empty() =>
+        {
+            Ok(ProviderModelSource::Draft(draft))
+        }
+        (Some(_), None) => Err(AppError::validation(
+            "missing_required_field",
+            "providerProfileId must not be empty",
+        )),
+        (None, Some(_)) => Err(AppError::validation(
+            "missing_required_field",
+            "Draft providerId and baseUrl must not be empty",
+        )),
+        _ => Err(AppError::validation(
+            "invalid_provider_model_source",
+            "Choose exactly one Provider Profile or draft Provider target",
+        )),
+    }
+}
+
+/// Resolves model discovery exclusively from the Rust-owned Provider Template.
+/// This intentionally does not call `runnable_template`: Anthropic and Google
+/// can expose model metadata before their streaming dialect is enabled.
+fn provider_model_catalog_plan(
+    provider_id: &str,
+    base_url: &str,
+) -> AppResult<ProviderModelCatalogPlan> {
+    let template = domain::provider_template(provider_id).ok_or_else(|| {
+        AppError::validation(
+            "unknown_provider_template",
+            format!("Unknown Provider Template `{provider_id}`"),
+        )
+    })?;
+    let catalog = match template.model_catalog {
+        domain::ProviderModelCatalogStrategy::Static(models) => {
+            return Ok(ProviderModelCatalogPlan::Static(models));
+        }
+        domain::ProviderModelCatalogStrategy::RemoteOpenAi => ProviderModelCatalogKind::OpenAi,
+        domain::ProviderModelCatalogStrategy::RemoteOllama => ProviderModelCatalogKind::Ollama,
+        domain::ProviderModelCatalogStrategy::RemoteGoogle => ProviderModelCatalogKind::Google,
+        domain::ProviderModelCatalogStrategy::Unsupported => {
+            return Err(AppError::validation(
+                "provider_model_discovery_unsupported",
+                format!(
+                    "{} does not expose a portable model catalog",
+                    template.display_name
+                ),
+            ));
+        }
+    };
+    let credential_placement = match template.protocol.auth_placement {
+        domain::AuthPlacement::None => CredentialPlacement::None,
+        domain::AuthPlacement::BearerHeader => CredentialPlacement::BearerHeader,
+        domain::AuthPlacement::ApiKeyHeader => {
+            let header_name = template.protocol.auth_header_name.ok_or_else(|| {
+                AppError::internal(
+                    "invalid_provider_template",
+                    "API key header placement requires a header name",
+                )
+            })?;
+            CredentialPlacement::Header(header_name.into())
+        }
+        domain::AuthPlacement::QueryParam => {
+            return Err(AppError::validation(
+                "provider_auth_unavailable",
+                "Query-string Provider credentials are not supported",
+            ));
+        }
+    };
+    let dialect = match catalog {
+        ProviderModelCatalogKind::Ollama => ProviderDialect::OllamaChat,
+        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Google => {
+            ProviderDialect::OpenAiChatCompletions
+        }
+    };
+    Ok(ProviderModelCatalogPlan::Remote(ProviderModelQuery {
+        target: ProviderTarget {
+            dialect,
+            base_url: base_url.into(),
+            credential_placement,
+            additional_headers: template
+                .protocol
+                .additional_headers
+                .iter()
+                .map(|header| (header.name.into(), header.value.into()))
+                .collect(),
+        },
+        catalog,
+    }))
+}
+
+fn model_info_view(model: DiscoveredModel) -> ModelInfoView {
+    ModelInfoView {
+        id: model.id,
+        display_name: model.display_name,
+        context_window: model.context_window,
+        supports_tools: model.supports_tools,
+    }
+}
+
+fn static_model_info_view(model: &domain::StaticProviderModel) -> ModelInfoView {
+    ModelInfoView {
+        id: model.id.into(),
+        display_name: model.display_name.into(),
+        context_window: model.context_window,
+        supports_tools: model.supports_tools,
+    }
+}
+
 fn runnable_template(
     provider_id: &str,
 ) -> AppResult<(&'static domain::ProviderTemplate, domain::ProviderDialect)> {
@@ -1397,6 +1528,18 @@ fn repository_port_error(error: RepositoryPortError) -> AppError {
         RepositoryPortError::Unavailable(message) => {
             AppError::internal("repository_error", message)
         }
+    }
+}
+
+fn provider_port_error(error: ProviderError) -> AppError {
+    AppError {
+        code: error.code().into(),
+        message: error.to_string(),
+        retryable: error.retryable(),
+        details: error
+            .status()
+            .map(|status| json!({ "status": status }))
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -1599,6 +1742,14 @@ impl ApplicationBackend for DefaultApplicationBackend {
         })
     }
 
+    fn list_provider_models(
+        &self,
+        input: ListProviderModelsInput,
+        credential: Option<SessionCredential>,
+    ) -> AppFuture<'_, Vec<ModelInfoView>> {
+        Box::pin(async move { self.list_provider_models_impl(input, credential).await })
+    }
+
     fn save_provider_profile(
         &self,
         input: SaveProviderProfileInput,
@@ -1616,6 +1767,36 @@ impl ApplicationBackend for DefaultApplicationBackend {
 }
 
 impl DefaultApplicationBackend {
+    async fn list_provider_models_impl(
+        &self,
+        input: ListProviderModelsInput,
+        credential: Option<SessionCredential>,
+    ) -> AppResult<Vec<ModelInfoView>> {
+        let (provider_id, base_url) = match provider_model_source(input)? {
+            ProviderModelSource::SavedProfile(provider_profile_id) => {
+                let profile = self
+                    .repository
+                    .get_provider_profile(&provider_profile_id)
+                    .await
+                    .map_err(repository_port_error)?;
+                (profile.provider_id, profile.base_url)
+            }
+            ProviderModelSource::Draft(draft) => (draft.provider_id, draft.base_url),
+        };
+
+        match provider_model_catalog_plan(&provider_id, &base_url)? {
+            ProviderModelCatalogPlan::Static(models) => {
+                Ok(models.iter().map(static_model_info_view).collect())
+            }
+            ProviderModelCatalogPlan::Remote(query) => self
+                .model_catalog
+                .list_models(query, credential)
+                .await
+                .map_err(provider_port_error)
+                .map(|models| models.into_iter().map(model_info_view).collect()),
+        }
+    }
+
     async fn open_workspace_impl(&self, workspace_id: &str) -> AppResult<WorkspaceDetail> {
         let workspace = self
             .repository
@@ -2273,15 +2454,7 @@ impl DefaultApplicationBackend {
             .connection_tester
             .test(target, credential)
             .await
-            .map_err(|error| AppError {
-                code: error.code().into(),
-                message: error.to_string(),
-                retryable: error.retryable(),
-                details: error
-                    .status()
-                    .map(|status| json!({ "status": status }))
-                    .unwrap_or(Value::Null),
-            })?;
+            .map_err(provider_port_error)?;
         Ok(ProviderConnectionResult {
             ok: response.ok,
             message: if response.ok {
@@ -2467,6 +2640,93 @@ mod tests {
                 .expect_err("context inspection, connection tests, and runs must fail closed")
                 .code,
             "provider_protocol_unavailable"
+        );
+    }
+
+    #[test]
+    fn provider_model_source_requires_exactly_one_profile_or_draft() {
+        let neither = provider_model_source(ListProviderModelsInput {
+            provider_profile_id: None,
+            draft: None,
+        })
+        .expect_err("a discovery source is required");
+        assert_eq!(neither.code, "invalid_provider_model_source");
+
+        let both = provider_model_source(ListProviderModelsInput {
+            provider_profile_id: Some("profile-1".into()),
+            draft: Some(ProviderModelDraftInput {
+                provider_id: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+            }),
+        })
+        .expect_err("profile and draft are mutually exclusive");
+        assert_eq!(both.code, "invalid_provider_model_source");
+
+        assert!(matches!(
+            provider_model_source(ListProviderModelsInput {
+                provider_profile_id: None,
+                draft: Some(ProviderModelDraftInput {
+                    provider_id: "google".into(),
+                    base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+                }),
+            })
+            .expect("a complete draft is valid"),
+            ProviderModelSource::Draft(_)
+        ));
+    }
+
+    #[test]
+    fn model_catalog_resolution_does_not_enable_unavailable_streaming_protocols() {
+        let ProviderModelCatalogPlan::Static(anthropic) =
+            provider_model_catalog_plan("anthropic", "https://api.anthropic.com")
+                .expect("Anthropic has a reviewed static model catalog")
+        else {
+            panic!("Anthropic discovery must not make an outbound request");
+        };
+        assert_eq!(anthropic[0].id, "claude-fable-5");
+        assert_eq!(
+            runnable_template("anthropic")
+                .expect_err("model discovery must not enable Anthropic runs")
+                .code,
+            "provider_protocol_unavailable"
+        );
+
+        let ProviderModelCatalogPlan::Remote(google) = provider_model_catalog_plan(
+            "google",
+            "https://generativelanguage.googleapis.com/v1beta",
+        )
+        .expect("Google model metadata is remotely discoverable") else {
+            panic!("Google must use its typed remote catalog");
+        };
+        assert_eq!(google.catalog, ProviderModelCatalogKind::Google);
+        assert_eq!(
+            google.target.credential_placement,
+            CredentialPlacement::Header("x-goog-api-key".into())
+        );
+        assert_eq!(
+            runnable_template("google")
+                .expect_err("model discovery must not enable Google runs")
+                .code,
+            "provider_protocol_unavailable"
+        );
+    }
+
+    #[test]
+    fn model_catalog_resolution_rejects_unknown_and_azure_templates_explicitly() {
+        assert_eq!(
+            provider_model_catalog_plan("missing", "https://models.example.com")
+                .expect_err("unknown templates have no authoritative catalog")
+                .code,
+            "unknown_provider_template"
+        );
+        assert_eq!(
+            provider_model_catalog_plan(
+                "azure-openai",
+                "https://resource.openai.azure.com/openai/v1",
+            )
+            .expect_err("Azure deployments do not expose a portable model catalog")
+            .code,
+            "provider_model_discovery_unsupported"
         );
     }
 

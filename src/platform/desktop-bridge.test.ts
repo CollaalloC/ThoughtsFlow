@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { ProviderTemplate } from "../shared/contracts";
+import type { ProviderModelInfo, ProviderTemplate } from "../shared/contracts";
 import { DesktopBridgeError, createDesktopBridge } from "./desktop-bridge";
 
 describe("DesktopBridge errors", () => {
@@ -115,6 +115,73 @@ describe("DesktopBridge errors", () => {
         },
       },
     ]);
+    expect(calls.some(({ command }) => command === "set_session_credential")).toBe(false);
+  });
+
+  it("discovers models for a saved profile through the versioned command envelope", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const models: ProviderModelInfo[] = [
+      {
+        id: "gpt-4.1",
+        displayName: "GPT-4.1",
+        contextWindow: 1_000_000,
+        supportsTools: true,
+      },
+    ];
+    const invokeCommand = async <T,>(
+      command: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      calls.push({ command, args });
+      return { apiVersion: 1, data: models } as T;
+    };
+
+    const result = await createDesktopBridge(invokeCommand).listProviderModels({
+      providerProfileId: "provider-1",
+    });
+
+    expect(calls).toEqual([
+      {
+        command: "list_provider_models",
+        args: { input: { providerProfileId: "provider-1" } },
+      },
+    ]);
+    expect(result).toEqual(models);
+  });
+
+  it("discovers models from an unsaved draft without persisting its session credential", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const invokeCommand = async <T,>(
+      command: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      calls.push({ command, args });
+      return { apiVersion: 1, data: [] } as T;
+    };
+
+    await createDesktopBridge(invokeCommand).listProviderModels({
+      draft: {
+        providerId: "openai-compatible",
+        baseUrl: "https://llm.example.com/v1",
+        sessionCredential: "session-only-secret",
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        command: "list_provider_models",
+        args: {
+          input: {
+            draft: {
+              providerId: "openai-compatible",
+              baseUrl: "https://llm.example.com/v1",
+              sessionCredential: "session-only-secret",
+            },
+          },
+        },
+      },
+    ]);
+    expect(calls.some(({ command }) => command === "save_provider_profile")).toBe(false);
     expect(calls.some(({ command }) => command === "set_session_credential")).toBe(false);
   });
 });

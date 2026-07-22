@@ -11,8 +11,9 @@
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:fixtures": "node --test tests/fixtures/provider-server.test.ts",
     "test:e2e": "playwright test",
-    "check": "npm run test:run && npm run build"
+    "check": "npm run test:run && npm run test:fixtures && npm run build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

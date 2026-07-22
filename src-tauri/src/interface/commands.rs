@@ -6,6 +6,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::application::*;
+use crate::ports::provider::SessionCredential;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,6 +290,105 @@ pub async fn list_provider_templates(
 }
 
 #[tauri::command]
+pub async fn list_provider_models(
+    state: State<'_, AppState>,
+    input: ListProviderModelsCommandInput,
+) -> AppResult<ApiResponse<Vec<ModelInfoView>>> {
+    match validate_model_discovery_command(input)? {
+        ProviderModelCommandSource::SavedProfile(provider_profile_id) => {
+            let provider_profile_lock = state.provider_profile_lock(&provider_profile_id)?;
+            let _provider_profile_operation = provider_profile_lock.lock().await;
+            let credential = state
+                .credentials()
+                .get(&provider_profile_id)?
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(|secret| SessionCredential::new(secret.to_owned()))
+                })
+                .transpose()?;
+            state
+                .backend()
+                .list_provider_models(
+                    ListProviderModelsInput {
+                        provider_profile_id: Some(provider_profile_id),
+                        draft: None,
+                    },
+                    credential,
+                )
+                .await
+                .map(ApiResponse::new)
+        }
+        ProviderModelCommandSource::Draft { input, credential } => state
+            .backend()
+            .list_provider_models(input, credential.map(SessionCredential::new))
+            .await
+            .map(ApiResponse::new),
+    }
+}
+
+/// Command-only model discovery envelope. It deliberately does not implement
+/// `Debug`: a draft credential is process-memory-only and must not be emitted
+/// by generic command diagnostics.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListProviderModelsCommandInput {
+    #[serde(default)]
+    provider_profile_id: Option<String>,
+    #[serde(default)]
+    draft: Option<ProviderModelDraftCommandInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderModelDraftCommandInput {
+    provider_id: String,
+    base_url: String,
+    #[serde(default)]
+    session_credential: Option<String>,
+}
+
+enum ProviderModelCommandSource {
+    SavedProfile(String),
+    Draft {
+        input: ListProviderModelsInput,
+        credential: Option<String>,
+    },
+}
+
+fn validate_model_discovery_command(
+    input: ListProviderModelsCommandInput,
+) -> AppResult<ProviderModelCommandSource> {
+    match (input.provider_profile_id, input.draft) {
+        (Some(provider_profile_id), None) => {
+            require_non_empty("providerProfileId", &provider_profile_id)?;
+            Ok(ProviderModelCommandSource::SavedProfile(
+                provider_profile_id,
+            ))
+        }
+        (None, Some(draft)) => {
+            require_non_empty("draft.providerId", &draft.provider_id)?;
+            require_non_empty("draft.baseUrl", &draft.base_url)?;
+            validate_provider_url(&draft.base_url)?;
+            Ok(ProviderModelCommandSource::Draft {
+                input: ListProviderModelsInput {
+                    provider_profile_id: None,
+                    draft: Some(ProviderModelDraftInput {
+                        provider_id: draft.provider_id,
+                        base_url: draft.base_url,
+                    }),
+                },
+                credential: draft.session_credential.filter(|value| !value.is_empty()),
+            })
+        }
+        _ => Err(AppError::validation(
+            "invalid_provider_model_source",
+            "Choose exactly one Provider Profile or draft Provider target",
+        )),
+    }
+}
+
+#[tauri::command]
 pub async fn save_provider_profile(
     state: State<'_, AppState>,
     input: SaveProviderProfileCommandInput,
@@ -504,6 +604,101 @@ mod tests {
         );
         assert_eq!(parameters.get("stop"), Some(&serde_json::json!(["END"])));
         assert_eq!(input.session_credential.as_deref(), Some("session-secret"));
+    }
+
+    #[test]
+    fn model_discovery_command_accepts_the_strict_profile_or_draft_union() {
+        let profile: ListProviderModelsCommandInput = serde_json::from_value(serde_json::json!({
+            "providerProfileId": "profile-1"
+        }))
+        .expect("saved Profile discovery deserializes");
+        assert!(matches!(
+            validate_model_discovery_command(profile).expect("saved Profile is valid"),
+            ProviderModelCommandSource::SavedProfile(id) if id == "profile-1"
+        ));
+
+        let draft: ListProviderModelsCommandInput = serde_json::from_value(serde_json::json!({
+            "draft": {
+                "providerId": "google",
+                "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+                "sessionCredential": "draft-secret"
+            }
+        }))
+        .expect("draft discovery deserializes");
+        let ProviderModelCommandSource::Draft { input, credential } =
+            validate_model_discovery_command(draft).expect("draft is valid")
+        else {
+            panic!("the draft source must remain a draft");
+        };
+        assert_eq!(credential.as_deref(), Some("draft-secret"));
+        assert_eq!(
+            input.draft.expect("credential-free draft").provider_id,
+            "google"
+        );
+
+        let secret = SessionCredential::new(credential.expect("draft credential is present"));
+        assert_eq!(secret.expose_secret(), "draft-secret");
+        assert_eq!(format!("{secret:?}"), "SessionCredential(<redacted>)");
+    }
+
+    #[test]
+    fn model_discovery_command_rejects_ambiguous_or_unknown_shapes() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "providerProfileId": "profile-1",
+                "draft": {
+                    "providerId": "openai",
+                    "baseUrl": "https://api.openai.com/v1"
+                }
+            }),
+        ] {
+            let input: ListProviderModelsCommandInput =
+                serde_json::from_value(payload).expect("the envelope shape deserializes");
+            let error = match validate_model_discovery_command(input) {
+                Ok(_) => panic!("ambiguous model discovery source must be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, "invalid_provider_model_source");
+        }
+
+        assert!(
+            serde_json::from_value::<ListProviderModelsCommandInput>(serde_json::json!({
+                "providerProfileId": "profile-1",
+                "sessionCredential": "must-not-be-accepted-here"
+            }))
+            .is_err(),
+            "credentials are accepted only inside a draft target"
+        );
+    }
+
+    #[test]
+    fn static_model_drafts_still_enforce_the_provider_url_policy() {
+        for (base_url, code) in [
+            ("http://api.anthropic.com", "insecure_remote_provider"),
+            (
+                "https://secret@api.anthropic.com",
+                "embedded_provider_credential",
+            ),
+            (
+                "https://api.anthropic.com?key=secret",
+                "invalid_provider_url",
+            ),
+            ("https://api.anthropic.com#models", "invalid_provider_url"),
+        ] {
+            let input: ListProviderModelsCommandInput = serde_json::from_value(serde_json::json!({
+                "draft": {
+                    "providerId": "anthropic",
+                    "baseUrl": base_url
+                }
+            }))
+            .expect("the draft contract deserializes");
+            let error = match validate_model_discovery_command(input) {
+                Ok(_) => panic!("unsafe static-catalog URL must be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, code);
+        }
     }
 
     #[test]

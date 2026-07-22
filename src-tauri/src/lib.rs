@@ -34,6 +34,7 @@ fn register_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
         export_decision_packet,
         list_provider_templates,
         list_provider_profiles,
+        list_provider_models,
         save_provider_profile,
         set_session_credential,
         test_provider_connection,
@@ -60,8 +61,13 @@ pub fn run() {
             let repository = Arc::new(SqliteRepository::connect(database_path).await?);
             let provider = Arc::new(ReqwestProviderGateway::with_defaults()?);
             let exporter = Arc::new(LocalDecisionPacketWriter::new(export_root));
-            let backend =
-                DefaultApplicationBackend::new(repository, provider.clone(), provider, exporter);
+            let backend = DefaultApplicationBackend::new(
+                repository,
+                provider.clone(),
+                provider.clone(),
+                provider,
+                exporter,
+            );
             backend.initialize().await?;
             Ok::<_, Box<dyn std::error::Error>>(backend)
         })?;

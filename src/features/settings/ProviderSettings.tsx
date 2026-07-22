@@ -1,12 +1,18 @@
 import { Check, Cloud, HardDrive, KeyRound, LoaderCircle, PlugZap, Plus } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import type { DesktopBridge } from "../../platform/desktop-bridge";
-import type { ProviderProfile, ProviderTemplate } from "../../shared/contracts";
+import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
+import type {
+  ListProviderModelsInput,
+  ProviderModelInfo,
+  ProviderProfile,
+  ProviderTemplate,
+} from "../../shared/contracts";
 import { Button, LocalDataBadge, ProviderDestination } from "../../shared/ui";
 import "./provider-settings.css";
 
 type ProviderProfileView = ProviderProfile;
+type ModelDiscoveryPhase = "idle" | "loading" | "success" | "error";
 
 type Draft = {
   id?: string;
@@ -68,6 +74,13 @@ function describeAuth(template?: ProviderTemplate) {
   return `${headerName ?? "key"}=…（URL 查询参数）`;
 }
 
+function modelOptionLabel(model: ProviderModelInfo) {
+  const displayName = model.displayName.trim();
+  return !displayName || displayName === model.id
+    ? model.id
+    : `${displayName} (${model.id})`;
+}
+
 export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
   const [profiles, setProfiles] = useState<ProviderProfileView[]>([]);
   const [templates, setTemplates] = useState<ProviderTemplate[]>([]);
@@ -77,6 +90,21 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [models, setModels] = useState<ProviderModelInfo[]>([]);
+  const [modelDiscoveryPhase, setModelDiscoveryPhase] =
+    useState<ModelDiscoveryPhase>("idle");
+  const [modelDiscoveryError, setModelDiscoveryError] = useState<{
+    message: string;
+    retryable: boolean;
+  } | null>(null);
+  const modelDiscoveryRequest = useRef(0);
+
+  const clearModelDiscovery = () => {
+    modelDiscoveryRequest.current += 1;
+    setModels([]);
+    setModelDiscoveryPhase("idle");
+    setModelDiscoveryError(null);
+  };
 
   useEffect(() => {
     let active = true;
@@ -104,12 +132,19 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
       .finally(() => {
         if (active) setLoading(false);
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      modelDiscoveryRequest.current += 1;
+    };
   }, [bridge]);
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.providerId === draft.providerId),
     [draft.providerId, templates],
+  );
+  const selectedDiscoveredModel = useMemo(
+    () => models.find((model) => model.id === draft.defaultModel),
+    [draft.defaultModel, models],
   );
 
   const connectionTestNeedsSave = useMemo(() => {
@@ -134,6 +169,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
   }, [draft.baseUrl]);
 
   const editProfile = (profile: ProviderProfileView) => {
+    clearModelDiscovery();
     setDraft({
       id: profile.id,
       providerId: profile.providerId,
@@ -194,6 +230,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
         const withoutSaved = current.filter((profile) => profile.id !== saved.id);
         return [...withoutSaved, saved];
       });
+      clearModelDiscovery();
       setDraft({
         id: saved.id,
         providerId: saved.providerId,
@@ -247,6 +284,72 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
     }
   };
 
+  const discoverModels = async () => {
+    setError(null);
+    setStatus(null);
+    setModelDiscoveryError(null);
+
+    const endpointError = validateEndpoint(draft.baseUrl);
+    if (endpointError) {
+      setModelDiscoveryPhase("error");
+      setModelDiscoveryError({ message: endpointError, retryable: false });
+      return;
+    }
+    if (!selectedTemplate) {
+      setModelDiscoveryPhase("error");
+      setModelDiscoveryError({ message: "请选择 Provider 模板。", retryable: false });
+      return;
+    }
+    if (!selectedTemplate.protocol.modelsEndpoint) {
+      setModelDiscoveryPhase("error");
+      setModelDiscoveryError({
+        message: "该 Provider 模板没有可用的模型目录端点。",
+        retryable: false,
+      });
+      return;
+    }
+
+    const normalizedBaseUrl = normalizeBaseUrl(draft.baseUrl);
+    const persisted = draft.id
+      ? profiles.find((profile) => profile.id === draft.id)
+      : undefined;
+    const canUseSavedProfile = Boolean(
+      draft.id
+      && persisted
+      && persisted.providerId === draft.providerId
+      && normalizeBaseUrl(persisted.baseUrl) === normalizedBaseUrl
+      && draft.credential.length === 0,
+    );
+    const input: ListProviderModelsInput = canUseSavedProfile && draft.id
+      ? { providerProfileId: draft.id }
+      : {
+          draft: {
+            providerId: draft.providerId,
+            baseUrl: normalizedBaseUrl,
+            ...(draft.credential && selectedTemplate.protocol.authPlacement !== "none"
+              ? { sessionCredential: draft.credential }
+              : {}),
+          },
+        };
+    const requestId = ++modelDiscoveryRequest.current;
+    setModels([]);
+    setModelDiscoveryPhase("loading");
+
+    try {
+      const discovered = await bridge.listProviderModels(input);
+      if (requestId !== modelDiscoveryRequest.current) return;
+      setModels(discovered);
+      setModelDiscoveryPhase("success");
+    } catch (reason) {
+      if (requestId !== modelDiscoveryRequest.current) return;
+      setModelDiscoveryPhase("error");
+      setModelDiscoveryError({
+        message: reason instanceof Error ? reason.message : "发现模型失败。",
+        retryable: reason instanceof DesktopBridgeError && reason.retryable,
+      });
+    }
+  };
+
   return (
     <section className="provider-settings" aria-labelledby="provider-settings-title">
       <aside className="provider-settings__list">
@@ -260,6 +363,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
             aria-label="新建 Provider"
             onClick={() => {
               const firstAvailable = templates.find((template) => template.runtimeAvailable);
+              clearModelDiscovery();
               setDraft({
                 ...emptyDraft,
                 providerId: firstAvailable?.providerId ?? "",
@@ -333,6 +437,7 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
                   (candidate) => candidate.providerId === event.target.value,
                 );
                 if (!template) return;
+                clearModelDiscovery();
                 setDraft({
                   ...draft,
                   providerId: template.providerId,
@@ -368,12 +473,99 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
           )}
           <label className="provider-settings__wide">
             <span>Base URL</span>
-            <input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" inputMode="url" />
+            <input
+              aria-label="Base URL"
+              value={draft.baseUrl}
+              onChange={(event) => {
+                clearModelDiscovery();
+                setDraft({ ...draft, baseUrl: event.target.value });
+              }}
+              placeholder="https://api.example.com/v1"
+              inputMode="url"
+            />
           </label>
-          <label>
-            <span>模型</span>
-            <input value={draft.defaultModel} onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })} placeholder="gpt-4.1 或 qwen3:14b" />
-          </label>
+          <div className="provider-settings__field provider-settings__model-field">
+            <label htmlFor="provider-model-select">模型</label>
+            <span className="provider-settings__model-controls">
+              <input
+                id="provider-model-select"
+                list="provider-model-options"
+                aria-label="模型"
+                aria-describedby="provider-model-discovery-boundary"
+                value={draft.defaultModel}
+                onChange={(event) =>
+                  setDraft({ ...draft, defaultModel: event.target.value })
+                }
+                placeholder="发现后选择，或手动输入模型 ID"
+                autoComplete="off"
+              />
+              <datalist id="provider-model-options">
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {modelOptionLabel(model)}
+                  </option>
+                ))}
+              </datalist>
+              <button
+                type="button"
+                className="provider-settings__discover"
+                disabled={
+                  modelDiscoveryPhase === "loading"
+                  || saving
+                  || testing
+                  || !selectedTemplate
+                  || !draft.baseUrl.trim()
+                }
+                onClick={discoverModels}
+              >
+                {modelDiscoveryPhase === "loading" && (
+                  <LoaderCircle className="tf-spin" size={13} aria-hidden="true" />
+                )}
+                {modelDiscoveryPhase === "loading" ? "发现中" : "发现模型"}
+              </button>
+            </span>
+            <small
+              id="provider-model-discovery-boundary"
+              className="provider-settings__field-note"
+            >
+              “发现模型”只读取模型目录元数据，不发送工作区 Context。远程目录仅向 {parsedHost}
+              发起 GET；内置审核列表不会联网。
+            </small>
+            {selectedDiscoveredModel && (
+              <small className="provider-settings__model-metadata">
+                目录元数据：{selectedDiscoveredModel.displayName.trim() || selectedDiscoveredModel.id}
+                {" · Context "}
+                {selectedDiscoveredModel.contextWindow === null
+                  ? "未声明"
+                  : selectedDiscoveredModel.contextWindow.toLocaleString("en-US")}
+                {" · Tools "}
+                {selectedDiscoveredModel.supportsTools === null
+                  ? "未声明"
+                  : selectedDiscoveredModel.supportsTools ? "支持" : "不支持"}
+              </small>
+            )}
+            {modelDiscoveryPhase === "success" && models.length > 0 && (
+              <small className="provider-settings__discovery-state" role="status">
+                已发现 {models.length} 个模型；选择后仍需保存 Provider 才会生效。
+              </small>
+            )}
+            {modelDiscoveryPhase === "success" && models.length === 0 && (
+              <small className="provider-settings__discovery-state" role="status">
+                端点返回了空模型列表。可稍后重新发现。
+              </small>
+            )}
+            {modelDiscoveryPhase === "error" && modelDiscoveryError && (
+              <span className="provider-settings__discovery-error" role="alert">
+                <span>
+                  {modelDiscoveryError.message}
+                  {modelDiscoveryError.retryable ? " 这是临时错误，可以重试。" : ""}
+                </span>
+                {modelDiscoveryError.retryable && (
+                  <button type="button" onClick={discoverModels}>重试发现模型</button>
+                )}
+              </span>
+            )}
+          </div>
           <label>
             <span>API Key（仅本次会话）</span>
             <span className="provider-settings__secret">
@@ -385,7 +577,10 @@ export function ProviderSettings({ bridge }: { bridge: DesktopBridge }) {
                 autoComplete="off"
                 disabled={selectedTemplate?.protocol.authPlacement === "none"}
                 value={draft.credential}
-                onChange={(event) => setDraft({ ...draft, credential: event.target.value })}
+                onChange={(event) => {
+                  clearModelDiscovery();
+                  setDraft({ ...draft, credential: event.target.value });
+                }}
                 placeholder={selectedTemplate?.protocol.authPlacement === "none" ? "通常不需要" : "退出应用后清除"}
               />
             </span>

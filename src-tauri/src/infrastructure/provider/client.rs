@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName};
@@ -9,28 +9,44 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     infrastructure::provider::{
-        OllamaNdjsonDecoder, OpenAiSseDecoder, ProviderStreamDecoder, decode_http_error,
-        provider_request_url,
+        OllamaNdjsonDecoder, OpenAiSseDecoder, ProviderStreamDecoder,
+        decode_http_error_with_redaction, provider_models_url, provider_request_url,
     },
     ports::provider::{
-        CanonicalMessage, CanonicalRequest, CredentialPlacement, MessageRole,
+        CanonicalMessage, CanonicalRequest, CredentialPlacement, DiscoveredModel, MessageRole,
         ProviderConnectionFuture, ProviderConnectionStatus, ProviderConnectionTester,
         ProviderDialect, ProviderError, ProviderFuture, ProviderGateway, ProviderInvocation,
+        ProviderModelCatalog, ProviderModelCatalogKind, ProviderModelQuery, ProviderModelsFuture,
         ProviderTarget, RunEvent, SessionCredential,
     },
 };
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const CONNECTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_MODEL_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DISCOVERED_MODELS: usize = 5_000;
+const MAX_MODEL_ID_CHARS: usize = 512;
+const MAX_MODEL_DISPLAY_NAME_CHARS: usize = 1_024;
 const CREDENTIAL_REDACTION_MARKER: &str = "[REDACTED]";
 
 pub struct ReqwestProviderGateway {
     client: reqwest::Client,
+    model_catalog_timeout: Duration,
 }
 
 impl ReqwestProviderGateway {
     fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            model_catalog_timeout: MODEL_CATALOG_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_model_catalog_timeout(mut self, timeout: Duration) -> Self {
+        self.model_catalog_timeout = timeout;
+        self
     }
 
     pub fn with_defaults() -> Result<Self, ProviderError> {
@@ -118,7 +134,12 @@ impl ReqwestProviderGateway {
             return send_failure(
                 &events,
                 &mut redactor,
-                decode_http_error(status, content_type.as_deref(), &body),
+                decode_redacted_http_error(
+                    status,
+                    content_type.as_deref(),
+                    &body,
+                    invocation.credential.as_ref(),
+                ),
             )
             .await;
         }
@@ -400,17 +421,11 @@ impl ProviderConnectionTester for ReqwestProviderGateway {
         credential: Option<crate::ports::provider::SessionCredential>,
     ) -> ProviderConnectionFuture<'a> {
         Box::pin(async move {
-            let mut endpoint =
-                crate::infrastructure::provider::validate_base_url(&target.base_url)?;
-            let base_path = endpoint.path().trim_end_matches('/');
-            let path = match target.dialect {
-                ProviderDialect::OllamaChat if base_path.ends_with("/api") => {
-                    format!("{base_path}/tags")
-                }
-                ProviderDialect::OllamaChat => format!("{base_path}/api/tags"),
-                ProviderDialect::OpenAiChatCompletions => format!("{base_path}/models"),
+            let catalog = match target.dialect {
+                ProviderDialect::OpenAiChatCompletions => ProviderModelCatalogKind::OpenAi,
+                ProviderDialect::OllamaChat => ProviderModelCatalogKind::Ollama,
             };
-            endpoint.set_path(&path);
+            let endpoint = provider_models_url(&target.base_url, catalog)?;
             let mut request = self.client.get(endpoint).timeout(CONNECTION_TEST_TIMEOUT);
             request = apply_additional_headers(request, &target.additional_headers)?;
             request = apply_credential(request, &target.credential_placement, credential.as_ref())?;
@@ -423,6 +438,292 @@ impl ProviderConnectionTester for ReqwestProviderGateway {
                 http_status: response.status().as_u16(),
             })
         })
+    }
+}
+
+impl ProviderModelCatalog for ReqwestProviderGateway {
+    fn list_models<'a>(
+        &'a self,
+        query: ProviderModelQuery,
+        credential: Option<SessionCredential>,
+    ) -> ProviderModelsFuture<'a> {
+        Box::pin(async move {
+            let endpoint = provider_models_url(&query.target.base_url, query.catalog)
+                .map_err(|error| redact_provider_error(error, credential.as_ref()))?;
+            let mut request = self
+                .client
+                .get(endpoint)
+                .header(ACCEPT, "application/json")
+                .timeout(self.model_catalog_timeout);
+            request = apply_additional_headers(request, &query.target.additional_headers)?;
+            request = apply_credential(
+                request,
+                &query.target.credential_placement,
+                credential.as_ref(),
+            )?;
+
+            let response = request.send().await.map_err(|error| {
+                redact_provider_error(
+                    ProviderError::Transport(error.to_string()),
+                    credential.as_ref(),
+                )
+            })?;
+
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let content_type = response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let no_cancellation = CancellationToken::new();
+                let body = collect_error_body(response, &no_cancellation)
+                    .await
+                    .map_err(|error| redact_provider_error(error, credential.as_ref()))?
+                    .unwrap_or_default();
+                return Err(redact_provider_error(
+                    decode_redacted_http_error(
+                        status,
+                        content_type.as_deref(),
+                        &body,
+                        credential.as_ref(),
+                    ),
+                    credential.as_ref(),
+                ));
+            }
+
+            let body = collect_bounded_response_body(response, MAX_MODEL_CATALOG_BODY_BYTES)
+                .await
+                .map_err(|error| redact_provider_error(error, credential.as_ref()))?;
+            parse_model_catalog(query.catalog, &body, credential.as_ref())
+                .map_err(|error| redact_provider_error(error, credential.as_ref()))
+        })
+    }
+}
+
+async fn collect_bounded_response_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ProviderError> {
+    if response
+        .content_length()
+        .is_some_and(|content_length| content_length > limit as u64)
+    {
+        return Err(ProviderError::InvalidResponse(format!(
+            "Provider response exceeds the {limit}-byte limit"
+        )));
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ProviderError::Transport(error.to_string()))?;
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            return Err(ProviderError::InvalidResponse(format!(
+                "Provider response exceeds the {limit}-byte limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn parse_model_catalog(
+    catalog: ProviderModelCatalogKind,
+    body: &[u8],
+    credential: Option<&SessionCredential>,
+) -> Result<Vec<DiscoveredModel>, ProviderError> {
+    let document: Value = serde_json::from_slice(body).map_err(|error| {
+        ProviderError::InvalidResponse(format!("model catalog is not valid JSON: {error}"))
+    })?;
+    let root = document.as_object().ok_or_else(|| {
+        ProviderError::InvalidResponse("model catalog root must be an object".to_owned())
+    })?;
+    let collection_name = match catalog {
+        ProviderModelCatalogKind::OpenAi => "data",
+        ProviderModelCatalogKind::Ollama | ProviderModelCatalogKind::Google => "models",
+    };
+    let entries = root
+        .get(collection_name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProviderError::InvalidResponse(format!(
+                "model catalog must contain a `{collection_name}` array"
+            ))
+        })?;
+    if entries.len() > MAX_DISCOVERED_MODELS {
+        return Err(ProviderError::InvalidResponse(format!(
+            "model catalog contains more than {MAX_DISCOVERED_MODELS} entries"
+        )));
+    }
+
+    let secret = credential
+        .filter(|credential| !credential.is_empty())
+        .map(SessionCredential::expose_secret);
+    let mut models = entries
+        .iter()
+        .filter_map(|entry| parse_discovered_model(catalog, entry, secret))
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        left.display_name
+            .to_lowercase()
+            .cmp(&right.display_name.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut seen = BTreeSet::new();
+    models.retain(|model| seen.insert(model.id.clone()));
+    Ok(models)
+}
+
+fn parse_discovered_model(
+    catalog: ProviderModelCatalogKind,
+    entry: &Value,
+    credential: Option<&str>,
+) -> Option<DiscoveredModel> {
+    let entry = entry.as_object()?;
+    let id = match catalog {
+        ProviderModelCatalogKind::OpenAi => string_field(entry, &["id"]),
+        ProviderModelCatalogKind::Ollama => string_field(entry, &["model", "name"]),
+        ProviderModelCatalogKind::Google => string_field(entry, &["name"]),
+    }?;
+    // Redact before whitespace normalization. Session credentials are opaque
+    // strings and may themselves contain leading or trailing whitespace.
+    let id = redact_bounded_value(id, credential).trim().to_owned();
+    if id.is_empty() || id.chars().count() > MAX_MODEL_ID_CHARS || contains_unsafe_text_control(&id)
+    {
+        return None;
+    }
+
+    let display_name = match catalog {
+        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Ollama => {
+            string_field(entry, &["display_name", "displayName"]).unwrap_or(&id)
+        }
+        ProviderModelCatalogKind::Google => string_field(entry, &["displayName"]).unwrap_or(&id),
+    };
+    let display_name = redact_bounded_value(display_name, credential)
+        .trim()
+        .to_owned();
+    let display_name = if display_name.is_empty()
+        || display_name.chars().count() > MAX_MODEL_DISPLAY_NAME_CHARS
+        || contains_unsafe_text_control(&display_name)
+    {
+        id.clone()
+    } else {
+        display_name
+    };
+
+    let context_window = match catalog {
+        ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Ollama => u64_field(
+            entry,
+            &["context_window", "contextWindow", "context_length"],
+        ),
+        ProviderModelCatalogKind::Google => u64_field(entry, &["contextWindow", "inputTokenLimit"]),
+    };
+    let supports_tools = bool_field(entry, &["supports_tools", "supportsTools"])
+        .or_else(|| nested_capability_bool(entry, &["tools", "tool_calling", "toolCalling"]))
+        .or_else(|| tools_capability_list(entry, "capabilities"))
+        .or_else(|| tools_capability_list(entry, "supported_parameters"));
+
+    Some(DiscoveredModel {
+        id,
+        display_name,
+        context_window,
+        supports_tools,
+    })
+}
+
+fn string_field<'a>(entry: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| entry.get(*name).and_then(Value::as_str))
+}
+
+fn u64_field(entry: &Map<String, Value>, names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| entry.get(*name).and_then(Value::as_u64))
+}
+
+fn bool_field(entry: &Map<String, Value>, names: &[&str]) -> Option<bool> {
+    names
+        .iter()
+        .find_map(|name| entry.get(*name).and_then(Value::as_bool))
+}
+
+fn nested_capability_bool(entry: &Map<String, Value>, names: &[&str]) -> Option<bool> {
+    let capabilities = entry.get("capabilities")?.as_object()?;
+    bool_field(capabilities, names)
+}
+
+fn tools_capability_list(entry: &Map<String, Value>, field: &str) -> Option<bool> {
+    let capabilities = entry.get(field)?.as_array()?;
+    Some(capabilities.iter().any(|capability| {
+        capability.as_str().is_some_and(|capability| {
+            matches!(capability, "tools" | "tool_calling" | "toolCalling")
+        })
+    }))
+}
+
+fn contains_unsafe_text_control(value: &str) -> bool {
+    value.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    })
+}
+
+fn decode_redacted_http_error(
+    status: u16,
+    content_type: Option<&str>,
+    body: &[u8],
+    credential: Option<&SessionCredential>,
+) -> ProviderError {
+    let secret = credential
+        .filter(|credential| !credential.is_empty())
+        .map(SessionCredential::expose_secret);
+    decode_http_error_with_redaction(status, content_type, body, |value| {
+        redact_bounded_value(value, secret)
+    })
+}
+
+fn redact_provider_error(
+    error: ProviderError,
+    credential: Option<&SessionCredential>,
+) -> ProviderError {
+    let secret = credential
+        .filter(|credential| !credential.is_empty())
+        .map(SessionCredential::expose_secret);
+    let redact = |value: String| redact_bounded_value(&value, secret);
+    match error {
+        ProviderError::InvalidEndpoint(message) => ProviderError::InvalidEndpoint(redact(message)),
+        ProviderError::UnsupportedScheme(scheme) => {
+            ProviderError::UnsupportedScheme(redact(scheme))
+        }
+        ProviderError::CredentialsInUrl => ProviderError::CredentialsInUrl,
+        ProviderError::InsecureRemoteEndpoint(host) => {
+            ProviderError::InsecureRemoteEndpoint(redact(host))
+        }
+        ProviderError::InvalidResponse(message) => ProviderError::InvalidResponse(redact(message)),
+        ProviderError::UnexpectedEof => ProviderError::UnexpectedEof,
+        ProviderError::Http {
+            status,
+            provider_code,
+            message,
+            retryable,
+        } => ProviderError::Http {
+            status,
+            provider_code: provider_code.map(&redact),
+            message: redact(message),
+            retryable,
+        },
+        ProviderError::Transport(message) => ProviderError::Transport(redact(message)),
+        ProviderError::EventChannelClosed => ProviderError::EventChannelClosed,
     }
 }
 
@@ -638,7 +939,8 @@ mod tests {
 
     use crate::ports::provider::{
         CanonicalRequest, CredentialPlacement, ProviderConnectionTester, ProviderDialect,
-        ProviderGateway, ProviderInvocation, ProviderTarget, RunEvent, SessionCredential,
+        ProviderGateway, ProviderInvocation, ProviderModelCatalog, ProviderModelCatalogKind,
+        ProviderModelQuery, ProviderTarget, RunEvent, SessionCredential,
     };
 
     use super::{ProviderEventRedactor, ReqwestProviderGateway};
@@ -666,6 +968,27 @@ mod tests {
         }
     }
 
+    fn model_query(
+        base_url: String,
+        catalog: ProviderModelCatalogKind,
+        credential_placement: CredentialPlacement,
+    ) -> ProviderModelQuery {
+        ProviderModelQuery {
+            target: ProviderTarget {
+                dialect: match catalog {
+                    ProviderModelCatalogKind::Ollama => ProviderDialect::OllamaChat,
+                    ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Google => {
+                        ProviderDialect::OpenAiChatCompletions
+                    }
+                },
+                base_url,
+                credential_placement,
+                additional_headers: std::collections::BTreeMap::new(),
+            },
+            catalog,
+        }
+    }
+
     fn spawn_single_response(
         status: &str,
         headers: Vec<(String, String)>,
@@ -678,7 +1001,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_http_request(&mut stream);
-            request_sender.send(request).unwrap();
+            let _ = request_sender.send(request);
 
             let mut response = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -693,6 +1016,26 @@ mod tests {
             response.push_str("\r\n");
             response.push_str(&body);
             stream.write_all(response.as_bytes()).unwrap();
+        });
+        (format!("http://{address}"), request_receiver, handle)
+    }
+
+    fn spawn_raw_response(
+        chunks: Vec<(Duration, Vec<u8>)>,
+    ) -> (String, std_mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = std_mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let _ = request_sender.send(request);
+            for (delay, chunk) in chunks {
+                thread::sleep(delay);
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
         });
         (format!("http://{address}"), request_receiver, handle)
     }
@@ -1121,6 +1464,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_http_errors_redact_before_html_and_whitespace_normalization() {
+        let credential = "key  with  spaces";
+        let collapsed_credential = "key with spaces";
+        let body = format!("<p>provider reflected {credential}</p>");
+        let (base_url, _, server) = spawn_single_response(
+            "401 Unauthorized",
+            vec![("Content-Type".into(), "text/html".into())],
+            body,
+        );
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+
+        gateway
+            .stream(
+                openai_invocation(base_url, Some(credential)),
+                CancellationToken::new(),
+                sender,
+            )
+            .await
+            .unwrap();
+
+        let failure = receiver.recv().await.unwrap();
+        let rendered = serde_json::to_string(&failure).unwrap();
+        assert!(matches!(
+            failure,
+            RunEvent::RunFailed {
+                status: Some(401),
+                ..
+            }
+        ));
+        assert!(!rendered.contains(credential));
+        assert!(!rendered.contains(collapsed_credential));
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(receiver.recv().await.is_none());
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn streaming_requests_do_not_follow_provider_redirects() {
         let redirect_target = spawn_redirect_target();
         let (base_url, request_receiver, server) = spawn_single_response(
@@ -1222,5 +1603,492 @@ mod tests {
 
         assert_eq!(receiver.recv().await, Some(RunEvent::RunCancelled));
         assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn openai_model_catalog_uses_authoritative_headers_and_normalizes_models() {
+        let reflected_id = format!("reflected-{TEST_CREDENTIAL}-model");
+        let overlong_id = "x".repeat(super::MAX_MODEL_ID_CHARS + 1);
+        let overlong_display_name = "y".repeat(super::MAX_MODEL_DISPLAY_NAME_CHARS + 1);
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "zeta-model",
+                    "display_name": "Zeta",
+                    "context_window": 8192,
+                    "supports_tools": true
+                },
+                {
+                    "id": "alpha-model",
+                    "displayName": "Alpha",
+                    "capabilities": { "tools": false }
+                },
+                { "id": "alpha-model", "display_name": "Later Alpha" },
+                {
+                    "id": "beta-model",
+                    "display_name": "Beta",
+                    "supported_parameters": ["temperature", "tools"]
+                },
+                { "id": "gamma-model", "display_name": overlong_display_name },
+                { "id": "" },
+                { "id": overlong_id },
+                { "id": reflected_id }
+            ]
+        })
+        .to_string();
+        let (base_url, request_receiver, server) = spawn_single_response(
+            "200 OK",
+            vec![("Content-Type".into(), "application/json".into())],
+            body,
+        );
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let mut query = model_query(
+            format!("{base_url}/gateway/v1/chat/completions"),
+            ProviderModelCatalogKind::OpenAi,
+            CredentialPlacement::Header("x-api-key".into()),
+        );
+        query
+            .target
+            .additional_headers
+            .insert("x-static-revision".into(), "catalog-v1".into());
+
+        let models = gateway
+            .list_models(query, Some(SessionCredential::new(TEST_CREDENTIAL)))
+            .await
+            .unwrap();
+
+        assert_eq!(models[0].id, "alpha-model");
+        assert_eq!(models[0].display_name, "Alpha");
+        assert_eq!(models[0].supports_tools, Some(false));
+        assert_eq!(models[1].id, "beta-model");
+        assert_eq!(models[1].supports_tools, Some(true));
+        assert_eq!(models[2].id, "gamma-model");
+        assert_eq!(models[2].display_name, "gamma-model");
+        assert_eq!(
+            models[3].id,
+            format!("reflected-{}-model", super::CREDENTIAL_REDACTION_MARKER)
+        );
+        assert_eq!(models[4].id, "zeta-model");
+        assert_eq!(models[4].context_window, Some(8192));
+        assert_eq!(models[4].supports_tools, Some(true));
+        assert_eq!(models.len(), 5, "duplicate and empty IDs must be removed");
+        assert!(!format!("{models:?}").contains(TEST_CREDENTIAL));
+
+        let request = request_receiver.recv().unwrap();
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request.starts_with("GET /gateway/v1/models HTTP/1.1"));
+        assert!(request_lower.contains("accept: application/json"));
+        assert!(request_lower.contains("x-api-key: sk-sensitive-token"));
+        assert!(request_lower.contains("x-static-revision: catalog-v1"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn model_fields_redact_whitespace_credentials_before_normalizing_text() {
+        let credential = SessionCredential::new(" secret ");
+        let body = serde_json::json!({
+            "data": [
+                { "id": " secret ", "display_name": "reflected  secret " },
+                { "id": "safe-model", "display_name": "Safe \u{202e}spoof" },
+                { "id": "bad\nid", "display_name": "ignored" }
+            ]
+        })
+        .to_string();
+
+        let models = super::parse_model_catalog(
+            ProviderModelCatalogKind::OpenAi,
+            body.as_bytes(),
+            Some(&credential),
+        )
+        .unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().any(|model| {
+            model.id == super::CREDENTIAL_REDACTION_MARKER
+                && model.display_name == format!("reflected {}", super::CREDENTIAL_REDACTION_MARKER)
+        }));
+        assert!(
+            models
+                .iter()
+                .any(|model| { model.id == "safe-model" && model.display_name == "safe-model" })
+        );
+        let rendered = format!("{models:?}");
+        assert!(!rendered.contains(credential.expose_secret()));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.contains("bad\nid"));
+    }
+
+    #[tokio::test]
+    async fn ollama_and_google_model_catalogs_use_their_native_paths_and_shapes() {
+        let ollama_body = serde_json::json!({
+            "models": [
+                { "model": "qwen3:8b" },
+                { "name": "gemma3:4b", "context_window": 32768 }
+            ]
+        })
+        .to_string();
+        let (ollama_base, ollama_request, ollama_server) = spawn_single_response(
+            "200 OK",
+            vec![("Content-Type".into(), "application/json".into())],
+            ollama_body,
+        );
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let ollama_models = gateway
+            .list_models(
+                model_query(
+                    format!("{ollama_base}/tenant/api/chat"),
+                    ProviderModelCatalogKind::Ollama,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ollama_models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gemma3:4b", "qwen3:8b"]
+        );
+        assert_eq!(ollama_models[0].context_window, Some(32768));
+        assert!(
+            ollama_request
+                .recv()
+                .unwrap()
+                .starts_with("GET /tenant/api/tags HTTP/1.1")
+        );
+        ollama_server.join().unwrap();
+
+        let google_body = serde_json::json!({
+            "models": [{
+                "name": "models/gemini-2.5-pro",
+                "displayName": "Gemini 2.5 Pro",
+                "inputTokenLimit": 1_048_576,
+                "supportsTools": true
+            }]
+        })
+        .to_string();
+        let (google_base, google_request, google_server) = spawn_single_response(
+            "200 OK",
+            vec![("Content-Type".into(), "application/json".into())],
+            google_body,
+        );
+        let google_models = gateway
+            .list_models(
+                model_query(
+                    google_base,
+                    ProviderModelCatalogKind::Google,
+                    CredentialPlacement::Header("x-goog-api-key".into()),
+                ),
+                Some(SessionCredential::new(TEST_CREDENTIAL)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(google_models[0].id, "models/gemini-2.5-pro");
+        assert_eq!(google_models[0].display_name, "Gemini 2.5 Pro");
+        assert_eq!(google_models[0].context_window, Some(1_048_576));
+        assert_eq!(google_models[0].supports_tools, Some(true));
+        let request = google_request.recv().unwrap();
+        assert!(request.starts_with("GET /v1beta/models HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-goog-api-key: sk-sensitive-token")
+        );
+        google_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_catalog_accepts_empty_lists_and_rejects_malformed_documents() {
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let (empty_base, _, empty_server) = spawn_single_response(
+            "200 OK",
+            vec![("Content-Type".into(), "application/json".into())],
+            r#"{"data":[]}"#.to_owned(),
+        );
+        assert!(
+            gateway
+                .list_models(
+                    model_query(
+                        empty_base,
+                        ProviderModelCatalogKind::OpenAi,
+                        CredentialPlacement::None,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        empty_server.join().unwrap();
+
+        for malformed in [r#"{"models":[]}"#, r#"{"data":{}}"#, "{not-json"] {
+            let (base_url, _, server) = spawn_single_response(
+                "200 OK",
+                vec![("Content-Type".into(), "application/json".into())],
+                malformed.to_owned(),
+            );
+            let error = gateway
+                .list_models(
+                    model_query(
+                        base_url,
+                        ProviderModelCatalogKind::OpenAi,
+                        CredentialPlacement::None,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::ports::provider::ProviderError::InvalidResponse(_)
+            ));
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn model_catalog_preserves_http_retryability_without_echoing_credentials() {
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let (unauthorized_base, _, unauthorized_server) = spawn_single_response(
+            "401 Unauthorized",
+            vec![("Content-Type".into(), "application/json".into())],
+            format!(
+                "{{\"error\":{{\"code\":\"bad-{TEST_CREDENTIAL}\",\"message\":\"reflected {TEST_CREDENTIAL}\"}}}}"
+            ),
+        );
+        let unauthorized = gateway
+            .list_models(
+                model_query(
+                    unauthorized_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::BearerHeader,
+                ),
+                Some(SessionCredential::new(TEST_CREDENTIAL)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unauthorized.status(), Some(401));
+        assert!(!unauthorized.retryable());
+        assert!(!format!("{unauthorized:?}").contains(TEST_CREDENTIAL));
+        unauthorized_server.join().unwrap();
+
+        let (rate_limit_base, _, rate_limit_server) = spawn_single_response(
+            "429 Too Many Requests",
+            vec![("Content-Type".into(), "text/html".into())],
+            format!("<p>slow down {TEST_CREDENTIAL}</p>"),
+        );
+        let rate_limited = gateway
+            .list_models(
+                model_query(
+                    rate_limit_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::BearerHeader,
+                ),
+                Some(SessionCredential::new(TEST_CREDENTIAL)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(rate_limited.status(), Some(429));
+        assert!(rate_limited.retryable());
+        assert!(!format!("{rate_limited:?}").contains(TEST_CREDENTIAL));
+        rate_limit_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_catalog_http_errors_redact_before_json_field_trimming() {
+        let credential = " key ";
+        let body = format!(
+            "{{\"error\":{{\"code\":\"{credential}\",\"message\":\"before{credential}after\"}}}}"
+        );
+        let (base_url, _, server) = spawn_single_response(
+            "401 Unauthorized",
+            vec![("Content-Type".into(), "application/json".into())],
+            body,
+        );
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+
+        let error = gateway
+            .list_models(
+                model_query(
+                    base_url,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::None,
+                ),
+                Some(SessionCredential::new(credential)),
+            )
+            .await
+            .unwrap_err();
+
+        let rendered = format!("{error:?}");
+        assert_eq!(error.status(), Some(401));
+        assert!(!rendered.contains(credential));
+        assert!(!rendered.contains(credential.trim()));
+        assert!(rendered.contains("[REDACTED]"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_catalog_handles_fragmented_json_and_rejects_oversized_or_excessive_lists() {
+        let body = br#"{"data":[{"id":"fragmented-model","display_name":"Fragmented"}]}"#;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let chunks = vec![
+            (Duration::ZERO, header.into_bytes()),
+            (Duration::from_millis(2), body[..9].to_vec()),
+            (Duration::from_millis(2), body[9..31].to_vec()),
+            (Duration::from_millis(2), body[31..].to_vec()),
+        ];
+        let (fragmented_base, _, fragmented_server) = spawn_raw_response(chunks);
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let fragmented = gateway
+            .list_models(
+                model_query(
+                    fragmented_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fragmented[0].id, "fragmented-model");
+        fragmented_server.join().unwrap();
+
+        let oversized_header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            super::MAX_MODEL_CATALOG_BODY_BYTES + 1
+        );
+        let (oversized_base, _, oversized_server) =
+            spawn_raw_response(vec![(Duration::ZERO, oversized_header.into_bytes())]);
+        let oversized = gateway
+            .list_models(
+                model_query(
+                    oversized_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            oversized,
+            crate::ports::provider::ProviderError::InvalidResponse(_)
+        ));
+        oversized_server.join().unwrap();
+
+        let entries = (0..=super::MAX_DISCOVERED_MODELS)
+            .map(|index| serde_json::json!({ "id": format!("model-{index}") }))
+            .collect::<Vec<_>>();
+        let (excessive_base, _, excessive_server) = spawn_single_response(
+            "200 OK",
+            vec![("Content-Type".into(), "application/json".into())],
+            serde_json::json!({ "data": entries }).to_string(),
+        );
+        let excessive = gateway
+            .list_models(
+                model_query(
+                    excessive_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            excessive,
+            crate::ports::provider::ProviderError::InvalidResponse(_)
+        ));
+        excessive_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_catalog_reports_disconnects_and_total_timeouts() {
+        let partial = b"{\"data\":[";
+        let partial_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
+            String::from_utf8_lossy(partial)
+        );
+        let (disconnect_base, _, disconnect_server) =
+            spawn_raw_response(vec![(Duration::ZERO, partial_response.into_bytes())]);
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let disconnected = gateway
+            .list_models(
+                model_query(
+                    disconnect_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            disconnected,
+            crate::ports::provider::ProviderError::Transport(_)
+        ));
+        assert!(disconnected.retryable());
+        disconnect_server.join().unwrap();
+
+        let delayed_response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}".to_vec();
+        let (timeout_base, timeout_request, timeout_server) =
+            spawn_raw_response(vec![(Duration::from_millis(150), delayed_response)]);
+        let timeout_gateway = ReqwestProviderGateway::with_defaults()
+            .unwrap()
+            .with_model_catalog_timeout(Duration::from_millis(25));
+        let timeout_error = timeout_gateway
+            .list_models(
+                model_query(
+                    timeout_base,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            timeout_error,
+            crate::ports::provider::ProviderError::Transport(_)
+        ));
+        assert!(timeout_error.retryable());
+        timeout_request.recv().unwrap();
+        timeout_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_catalog_does_not_follow_redirects_or_forward_credentials() {
+        let redirect_target = spawn_redirect_target();
+        let (base_url, request_receiver, server) = spawn_single_response(
+            "307 Temporary Redirect",
+            vec![("Location".into(), redirect_target.url.clone())],
+            String::new(),
+        );
+        let gateway = ReqwestProviderGateway::with_defaults().unwrap();
+        let error = gateway
+            .list_models(
+                model_query(
+                    base_url,
+                    ProviderModelCatalogKind::OpenAi,
+                    CredentialPlacement::BearerHeader,
+                ),
+                Some(SessionCredential::new(TEST_CREDENTIAL)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), Some(307));
+        redirect_target.stop_sender.send(()).unwrap();
+        redirect_target.handle.join().unwrap();
+        assert!(matches!(
+            redirect_target.request_receiver.try_recv(),
+            Err(std_mpsc::TryRecvError::Empty | std_mpsc::TryRecvError::Disconnected)
+        ));
+        assert!(request_receiver.recv().unwrap().contains(TEST_CREDENTIAL));
+        server.join().unwrap();
     }
 }

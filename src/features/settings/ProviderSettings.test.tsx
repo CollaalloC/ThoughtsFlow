@@ -1,8 +1,34 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopBridge } from "../../platform/desktop-bridge";
-import type { ProviderTemplate } from "../../shared/contracts";
+import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
+import type { ProviderModelInfo, ProviderTemplate } from "../../shared/contracts";
 import { ProviderSettings } from "./ProviderSettings";
+
+const openAiTemplate: ProviderTemplate = {
+  providerId: "openai-compatible",
+  revision: 1,
+  displayName: "Generic OpenAI-compatible",
+  defaultBaseUrl: "http://127.0.0.1:8000/v1",
+  protocol: {
+    streamProtocol: "openai_sse",
+    authPlacement: "bearer_header",
+    authHeaderName: "Authorization",
+    modelsEndpoint: "/models",
+    requiresAdditionalHeaders: false,
+    additionalHeaders: {},
+  },
+  runtimeAvailable: true,
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
 
 function createProviderSettingsBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   return {
@@ -23,6 +49,7 @@ function createProviderSettingsBridge(overrides: Partial<DesktopBridge> = {}): D
     exportDecisionPacket: vi.fn(),
     listProviderTemplates: vi.fn().mockResolvedValue([]),
     listProviderProfiles: vi.fn().mockResolvedValue([]),
+    listProviderModels: vi.fn().mockResolvedValue([]),
     saveProviderProfile: vi.fn(),
     setSessionCredential: vi.fn(),
     testProviderConnection: vi.fn(),
@@ -81,6 +108,14 @@ describe("ProviderSettings", () => {
         },
       ] satisfies ProviderTemplate[]),
       listProviderProfiles: vi.fn().mockResolvedValue([]),
+      listProviderModels: vi.fn().mockResolvedValue([
+        {
+          id: "gpt-4.1",
+          displayName: "gpt-4.1",
+          contextWindow: null,
+          supportsTools: null,
+        },
+      ] satisfies ProviderModelInfo[]),
       saveProviderProfile: vi.fn().mockImplementation(async (input) => ({
         ...input,
         id: "provider-openai",
@@ -103,7 +138,9 @@ describe("ProviderSettings", () => {
     expect(screen.getByText(/openai_sse/)).toBeVisible();
     expect(screen.getByText("Authorization: Bearer …")).toBeVisible();
 
-    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "will-be-cleared" } });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    await screen.findByText(/已发现 1 个模型/);
+    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "gpt-4.1" } });
     fireEvent.change(screen.getByLabelText("API Key（仅本次会话）"), {
       target: { value: "also-cleared" },
     });
@@ -119,6 +156,8 @@ describe("ProviderSettings", () => {
     fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://gateway.example.com/openai/v1" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    await screen.findByText(/已发现 1 个模型/);
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "gpt-4.1" } });
     fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
 
@@ -155,6 +194,14 @@ describe("ProviderSettings", () => {
         },
       ] satisfies ProviderTemplate[]),
       listProviderProfiles: vi.fn().mockResolvedValue([]),
+      listProviderModels: vi.fn().mockResolvedValue([
+        {
+          id: "gpt-4.1",
+          displayName: "gpt-4.1",
+          contextWindow: null,
+          supportsTools: null,
+        },
+      ] satisfies ProviderModelInfo[]),
       saveProviderProfile: vi.fn().mockImplementation(async (input) => ({
         ...input,
         id: "provider-1",
@@ -176,11 +223,13 @@ describe("ProviderSettings", () => {
     fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://llm.example.com/v1" },
     });
-    fireEvent.change(screen.getByLabelText("模型"), {
-      target: { value: "gpt-4.1" },
-    });
     fireEvent.change(screen.getByLabelText("API Key（仅本次会话）"), {
       target: { value: "secret-value" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    await screen.findByText(/已发现 1 个模型/);
+    fireEvent.change(screen.getByLabelText("模型"), {
+      target: { value: "gpt-4.1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
 
@@ -208,6 +257,7 @@ describe("ProviderSettings", () => {
           protocol: {
             streamProtocol: "ollama_ndjson",
             authPlacement: "none",
+            modelsEndpoint: "/api/tags",
             requiresAdditionalHeaders: false,
             additionalHeaders: {},
           },
@@ -215,6 +265,14 @@ describe("ProviderSettings", () => {
         },
       ] satisfies ProviderTemplate[]),
       listProviderProfiles: vi.fn().mockResolvedValue([]),
+      listProviderModels: vi.fn().mockResolvedValue([
+        {
+          id: "qwen3",
+          displayName: "qwen3",
+          contextWindow: null,
+          supportsTools: null,
+        },
+      ] satisfies ProviderModelInfo[]),
       saveProviderProfile: vi.fn().mockImplementation(async (input) => ({
         ...input,
         id: "provider-remote-no-auth",
@@ -239,7 +297,15 @@ describe("ProviderSettings", () => {
     fireEvent.change(screen.getByLabelText("名称"), {
       target: { value: "Remote no-auth endpoint" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    await screen.findByText(/已发现 1 个模型/);
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "qwen3" } });
+    expect(bridge.listProviderModels).toHaveBeenCalledWith({
+      draft: {
+        providerId: "synthetic-no-auth-local",
+        baseUrl: "https://ollama.example.com",
+      },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
     await waitFor(() => expect(bridge.saveProviderProfile).toHaveBeenCalled());
     expect(bridge.setSessionCredential).not.toHaveBeenCalled();
@@ -339,5 +405,280 @@ describe("ProviderSettings", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("远程端点必须使用 HTTPS");
     expect(bridge.saveProviderProfile).not.toHaveBeenCalled();
+  });
+
+  it("discovers models from a new draft without saving or rendering Provider names as HTML", async () => {
+    const models: ProviderModelInfo[] = [
+      {
+        id: "safe-model",
+        displayName: "Safe model",
+        contextWindow: 128_000,
+        supportsTools: true,
+      },
+      {
+        id: "evil-model",
+        displayName: '<img src="x" onerror="alert(1)">',
+        contextWindow: null,
+        supportsTools: null,
+      },
+    ];
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([openAiTemplate]),
+      listProviderModels: vi.fn().mockResolvedValue(models),
+    });
+
+    render(<ProviderSettings bridge={bridge} />);
+    await screen.findByRole("option", { name: openAiTemplate.displayName });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://llm.example.com/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key（仅本次会话）"), {
+      target: { value: "session-only-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+
+    await waitFor(() =>
+      expect(bridge.listProviderModels).toHaveBeenCalledWith({
+        draft: {
+          providerId: "openai-compatible",
+          baseUrl: "https://llm.example.com/v1",
+          sessionCredential: "session-only-secret",
+        },
+      }),
+    );
+    await screen.findByText(/已发现 2 个模型/);
+    const maliciousSuggestion = document.querySelector<HTMLDataListElement>(
+      '#provider-model-options option[value="evil-model"]',
+    );
+    expect(maliciousSuggestion).not.toBeNull();
+    expect(maliciousSuggestion).toHaveTextContent(
+      '<img src="x" onerror="alert(1)"> (evil-model)',
+    );
+    expect(document.querySelector('img[src="x"]')).toBeNull();
+    expect(screen.getByText(/只读取模型目录元数据，不发送工作区 Context/)).toBeVisible();
+    expect(screen.getByText(/远程目录仅向 llm\.example\.com.*发起 GET/)).toBeVisible();
+    expect(screen.getByText(/内置审核列表不会联网/)).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "safe-model" } });
+    expect(screen.getByLabelText("模型")).toHaveValue("safe-model");
+    expect(screen.getByText(/目录元数据：Safe model/)).toHaveTextContent(
+      "Context 128,000 · Tools 支持",
+    );
+    expect(bridge.saveProviderProfile).not.toHaveBeenCalled();
+    expect(screen.queryByText("session-only-secret")).not.toBeInTheDocument();
+  });
+
+  it("explains that an audited static model catalog does not issue a remote GET", async () => {
+    const anthropicTemplate: ProviderTemplate = {
+      providerId: "anthropic",
+      revision: 1,
+      displayName: "Anthropic",
+      defaultBaseUrl: "https://api.anthropic.com",
+      protocol: {
+        streamProtocol: "anthropic_sse",
+        authPlacement: "api_key_header",
+        authHeaderName: "x-api-key",
+        modelsEndpoint: "/v1/models",
+        requiresAdditionalHeaders: true,
+        additionalHeaders: { "anthropic-version": "2023-06-01" },
+      },
+      runtimeAvailable: false,
+    };
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([anthropicTemplate]),
+      listProviderModels: vi.fn().mockResolvedValue([
+        {
+          id: "claude-static",
+          displayName: "Claude static catalog entry",
+          contextWindow: null,
+          supportsTools: true,
+        },
+      ] satisfies ProviderModelInfo[]),
+    });
+
+    render(<ProviderSettings bridge={bridge} />);
+    fireEvent.change(await screen.findByLabelText("Provider 模板"), {
+      target: { value: "anthropic" },
+    });
+
+    expect(screen.getByText(/只读取模型目录元数据，不发送工作区 Context/)).toBeVisible();
+    expect(screen.getByText(/远程目录仅向 api\.anthropic\.com.*发起 GET/)).toBeVisible();
+    expect(screen.getByText(/内置审核列表不会联网/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    expect(await screen.findByText(/已发现 1 个模型/)).toBeVisible();
+  });
+
+  it("uses a saved profile for discovery, preserves an unlisted current model, and saves only explicitly", async () => {
+    const profile = {
+      id: "provider-saved",
+      providerId: "openai-compatible",
+      name: "Saved gateway",
+      dialect: "openai-compatible" as const,
+      baseUrl: "https://llm.example.com/v1",
+      model: "legacy-model",
+      isDefault: true,
+      parameters: {},
+    };
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([openAiTemplate]),
+      listProviderProfiles: vi.fn().mockResolvedValue([profile]),
+      listProviderModels: vi.fn().mockResolvedValue([
+        {
+          id: "new-model",
+          displayName: "New model",
+          contextWindow: null,
+          supportsTools: null,
+        },
+      ] satisfies ProviderModelInfo[]),
+      saveProviderProfile: vi.fn().mockImplementation(async (input) => ({
+        ...profile,
+        ...input,
+      })),
+    });
+
+    render(<ProviderSettings bridge={bridge} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Saved gateway/ }));
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+
+    await waitFor(() =>
+      expect(bridge.listProviderModels).toHaveBeenCalledWith({
+        providerProfileId: "provider-saved",
+      }),
+    );
+    await screen.findByText(/已发现 1 个模型/);
+    expect(screen.getByLabelText("模型")).toHaveValue("legacy-model");
+
+    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "new-model" } });
+    expect(bridge.saveProviderProfile).not.toHaveBeenCalled();
+    expect(screen.getByText(/选择后仍需保存 Provider 才会生效/)).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "Renamed gateway" } });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    await waitFor(() => expect(bridge.listProviderModels).toHaveBeenCalledTimes(2));
+    expect(bridge.listProviderModels).toHaveBeenLastCalledWith({
+      providerProfileId: "provider-saved",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+    await waitFor(() =>
+      expect(bridge.saveProviderProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ model: "new-model" }),
+      ),
+    );
+  });
+
+  it("shows discovery loading, retryable errors, retry, and a valid empty catalog", async () => {
+    const firstRequest = deferred<ProviderModelInfo[]>();
+    const listProviderModels = vi
+      .fn()
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockResolvedValueOnce([]);
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([openAiTemplate]),
+      listProviderModels,
+      saveProviderProfile: vi.fn().mockImplementation(async (input) => ({
+        ...input,
+        id: "provider-manual",
+        dialect: "openai-compatible" as const,
+      })),
+    });
+
+    render(<ProviderSettings bridge={bridge} />);
+    await screen.findByRole("option", { name: openAiTemplate.displayName });
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    expect(screen.getByRole("button", { name: "发现中" })).toBeDisabled();
+
+    firstRequest.reject(
+      new DesktopBridgeError({
+        code: "provider_timeout",
+        message: "模型目录请求超时",
+        retryable: true,
+      }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("模型目录请求超时");
+    expect(screen.getByRole("alert")).toHaveTextContent("临时错误，可以重试");
+
+    fireEvent.click(screen.getByRole("button", { name: "重试发现模型" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("端点返回了空模型列表");
+    expect(listProviderModels).toHaveBeenCalledTimes(2);
+
+    fireEvent.change(screen.getByLabelText("名称"), {
+      target: { value: "Manual fallback gateway" },
+    });
+    fireEvent.change(screen.getByLabelText("模型"), {
+      target: { value: "manual-model-id" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+    await waitFor(() =>
+      expect(bridge.saveProviderProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ model: "manual-model-id" }),
+      ),
+    );
+  });
+
+  it("ignores a late discovery response after switching profiles", async () => {
+    const firstRequest = deferred<ProviderModelInfo[]>();
+    const profiles = [
+      {
+        id: "provider-a",
+        providerId: "openai-compatible",
+        name: "Gateway A",
+        dialect: "openai-compatible" as const,
+        baseUrl: "https://a.example.com/v1",
+        model: "a-current",
+        isDefault: true,
+        parameters: {},
+      },
+      {
+        id: "provider-b",
+        providerId: "openai-compatible",
+        name: "Gateway B",
+        dialect: "openai-compatible" as const,
+        baseUrl: "https://b.example.com/v1",
+        model: "b-current",
+        isDefault: false,
+        parameters: {},
+      },
+    ];
+    const listProviderModels = vi
+      .fn()
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockResolvedValueOnce([
+        {
+          id: "b-discovered",
+          displayName: "B discovered",
+          contextWindow: null,
+          supportsTools: null,
+        },
+      ] satisfies ProviderModelInfo[]);
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([openAiTemplate]),
+      listProviderProfiles: vi.fn().mockResolvedValue(profiles),
+      listProviderModels,
+    });
+
+    render(<ProviderSettings bridge={bridge} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Gateway A/ }));
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    fireEvent.click(screen.getByRole("button", { name: /Gateway B/ }));
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+
+    await screen.findByText(/已发现 1 个模型/);
+    expect(
+      document.querySelector('#provider-model-options option[value="b-discovered"]'),
+    ).not.toBeNull();
+    firstRequest.resolve([
+      {
+        id: "a-discovered",
+        displayName: "A discovered",
+        contextWindow: null,
+        supportsTools: null,
+      },
+    ]);
+    await waitFor(() => expect(listProviderModels).toHaveBeenCalledTimes(2));
+    expect(
+      document.querySelector('#provider-model-options option[value="a-discovered"]'),
+    ).toBeNull();
+    expect(screen.getByLabelText("模型")).toHaveValue("b-current");
   });
 });

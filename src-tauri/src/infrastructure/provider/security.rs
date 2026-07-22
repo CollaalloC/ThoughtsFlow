@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use url::{Host, Url};
 
-use crate::ports::provider::{ProviderDialect, ProviderError};
+use crate::ports::provider::{ProviderDialect, ProviderError, ProviderModelCatalogKind};
 
 pub fn validate_base_url(base_url: &str) -> Result<Url, ProviderError> {
     let url =
@@ -60,6 +60,44 @@ pub fn provider_request_url(
     Ok(url)
 }
 
+/// Builds the metadata-only model catalog endpoint without discarding a
+/// self-hosted API prefix. Known chat endpoints are replaced rather than
+/// blindly appended, so both an API prefix and a frozen chat endpoint are safe
+/// inputs.
+pub fn provider_models_url(
+    base_url: &str,
+    catalog: ProviderModelCatalogKind,
+) -> Result<Url, ProviderError> {
+    let mut url = validate_base_url(base_url)?;
+    let base_path = url.path().trim_end_matches('/');
+    let path = match catalog {
+        ProviderModelCatalogKind::OpenAi if base_path.ends_with("/models") => base_path.to_owned(),
+        ProviderModelCatalogKind::OpenAi if base_path.ends_with("/chat/completions") => {
+            let prefix = base_path.trim_end_matches("/chat/completions");
+            format!("{prefix}/models")
+        }
+        ProviderModelCatalogKind::OpenAi => format!("{base_path}/models"),
+        ProviderModelCatalogKind::Ollama if base_path.ends_with("/api/tags") => {
+            base_path.to_owned()
+        }
+        ProviderModelCatalogKind::Ollama if base_path.ends_with("/api/chat") => {
+            let prefix = base_path.trim_end_matches("/api/chat");
+            format!("{prefix}/api/tags")
+        }
+        ProviderModelCatalogKind::Ollama if base_path.ends_with("/api") => {
+            format!("{base_path}/tags")
+        }
+        ProviderModelCatalogKind::Ollama => format!("{base_path}/api/tags"),
+        ProviderModelCatalogKind::Google if base_path.ends_with("/models") => base_path.to_owned(),
+        ProviderModelCatalogKind::Google if base_path.ends_with("/v1beta") => {
+            format!("{base_path}/models")
+        }
+        ProviderModelCatalogKind::Google => format!("{base_path}/v1beta/models"),
+    };
+    url.set_path(&path);
+    Ok(url)
+}
+
 fn is_loopback_host(host: Host<&str>) -> bool {
     match host {
         Host::Domain(host) => host.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
@@ -70,9 +108,9 @@ fn is_loopback_host(host: Host<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::ports::provider::{ProviderDialect, ProviderError};
+    use crate::ports::provider::{ProviderDialect, ProviderError, ProviderModelCatalogKind};
 
-    use super::{provider_request_url, validate_base_url};
+    use super::{provider_models_url, provider_request_url, validate_base_url};
 
     #[test]
     fn endpoint_policy_accepts_https_and_exact_loopback_http_hosts() {
@@ -132,5 +170,63 @@ mod tests {
                 .as_str(),
             "http://localhost:11434/api/chat"
         );
+    }
+
+    #[test]
+    fn model_catalog_paths_preserve_prefixes_and_replace_chat_endpoints() {
+        let cases = [
+            (
+                "https://models.example.com/gateway/v1",
+                ProviderModelCatalogKind::OpenAi,
+                "https://models.example.com/gateway/v1/models",
+            ),
+            (
+                "https://models.example.com/gateway/v1/chat/completions",
+                ProviderModelCatalogKind::OpenAi,
+                "https://models.example.com/gateway/v1/models",
+            ),
+            (
+                "https://models.example.com/gateway/v1/models/",
+                ProviderModelCatalogKind::OpenAi,
+                "https://models.example.com/gateway/v1/models",
+            ),
+            (
+                "http://localhost:11434",
+                ProviderModelCatalogKind::Ollama,
+                "http://localhost:11434/api/tags",
+            ),
+            (
+                "http://localhost:11434/prefix/api/chat",
+                ProviderModelCatalogKind::Ollama,
+                "http://localhost:11434/prefix/api/tags",
+            ),
+            (
+                "http://localhost:11434/prefix/api",
+                ProviderModelCatalogKind::Ollama,
+                "http://localhost:11434/prefix/api/tags",
+            ),
+            (
+                "https://generativelanguage.googleapis.com",
+                ProviderModelCatalogKind::Google,
+                "https://generativelanguage.googleapis.com/v1beta/models",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta",
+                ProviderModelCatalogKind::Google,
+                "https://generativelanguage.googleapis.com/v1beta/models",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta/models/",
+                ProviderModelCatalogKind::Google,
+                "https://generativelanguage.googleapis.com/v1beta/models",
+            ),
+        ];
+
+        for (base_url, catalog, expected) in cases {
+            assert_eq!(
+                provider_models_url(base_url, catalog).unwrap().as_str(),
+                expected
+            );
+        }
     }
 }

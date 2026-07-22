@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::ports::provider::SessionCredential;
+
 use super::*;
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -97,6 +99,11 @@ pub trait ApplicationBackend: Send + Sync + 'static {
     ) -> AppFuture<'_, ExportResult>;
     fn list_provider_profiles(&self) -> AppFuture<'_, Vec<ProviderProfileView>>;
     fn list_provider_templates(&self) -> AppFuture<'_, Vec<ProviderTemplateView>>;
+    fn list_provider_models(
+        &self,
+        input: ListProviderModelsInput,
+        credential: Option<SessionCredential>,
+    ) -> AppFuture<'_, Vec<ModelInfoView>>;
     fn save_provider_profile(
         &self,
         input: SaveProviderProfileInput,

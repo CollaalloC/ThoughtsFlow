@@ -281,6 +281,53 @@ pub trait ProviderConnectionTester: Send + Sync {
     ) -> ProviderConnectionFuture<'a>;
 }
 
+/// The response shape exposed by a Provider's model-list endpoint.
+///
+/// This is deliberately separate from the streaming dialect: a future
+/// Provider may use one request protocol for runs and another response shape
+/// for model discovery. Application code resolves this value from the Rust
+/// template catalog; it is never accepted from the WebView.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderModelCatalogKind {
+    OpenAi,
+    Ollama,
+    Google,
+}
+
+/// An authority-resolved model discovery request.
+///
+/// `ProviderTarget` freezes the validated endpoint, credential placement, and
+/// static headers selected by the Rust template catalog. Credentials remain a
+/// separate process-memory-only argument to `ProviderModelCatalog::list_models`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModelQuery {
+    pub target: ProviderTarget,
+    pub catalog: ProviderModelCatalogKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredModel {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+}
+
+pub type ProviderModelsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<DiscoveredModel>, ProviderError>> + Send + 'a>>;
+
+/// Narrow read port for Provider metadata. Discovery never sends workspace
+/// Context and never persists the raw Provider response.
+pub trait ProviderModelCatalog: Send + Sync {
+    fn list_models<'a>(
+        &'a self,
+        query: ProviderModelQuery,
+        credential: Option<SessionCredential>,
+    ) -> ProviderModelsFuture<'a>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionCredential;

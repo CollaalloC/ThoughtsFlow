@@ -470,6 +470,35 @@ pub struct ProviderConnectionResult {
     pub message: String,
 }
 
+/// Credential-free application request for Provider model discovery.
+///
+/// The Tauri command owns the stricter public union and passes any draft
+/// credential separately so secrets cannot enter this serializable DTO.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListProviderModelsInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_profile_id: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<ProviderModelDraftInput>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderModelDraftInput {
+    pub provider_id: EntityId,
+    pub base_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfoView {
+    pub id: String,
+    pub display_name: String,
+    pub context_window: Option<u64>,
+    pub supports_tools: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum RunEventView {
@@ -549,7 +578,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ExportDecisionPacketInput, ProtocolProfileView, ProviderAuthPlacementView,
+        ExportDecisionPacketInput, ModelInfoView, ProtocolProfileView, ProviderAuthPlacementView,
         ProviderStreamProtocolView, ProviderTemplateView, RunSnapshotView, WorkspaceSummary,
     };
 
@@ -636,5 +665,21 @@ mod tests {
         assert!(value.get("authPlacement").is_none());
         assert!(value.get("authHeaderName").is_none());
         assert_eq!(value["parameters"]["temperature"], 0.7);
+    }
+
+    #[test]
+    fn model_info_contract_uses_camel_case_and_explicit_unknown_capabilities() {
+        let value = serde_json::to_value(ModelInfoView {
+            id: "fixture-model".into(),
+            display_name: "Fixture Model".into(),
+            context_window: None,
+            supports_tools: None,
+        })
+        .expect("model metadata serializes");
+
+        assert_eq!(value["id"], "fixture-model");
+        assert_eq!(value["displayName"], "Fixture Model");
+        assert!(value["contextWindow"].is_null());
+        assert!(value["supportsTools"].is_null());
     }
 }

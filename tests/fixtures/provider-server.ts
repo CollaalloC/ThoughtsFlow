@@ -15,6 +15,67 @@ function lastPrompt(body: Record<string, unknown>): string {
   return typeof content === "string" ? content : "";
 }
 
+function writeJson(response: ServerResponse, body: Record<string, unknown>) {
+  response.writeHead(200, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(JSON.stringify(body));
+}
+
+function writeModelCatalog(pathname: string, response: ServerResponse): boolean {
+  if (pathname === "/v1/models") {
+    writeJson(response, {
+      object: "list",
+      data: [
+        {
+          id: "fixture-model",
+          object: "model",
+          created: 1_704_067_200,
+          owned_by: "thoughsflow-fixture",
+        },
+      ],
+    });
+    return true;
+  }
+
+  if (pathname === "/api/tags") {
+    writeJson(response, {
+      models: [
+        {
+          name: "fixture-model",
+          model: "fixture-model",
+          modified_at: "2024-01-01T00:00:00Z",
+          size: 1_024,
+          digest: "sha256:fixture-model",
+          details: {
+            format: "gguf",
+            family: "fixture",
+            parameter_size: "1B",
+            quantization_level: "Q4_0",
+          },
+        },
+      ],
+    });
+    return true;
+  }
+
+  if (pathname === "/v1beta/models") {
+    writeJson(response, {
+      models: [
+        {
+          name: "models/fixture-model",
+          displayName: "fixture-model",
+          supportedGenerationMethods: ["generateContent", "streamGenerateContent"],
+        },
+      ],
+    });
+    return true;
+  }
+
+  return false;
+}
+
 function writeOpenAiStream(
   response: ServerResponse,
   answer: string,
@@ -96,20 +157,34 @@ export class ProviderFixture {
     if (this.server) return;
     this.server = createServer(async (request, response) => {
       try {
+        const pathname = new URL(request.url ?? "/", "http://provider.fixture").pathname;
+        if (request.method === "GET") {
+          if (writeModelCatalog(pathname, response)) return;
+          response.writeHead(404).end();
+          return;
+        }
+
+        if (
+          request.method !== "POST" ||
+          (pathname !== "/v1/chat/completions" && pathname !== "/api/chat")
+        ) {
+          response.writeHead(404).end();
+          return;
+        }
+
         const body = await readJson(request);
         const prompt = lastPrompt(body);
         const count = (this.promptCounts.get(prompt) ?? 0) + 1;
         this.promptCounts.set(prompt, count);
         const answer = `Fixture 回答 #${count}：${prompt}`;
-        if (request.url === "/v1/chat/completions") {
+        if (pathname === "/v1/chat/completions") {
           writeOpenAiStream(response, answer, prompt, (callback, delay) => this.schedule(callback, delay));
           return;
         }
-        if (request.url === "/api/chat") {
+        if (pathname === "/api/chat") {
           writeOllamaStream(response, answer, prompt, (callback, delay) => this.schedule(callback, delay));
           return;
         }
-        response.writeHead(404).end();
       } catch (error) {
         response.writeHead(400, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: error instanceof Error ? error.message : "bad request" }));

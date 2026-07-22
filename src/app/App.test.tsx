@@ -145,6 +145,7 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     exportDecisionPacket: vi.fn(),
     listProviderTemplates: vi.fn().mockResolvedValue([]),
     listProviderProfiles: vi.fn().mockResolvedValue([provider]),
+    listProviderModels: vi.fn().mockResolvedValue([]),
     saveProviderProfile: vi.fn().mockResolvedValue(provider),
     setSessionCredential: vi.fn().mockResolvedValue(undefined),
     testProviderConnection: vi.fn().mockResolvedValue({ ok: true, message: "ok" }),

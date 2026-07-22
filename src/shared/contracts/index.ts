@@ -146,6 +146,27 @@ export interface ProviderTemplate {
   runtimeAvailable: boolean;
 }
 
+export interface ProviderModelInfo {
+  id: string;
+  displayName: string;
+  contextWindow: number | null;
+  supportsTools: boolean | null;
+}
+
+export type ListProviderModelsInput =
+  | {
+      providerProfileId: string;
+      draft?: never;
+    }
+  | {
+      providerProfileId?: never;
+      draft: {
+        providerId: string;
+        baseUrl: string;
+        sessionCredential?: string;
+      };
+    };
+
 export interface SaveProviderProfileInput {
   id?: string;
   providerId: string;

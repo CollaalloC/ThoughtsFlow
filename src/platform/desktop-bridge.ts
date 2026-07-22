@@ -8,6 +8,8 @@ import type {
   DecisionStatus,
   ExportResult,
   InspectContextInput,
+  ListProviderModelsInput,
+  ProviderModelInfo,
   ProviderProfile,
   ProviderTemplate,
   RetryRunInput,
@@ -71,6 +73,7 @@ export interface DesktopBridge {
   exportDecisionPacket(input: { workspaceId: string }): Promise<ExportResult>;
   listProviderTemplates(): Promise<ProviderTemplate[]>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
+  listProviderModels(input: ListProviderModelsInput): Promise<ProviderModelInfo[]>;
   saveProviderProfile(
     input: SaveProviderProfileInput,
     sessionCredential?: string,
@@ -186,6 +189,7 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
     exportDecisionPacket: (input) => request("export_decision_packet", { input }),
     listProviderTemplates: () => request("list_provider_templates"),
     listProviderProfiles: () => request("list_provider_profiles"),
+    listProviderModels: (input) => request("list_provider_models", { input }),
     saveProviderProfile: (input, sessionCredential) =>
       request("save_provider_profile", {
         input: {
@@ -205,6 +209,7 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
 export type {
   CompareRunsResult,
   ContextPreview,
+  ProviderModelInfo,
   ProviderProfile,
   ProviderTemplate,
   RouteProjection,
