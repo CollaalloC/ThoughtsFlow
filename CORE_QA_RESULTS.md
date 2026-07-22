@@ -6,12 +6,12 @@
 
 | 检查 | 结果 | 证据 |
 |---|---:|---|
-| React / TypeScript 组件与性能测试 | 通过 | `npm run test:run`：8 个测试文件、38 个测试通过 |
+| React / TypeScript 组件与性能测试 | 通过 | `npm run test:run`：10 个测试文件、68 个测试通过 |
 | Provider fixture 合约测试 | 通过 | `npm run test:fixtures`：8 个测试通过，覆盖四种 dialect 的目录、流、分片、错误、断流与取消 |
-| TypeScript 与 production build | 通过 | `npm run build`；Vite 生产包成功生成，主 chunk 392.27 kB |
+| TypeScript 与 production build | 通过 | `npm run build`；Vite 生产包成功生成，主 chunk 396.71 kB |
 | Rust 格式 | 通过 | `cargo fmt --all -- --check` |
 | Rust 静态检查 | 通过 | `cargo clippy --all-targets -- -D warnings` |
-| Rust 测试 | 通过 | `cargo test --all-targets`：147 个测试通过 |
+| Rust 测试 | 通过 | `cargo test --all-targets`：169 个测试通过 |
 | 1,000 Turn 路线图 | 通过 | 固定数据集在 jsdom 中打开并选择精确 `run-999`；单跑 2.13 秒 |
 | Playwright 旅程发现 | 通过 | Chromium / WebKit 各发现 8 条核心旅程，共 16 条 |
 | Playwright 原生旅程执行 | 未在当前环境执行 | `npm run test:e2e`：16 条明确跳过；需要 `THOUGHSFLOW_E2E_NATIVE=1` 与 `THOUGHSFLOW_E2E_BASE_URL`，重启旅程还需要 `THOUGHSFLOW_E2E_RESTART_URL` |
@@ -51,11 +51,17 @@
 - Anthropic/Google 的真实 Reqwest 请求路径、认证头、静态头、请求体和 HTTP 429 机器码归一化；三种 SSE 与 Ollama NDJSON 的未完成 frame 均有 1 MiB 硬上限。
 - SQLite STRICT schema、外键、事务回滚、不可变触发器和 terminal Run 保护。
 - 远程 HTTP、内嵌凭据和非 HTTP(S) scheme 拒绝；API Key 交接后仅保存在 Rust 进程内存，不进入 SQLite、Receipt、日志或导出。
+- 已保存 Provider Profile 的多个命名会话凭据支持添加、显式激活、备用顺序调整和删除；存在备用凭据时不能直接删除当前首选，必须先显式激活替代项。交接后 WebView 只接收标签、顺序与当前首选状态，不接收 Secret。
+- Provider 身份与 Base URL 不变时保存会保留会话凭据，成功变更目标后才清除；保存失败保留此前凭据。
+- 只有可重试且机器码精确为 `quota_exhausted` 或 `rate_limited` 的失败显示凭据恢复；普通 5xx、断流、网络错误和错误文案匹配不会触发切换，也没有静默自动轮换。
+- 凭据恢复由用户显式选择备用项后，以一次串行命令用该精确凭据创建新的 `ModelRun`；创建成功才将它设为当前首选，失败保持原首选不变。重试使用失败 Run 的精确 Provider Profile；旧失败/部分输出 Run 与其 Receipt 保持不可变。
 - Run Compare、Context Diff、决策标记与 Markdown Decision Packet 导出契约。
 
 ## 未声称的验证
 
 - 没有真实云 Provider 凭据，因此没有对 Anthropic、Google 或其他外部付费模型做现场请求；新协议由 Rust loopback 合约服务与 Node fixture 验证。
+- 没有用真实云配额耗尽场景验证切换后容量恢复；不同 API Key 可能共享 Project、Organization 或其他配额作用域，切换并不保证获得新额度。
+- 当前没有 OS Credential Store、OAuth 或远程 Secret broker；命名凭据仅覆盖本次 Rust 进程生命周期。
 - 当前 macOS 环境没有可驱动 Tauri WebView 且支持硬重启的 Playwright/WebDriver harness；8 条旅程已实现但默认诚实跳过。
 - 没有 Windows/Linux 实机运行证据；不声称三平台安装验证。
-- production JavaScript 主包为 392.27 kB；路线图、决策与设置工作面已按需加载。
+- production JavaScript 主包为 396.71 kB；路线图、决策与设置工作面已按需加载。
