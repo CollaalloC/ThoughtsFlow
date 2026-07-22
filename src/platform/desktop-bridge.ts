@@ -20,12 +20,17 @@ import type {
 
 export interface DesktopBridge {
   listWorkspaces(): Promise<WorkspaceSummary[]>;
-  createWorkspace(input: { name: string; goal: string }): Promise<WorkspaceSummary>;
+  createWorkspace(input: {
+    name: string;
+    goal: string;
+    systemPrompt?: string;
+  }): Promise<WorkspaceSummary>;
   openWorkspace(id: string): Promise<WorkspaceDetail>;
   updateWorkspace(input: {
     id: string;
     name?: string;
     goal?: string;
+    systemPrompt?: string;
     archived?: boolean;
   }): Promise<WorkspaceSummary>;
   inspectContext(input: InspectContextInput): Promise<ContextPreview>;
@@ -61,10 +66,7 @@ export interface DesktopBridge {
     status: DecisionStatus;
     reason: string;
   }): Promise<DecisionMark>;
-  exportDecisionPacket(input: {
-    workspaceId: string;
-    destination?: string;
-  }): Promise<ExportResult>;
+  exportDecisionPacket(input: { workspaceId: string }): Promise<ExportResult>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(
     input: Omit<ProviderProfile, "id"> & { id?: string },
@@ -81,15 +83,71 @@ export interface DesktopBridge {
 
 type Unlisten = () => void;
 
-export function createDesktopBridge(): DesktopBridge {
+export class DesktopBridgeError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly details: unknown;
+
+  constructor(input: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    details?: unknown;
+  }) {
+    super(input.message);
+    this.name = "DesktopBridgeError";
+    this.code = input.code;
+    this.retryable = input.retryable ?? false;
+    this.details = input.details ?? null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function normalizeDesktopBridgeError(reason: unknown): DesktopBridgeError {
+  if (reason instanceof DesktopBridgeError) return reason;
+  if (isRecord(reason) && typeof reason.code === "string" && typeof reason.message === "string") {
+    return new DesktopBridgeError({
+      code: reason.code,
+      message: reason.message,
+      retryable: typeof reason.retryable === "boolean" ? reason.retryable : false,
+      details: reason.details,
+    });
+  }
+  if (reason instanceof Error) {
+    return new DesktopBridgeError({
+      code: "desktop_bridge_error",
+      message: reason.message,
+      details: { name: reason.name },
+    });
+  }
+  return new DesktopBridgeError({
+    code: "desktop_bridge_error",
+    message: typeof reason === "string" ? reason : "Desktop command failed",
+    details: reason,
+  });
+}
+
+type InvokeCommand = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): DesktopBridge {
   const listeners = new Set<(event: RunEvent) => void>();
   const dispatch = (event: RunEvent) => listeners.forEach((listener) => listener(event));
   const request = async <T>(command: string, args?: Record<string, unknown>) => {
-    const response = await invoke<ApiEnvelope<T>>(command, args);
-    if (response.apiVersion !== 1) {
-      throw new Error(`Unsupported DesktopBridge API version: ${response.apiVersion}`);
+    try {
+      const response = await invokeCommand<ApiEnvelope<T>>(command, args);
+      if (response.apiVersion !== 1) {
+        throw new DesktopBridgeError({
+          code: "unsupported_api_version",
+          message: `Unsupported DesktopBridge API version: ${response.apiVersion}`,
+        });
+      }
+      return response.data;
+    } catch (reason) {
+      throw normalizeDesktopBridgeError(reason);
     }
-    return response.data;
   };
 
   const streamingInvoke = async <TInput extends object>(

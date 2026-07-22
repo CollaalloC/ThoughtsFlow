@@ -12,8 +12,9 @@ use crate::{
         provider_request_url,
     },
     ports::provider::{
-        CanonicalMessage, CanonicalRequest, MessageRole, ProviderDialect, ProviderError,
-        ProviderFuture, ProviderGateway, ProviderInvocation, RunEvent,
+        CanonicalMessage, CanonicalRequest, MessageRole, ProviderConnectionFuture,
+        ProviderConnectionStatus, ProviderConnectionTester, ProviderDialect, ProviderError,
+        ProviderFuture, ProviderGateway, ProviderInvocation, ProviderTarget, RunEvent,
     },
 };
 
@@ -170,6 +171,40 @@ impl ProviderGateway for ReqwestProviderGateway {
         events: mpsc::Sender<RunEvent>,
     ) -> ProviderFuture<'a> {
         Box::pin(self.run_stream(invocation, cancellation, events))
+    }
+}
+
+impl ProviderConnectionTester for ReqwestProviderGateway {
+    fn test<'a>(
+        &'a self,
+        target: ProviderTarget,
+        credential: Option<crate::ports::provider::SessionCredential>,
+    ) -> ProviderConnectionFuture<'a> {
+        Box::pin(async move {
+            let mut endpoint =
+                crate::infrastructure::provider::validate_base_url(&target.base_url)?;
+            let base_path = endpoint.path().trim_end_matches('/');
+            let path = match target.dialect {
+                ProviderDialect::OllamaChat if base_path.ends_with("/api") => {
+                    format!("{base_path}/tags")
+                }
+                ProviderDialect::OllamaChat => format!("{base_path}/api/tags"),
+                ProviderDialect::OpenAiChatCompletions => format!("{base_path}/models"),
+            };
+            endpoint.set_path(&path);
+            let mut request = self.client.get(endpoint);
+            if let Some(credential) = credential.as_ref().filter(|value| !value.is_empty()) {
+                request = request.bearer_auth(credential.expose_secret());
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|error| ProviderError::Transport(error.to_string()))?;
+            Ok(ProviderConnectionStatus {
+                ok: response.status().is_success(),
+                http_status: response.status().as_u16(),
+            })
+        })
     }
 }
 

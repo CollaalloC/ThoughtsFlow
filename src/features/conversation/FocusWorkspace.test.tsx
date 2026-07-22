@@ -1,12 +1,13 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopBridge } from "../../platform/desktop-bridge";
+import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import { FocusWorkspace } from "./FocusWorkspace";
 
 const workspace = {
   id: "workspace-1",
   name: "AI 分支对话产品定义",
   goal: "确定首版默认导航、上下文透明度与长期使用价值",
+  systemPrompt: "你是一名严谨的技术决策协作者。",
   archived: false,
   createdAt: "2026-07-22T09:00:00Z",
   updatedAt: "2026-07-22T10:00:00Z",
@@ -129,6 +130,28 @@ function bridgeFixture() {
 }
 
 describe("FocusWorkspace", () => {
+  it("creates an untitled-goal workspace without turning placeholder copy into model context", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.createWorkspace).mockResolvedValue({
+      ...workspace,
+      id: "workspace-new",
+      name: "新工作区",
+      goal: "",
+    });
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(screen.getByRole("button", { name: "添加工作区" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "工作区名称" }), {
+      target: { value: "新工作区" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认创建" }));
+
+    await waitFor(() =>
+      expect(bridge.createWorkspace).toHaveBeenCalledWith({ name: "新工作区", goal: "" }),
+    );
+  });
+
   it("buffers early stream events and surfaces an uncommitted persistence failure", async () => {
     const bridge = bridgeFixture();
     vi.mocked(bridge.createTurnAndStartRun).mockImplementation(async (_input, onEvent) => {
@@ -163,6 +186,67 @@ describe("FocusWorkspace", () => {
       target: { value: "可以继续编辑" },
     });
     expect(screen.getByRole("button", { name: "发送" })).not.toBeDisabled();
+  });
+
+  it("offers an explicit retry when sending fails with a retryable bridge error", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.createTurnAndStartRun)
+      .mockRejectedValueOnce(new DesktopBridgeError({
+        code: "provider_unreachable",
+        message: "Provider 暂时不可达",
+        retryable: true,
+      }))
+      .mockResolvedValueOnce({ turnId: "turn-2", runId: "run-2" });
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
+      target: { value: "重新连接后继续" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("Provider 暂时不可达")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重试发送" }));
+
+    await waitFor(() => expect(bridge.createTurnAndStartRun).toHaveBeenCalledTimes(2));
+  });
+
+  it("offers an explicit retry when answer-version retry is temporarily unavailable", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.retryRun)
+      .mockRejectedValueOnce(new DesktopBridgeError({
+        code: "provider_timeout",
+        message: "Provider 响应超时",
+        retryable: true,
+      }))
+      .mockResolvedValueOnce({ turnId: "turn-1", runId: "run-c" });
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(screen.getByRole("button", { name: "重试回答" }));
+
+    expect(await screen.findByText("Provider 响应超时")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重试回答请求" }));
+
+    await waitFor(() => expect(bridge.retryRun).toHaveBeenCalledTimes(2));
+  });
+
+  it("offers an explicit retry when Context inspection fails temporarily", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.inspectContext)
+      .mockRejectedValueOnce(new DesktopBridgeError({
+        code: "repository_busy",
+        message: "Context 暂时无法读取",
+        retryable: true,
+      }))
+      .mockResolvedValue(preview as never);
+    render(<FocusWorkspace bridge={bridge} />);
+
+    expect(await screen.findByText("Context 暂时无法读取")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新检查 Context" }));
+
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: /2 项 Context/ })).toBeVisible();
   });
 
   it("opens a route-map departure at the exact selected Run", async () => {

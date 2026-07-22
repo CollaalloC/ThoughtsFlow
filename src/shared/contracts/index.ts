@@ -14,6 +14,7 @@ export interface WorkspaceSummary {
   id: string;
   name: string;
   goal: string;
+  systemPrompt: string;
   archived: boolean;
   createdAt: string;
   updatedAt: string;

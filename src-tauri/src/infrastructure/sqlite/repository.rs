@@ -83,11 +83,12 @@ impl SqliteRepository {
     ) -> RepositoryResult<WorkspaceRecord> {
         sqlx::query(
             "INSERT INTO workspace \
-             (id, title, system_prompt, created_at, updated_at, archived_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+             (id, title, goal, system_prompt, created_at, updated_at, archived_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&workspace.id)
         .bind(&workspace.title)
+        .bind(&workspace.goal)
         .bind(&workspace.system_prompt)
         .bind(workspace.created_at)
         .bind(workspace.updated_at)
@@ -97,9 +98,35 @@ impl SqliteRepository {
         self.get_workspace(&workspace.id).await
     }
 
+    pub async fn save_workspace(
+        &self,
+        workspace: &WorkspaceRecord,
+    ) -> RepositoryResult<WorkspaceRecord> {
+        let row = sqlx::query(
+            "INSERT INTO workspace \
+             (id, title, goal, system_prompt, created_at, updated_at, archived_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET \
+                 title = excluded.title, goal = excluded.goal, \
+                 system_prompt = excluded.system_prompt, updated_at = excluded.updated_at, \
+                 archived_at = excluded.archived_at \
+             RETURNING id, title, goal, system_prompt, created_at, updated_at, archived_at",
+        )
+        .bind(&workspace.id)
+        .bind(&workspace.title)
+        .bind(&workspace.goal)
+        .bind(&workspace.system_prompt)
+        .bind(workspace.created_at)
+        .bind(workspace.updated_at)
+        .bind(workspace.archived_at)
+        .fetch_one(&self.pool)
+        .await?;
+        workspace_from_row(&row)
+    }
+
     pub async fn get_workspace(&self, id: &str) -> RepositoryResult<WorkspaceRecord> {
         let row = sqlx::query(
-            "SELECT id, title, system_prompt, created_at, updated_at, archived_at \
+            "SELECT id, title, goal, system_prompt, created_at, updated_at, archived_at \
              FROM workspace WHERE id = ?",
         )
         .bind(id)
@@ -114,7 +141,7 @@ impl SqliteRepository {
         include_archived: bool,
     ) -> RepositoryResult<Vec<WorkspaceRecord>> {
         let rows = sqlx::query(
-            "SELECT id, title, system_prompt, created_at, updated_at, archived_at \
+            "SELECT id, title, goal, system_prompt, created_at, updated_at, archived_at \
              FROM workspace WHERE (? OR archived_at IS NULL) \
              ORDER BY updated_at DESC, id",
         )
@@ -128,15 +155,17 @@ impl SqliteRepository {
         &self,
         id: &str,
         title: &str,
+        goal: &str,
         system_prompt: &str,
         archived_at: Option<i64>,
         updated_at: i64,
     ) -> RepositoryResult<WorkspaceRecord> {
         let result = sqlx::query(
-            "UPDATE workspace SET title = ?, system_prompt = ?, archived_at = ?, updated_at = ? \
+            "UPDATE workspace SET title = ?, goal = ?, system_prompt = ?, archived_at = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(title)
+        .bind(goal)
         .bind(system_prompt)
         .bind(archived_at)
         .bind(updated_at)
@@ -373,7 +402,7 @@ impl SqliteRepository {
         &self,
         id: &str,
         checkpoint: &RunCheckpoint,
-    ) -> RepositoryResult<()> {
+    ) -> RepositoryResult<CheckpointWriteOutcome> {
         let result = sqlx::query(
             "UPDATE model_run SET output_markdown = ?, reasoning_markdown = ?, \
                     usage_json = ?, checkpointed_at = ? \
@@ -389,6 +418,9 @@ impl SqliteRepository {
         if result.rows_affected() == 0 {
             match self.get_run(id).await {
                 Err(RepositoryError::NotFound { .. }) => Err(not_found("model run", id)),
+                Ok(run) if run.status.is_terminal() => {
+                    Ok(CheckpointWriteOutcome::SkippedTerminal(run.status))
+                }
                 Ok(run) => Err(RepositoryError::Conflict(format!(
                     "cannot checkpoint Run `{id}` while it is `{}`",
                     run.status.as_str()
@@ -396,7 +428,7 @@ impl SqliteRepository {
                 Err(error) => Err(error),
             }
         } else {
-            Ok(())
+            Ok(CheckpointWriteOutcome::Saved)
         }
     }
 
@@ -407,31 +439,14 @@ impl SqliteRepository {
             ));
         }
 
-        let current = self.get_run(id).await?;
-        let allowed = matches!(
-            (current.status, finish.status),
-            (RunStatusRecord::Streaming, RunStatusRecord::Completed)
-                | (
-                    RunStatusRecord::Queued
-                        | RunStatusRecord::Connecting
-                        | RunStatusRecord::Streaming,
-                    RunStatusRecord::Cancelled
-                        | RunStatusRecord::Failed
-                        | RunStatusRecord::Interrupted,
-                )
-        );
-        if !allowed {
-            return Err(RepositoryError::Conflict(format!(
-                "cannot finish Run `{id}` from `{}` as `{}`",
-                current.status.as_str(),
-                finish.status.as_str()
-            )));
-        }
-
         let result = sqlx::query(
             "UPDATE model_run SET status = ?, output_markdown = ?, reasoning_markdown = ?, \
                     usage_json = ?, error_json = ?, finished_at = ?, checkpointed_at = ? \
-             WHERE id = ? AND status = ?",
+             WHERE id = ? AND ( \
+                 (? = 'completed' AND status = 'streaming') OR \
+                 (? IN ('cancelled', 'failed', 'interrupted') \
+                     AND status IN ('queued', 'connecting', 'streaming')) \
+             )",
         )
         .bind(finish.status.as_str())
         .bind(&finish.output_markdown)
@@ -441,13 +456,20 @@ impl SqliteRepository {
         .bind(finish.finished_at)
         .bind(finish.finished_at)
         .bind(id)
-        .bind(current.status.as_str())
+        .bind(finish.status.as_str())
+        .bind(finish.status.as_str())
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 0 {
-            Err(RepositoryError::Conflict(format!(
-                "Run `{id}` changed while it was being finalized"
-            )))
+            match self.get_run(id).await {
+                Err(RepositoryError::NotFound { .. }) => Err(not_found("model run", id)),
+                Ok(current) => Err(RepositoryError::Conflict(format!(
+                    "cannot finish Run `{id}` from `{}` as `{}`",
+                    current.status.as_str(),
+                    finish.status.as_str()
+                ))),
+                Err(error) => Err(error),
+            }
         } else {
             Ok(())
         }
@@ -968,6 +990,7 @@ fn workspace_from_row(row: &SqliteRow) -> RepositoryResult<WorkspaceRecord> {
     Ok(WorkspaceRecord {
         id: row.try_get("id")?,
         title: row.try_get("title")?,
+        goal: row.try_get("goal")?,
         system_prompt: row.try_get("system_prompt")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,

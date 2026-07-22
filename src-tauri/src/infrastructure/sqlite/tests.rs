@@ -3,9 +3,12 @@ use crate::{
     domain::{
         ContentBlock, ContextManifest, ContextSnapshot, ContextSourceKind, InclusionReason,
         MessageRole, ModelRun, ProviderDialect, ProviderProfile, ProviderSnapshot, RunContextItem,
-        RunDraft, Turn, Workspace,
+        RunDraft, RunFailure, RunStateSnapshot, RunStatus, Turn, Workspace,
     },
-    ports::{PersistRunStart, RepositoryPort},
+    ports::{
+        CheckpointOutcome, PersistRunStart, RepositoryPort, RunCheckpoint as PortRunCheckpoint,
+        RunFinish as PortRunFinish, RunPersistencePort,
+    },
 };
 use std::collections::BTreeMap;
 
@@ -13,6 +16,7 @@ fn workspace(id: &str, title: &str) -> WorkspaceRecord {
     WorkspaceRecord {
         id: id.into(),
         title: title.into(),
+        goal: "Choose the safest architecture.".into(),
         system_prompt: "You are a careful technical collaborator.".into(),
         created_at: 10,
         updated_at: 10,
@@ -107,7 +111,7 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 1);
+    assert_eq!(schema.version, 2);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -127,6 +131,61 @@ async fn migration_creates_the_complete_strict_schema() {
 }
 
 #[tokio::test]
+async fn workspace_goal_migration_repairs_v1_goal_as_system_prompt_rows() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0001_core.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO workspace \
+         (id, title, system_prompt, created_at, updated_at, archived_at) \
+         VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+    )
+    .bind("workspace-goal")
+    .bind("Goal")
+    .bind("Choose the safest architecture")
+    .bind(1_i64)
+    .bind(1_i64)
+    .bind(None::<i64>)
+    .bind("workspace-placeholder")
+    .bind("Placeholder")
+    .bind("尚未设置工作区目标")
+    .bind(1_i64)
+    .bind(1_i64)
+    .bind(None::<i64>)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(include_str!("../../../migrations/0002_workspace_goal.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let goal = sqlx::query_as::<_, (String, String)>(
+        "SELECT goal, system_prompt FROM workspace WHERE id = 'workspace-goal'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let placeholder = sqlx::query_as::<_, (String, String)>(
+        "SELECT goal, system_prompt FROM workspace WHERE id = 'workspace-placeholder'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(goal.0, "Choose the safest architecture");
+    assert_eq!(placeholder.0, "");
+    assert_eq!(goal.1, placeholder.1);
+    assert!(
+        goal.1
+            .starts_with("You are a careful technical reasoning partner.")
+    );
+}
+
+#[tokio::test]
 async fn workspace_round_trip_and_archive_are_observable_through_the_repository() {
     let repository = SqliteRepository::connect_in_memory().await.unwrap();
     repository
@@ -138,6 +197,7 @@ async fn workspace_round_trip_and_archive_are_observable_through_the_repository(
         .update_workspace(
             "workspace-a",
             "Renamed lab",
+            "Choose the lowest-risk migration path",
             "Updated system prompt",
             Some(40),
             40,
@@ -147,6 +207,7 @@ async fn workspace_round_trip_and_archive_are_observable_through_the_repository(
 
     let stored = repository.get_workspace("workspace-a").await.unwrap();
     assert_eq!(stored.title, "Renamed lab");
+    assert_eq!(stored.goal, "Choose the lowest-risk migration path");
     assert_eq!(stored.system_prompt, "Updated system prompt");
     assert_eq!(stored.archived_at, Some(40));
     assert!(repository.list_workspaces(false).await.unwrap().is_empty());
@@ -154,6 +215,30 @@ async fn workspace_round_trip_and_archive_are_observable_through_the_repository(
         repository.list_workspaces(true).await.unwrap(),
         vec![stored]
     );
+}
+
+#[tokio::test]
+async fn repository_port_reads_legacy_unquoted_provider_parameters() {
+    let repository = SqliteRepository::connect_in_memory().await.unwrap();
+    repository
+        .save_provider_profile(&ProviderProfileRecord {
+            id: "provider-legacy".into(),
+            name: "Legacy profile".into(),
+            dialect: "ollama_chat".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            default_model: "qwen3".into(),
+            parameters_json: r#"{"temperature":0.2,"_thoughsflowIsDefault":true}"#.into(),
+            created_at: 10,
+            updated_at: 10,
+        })
+        .await
+        .unwrap();
+
+    let profile = RepositoryPort::get_provider_profile(&repository, "provider-legacy")
+        .await
+        .unwrap();
+    assert_eq!(profile.parameters["temperature"], "0.2");
+    assert_eq!(profile.parameters["_thoughsflowIsDefault"], "true");
 }
 
 #[tokio::test]
@@ -366,14 +451,20 @@ async fn checkpoint_is_idempotent_and_startup_recovery_preserves_partial_output(
         usage_json: Some(r#"{"completion_tokens":2}"#.into()),
         checkpointed_at: 35,
     };
-    repository
-        .checkpoint_run("run-a", &checkpoint)
-        .await
-        .unwrap();
-    repository
-        .checkpoint_run("run-a", &checkpoint)
-        .await
-        .unwrap();
+    assert_eq!(
+        repository
+            .checkpoint_run("run-a", &checkpoint)
+            .await
+            .unwrap(),
+        CheckpointWriteOutcome::Saved
+    );
+    assert_eq!(
+        repository
+            .checkpoint_run("run-a", &checkpoint)
+            .await
+            .unwrap(),
+        CheckpointWriteOutcome::Saved
+    );
 
     assert_eq!(repository.recover_interrupted_runs(40).await.unwrap(), 1);
     let recovered = repository.get_run("run-a").await.unwrap();
@@ -422,7 +513,10 @@ async fn terminal_run_output_cannot_be_checkpointed_or_replaced() {
         )
         .await;
 
-    assert!(matches!(result, Err(RepositoryError::Conflict(_))));
+    assert_eq!(
+        result.unwrap(),
+        CheckpointWriteOutcome::SkippedTerminal(RunStatusRecord::Completed)
+    );
     assert_eq!(
         repository.get_run("run-a").await.unwrap().output_markdown,
         "final answer"
@@ -430,12 +524,94 @@ async fn terminal_run_output_cannot_be_checkpointed_or_replaced() {
 }
 
 #[tokio::test]
+async fn run_persistence_port_skips_a_late_checkpoint_after_cancellation() {
+    let repository = SqliteRepository::connect_in_memory().await.unwrap();
+    repository
+        .create_workspace(&workspace("workspace-a", "A"))
+        .await
+        .unwrap();
+    repository
+        .persist_run_start(&root_bundle("workspace-a", "turn-a", "run-a"))
+        .await
+        .unwrap();
+    repository.mark_run_connecting("run-a", 30).await.unwrap();
+    RunPersistencePort::mark_run_streaming(&repository, "run-a", 31)
+        .await
+        .unwrap();
+    RunPersistencePort::finish_run(
+        &repository,
+        "run-a",
+        PortRunFinish {
+            status: RunStatus::Cancelled,
+            output_markdown: "partial answer".into(),
+            reasoning_markdown: String::new(),
+            usage: None,
+            error: None,
+            finished_at: 40,
+        },
+    )
+    .await
+    .unwrap();
+
+    let outcome = RunPersistencePort::checkpoint_run(
+        &repository,
+        "run-a",
+        PortRunCheckpoint {
+            output_markdown: "stale replacement".into(),
+            reasoning_markdown: String::new(),
+            usage: None,
+            checkpointed_at: 41,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        CheckpointOutcome::SkippedTerminal(RunStatus::Cancelled)
+    );
+    let stored = repository.get_run("run-a").await.unwrap();
+    assert_eq!(stored.status, RunStatusRecord::Cancelled);
+    assert_eq!(stored.output_markdown, "partial answer");
+}
+
+#[tokio::test]
 async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
     let repository = SqliteRepository::connect_in_memory().await.unwrap();
-    let workspace = Workspace::new("workspace-a", "Decision lab", "Be exact.", 10);
+    let workspace = Workspace::new(
+        "workspace-a",
+        "Decision lab",
+        "Choose a database strategy.",
+        "Be exact.",
+        10,
+    );
     RepositoryPort::save_workspace(&repository, workspace.clone())
         .await
         .unwrap();
+    assert_eq!(
+        RepositoryPort::get_workspace(&repository, "workspace-a")
+            .await
+            .unwrap(),
+        workspace
+    );
+    let updated_workspace = Workspace {
+        title: "Decision lab renamed".into(),
+        goal: "Choose a database strategy with rollback evidence.".into(),
+        updated_at: 12,
+        ..workspace.clone()
+    };
+    assert_eq!(
+        RepositoryPort::save_workspace(&repository, updated_workspace.clone())
+            .await
+            .unwrap(),
+        updated_workspace
+    );
+    assert_eq!(
+        RepositoryPort::get_workspace(&repository, "workspace-a")
+            .await
+            .unwrap(),
+        updated_workspace
+    );
 
     let profile = ProviderProfile {
         id: "provider-a".into(),
@@ -514,6 +690,58 @@ async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
             .await
             .unwrap(),
         snapshot
+    );
+    RepositoryPort::mark_run_connecting(&repository, "run-a", 21)
+        .await
+        .unwrap();
+    RunPersistencePort::mark_run_streaming(&repository, "run-a", 22)
+        .await
+        .unwrap();
+    let failed = ModelRun::rehydrate(
+        RunDraft {
+            id: "run-a".into(),
+            turn_id: "turn-a".into(),
+            provider_profile_id: Some("provider-a".into()),
+            model: "qwen3".into(),
+            created_at: 20,
+        },
+        RunStateSnapshot {
+            status: RunStatus::Failed,
+            output_markdown: "partial".into(),
+            reasoning_markdown: String::new(),
+            error: Some(RunFailure {
+                code: "rate_limit".into(),
+                message: "Too many requests".into(),
+                retryable: true,
+                status: Some(429),
+            }),
+            usage: None,
+            started_at: Some(21),
+            checkpointed_at: Some(22),
+            finished_at: Some(23),
+        },
+    )
+    .unwrap();
+    RunPersistencePort::finish_run(
+        &repository,
+        "run-a",
+        PortRunFinish {
+            status: RunStatus::Failed,
+            output_markdown: "partial".into(),
+            reasoning_markdown: String::new(),
+            usage: None,
+            error: failed.failure().cloned(),
+            finished_at: 23,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        RepositoryPort::get_run(&repository, "run-a")
+            .await
+            .unwrap()
+            .failure(),
+        failed.failure()
     );
     let graph = RepositoryPort::load_conversation_graph(&repository, "workspace-a")
         .await

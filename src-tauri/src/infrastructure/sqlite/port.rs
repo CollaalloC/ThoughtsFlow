@@ -7,10 +7,13 @@ use crate::{
     domain::{
         BranchPointer, ContentBlock, ContextManifest, ContextSnapshot, ContextSourceKind,
         ConversationGraph, DecisionMark, DecisionStatus, InclusionReason, MessageRole, ModelRun,
-        ProviderDialect, ProviderProfile, ProviderSnapshot, RunContextItem, RunDraft,
+        ProviderDialect, ProviderProfile, ProviderSnapshot, RunContextItem, RunDraft, RunFailure,
         RunStateSnapshot, RunStatus, RunUsage, Turn, ViewState, Workspace,
     },
-    ports::{PersistRunStart, RepositoryFuture, RepositoryPort, RepositoryPortError},
+    ports::{
+        CheckpointOutcome, PersistRunStart, RepositoryFuture, RepositoryPort, RepositoryPortError,
+        RunCheckpoint as PortRunCheckpoint, RunFinish as PortRunFinish, RunPersistencePort,
+    },
 };
 
 use super::*;
@@ -41,24 +44,9 @@ impl RepositoryPort for SqliteRepository {
         let repository = self.clone();
         Box::pin(async move {
             let record = workspace_to_record(&workspace);
-            let stored = match SqliteRepository::get_workspace(&repository, &workspace.id).await {
-                Ok(_) => {
-                    SqliteRepository::update_workspace(
-                        &repository,
-                        &workspace.id,
-                        &workspace.title,
-                        &workspace.system_prompt,
-                        workspace.archived_at,
-                        workspace.updated_at,
-                    )
-                    .await
-                }
-                Err(RepositoryError::NotFound { .. }) => {
-                    SqliteRepository::create_workspace(&repository, &record).await
-                }
-                Err(error) => Err(error),
-            }
-            .map_err(port_error)?;
+            let stored = SqliteRepository::save_workspace(&repository, &record)
+                .await
+                .map_err(port_error)?;
             Ok(workspace_to_domain(stored))
         })
     }
@@ -107,61 +95,56 @@ impl RepositoryPort for SqliteRepository {
         })
     }
 
+    fn get_turn(&self, id: &str) -> RepositoryFuture<'_, Turn> {
+        let repository = self.clone();
+        let id = id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::get_turn(&repository, &id)
+                .await
+                .map(turn_to_domain)
+                .map_err(port_error)
+        })
+    }
+
+    fn list_turns(&self, workspace_id: &str) -> RepositoryFuture<'_, Vec<Turn>> {
+        let repository = self.clone();
+        let workspace_id = workspace_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::list_turns(&repository, &workspace_id)
+                .await
+                .map(|records| records.into_iter().map(turn_to_domain).collect())
+                .map_err(port_error)
+        })
+    }
+
+    fn list_runs_for_turn(&self, turn_id: &str) -> RepositoryFuture<'_, Vec<ModelRun>> {
+        let repository = self.clone();
+        let turn_id = turn_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::list_runs_for_turn(&repository, &turn_id)
+                .await
+                .map_err(port_error)?
+                .into_iter()
+                .map(run_to_domain)
+                .collect()
+        })
+    }
+
+    fn mark_run_connecting(&self, run_id: &str, at: i64) -> RepositoryFuture<'_, ()> {
+        let repository = self.clone();
+        let run_id = run_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::mark_run_connecting(&repository, &run_id, at)
+                .await
+                .map_err(port_error)
+        })
+    }
+
     fn persist_run_start(&self, start: PersistRunStart) -> RepositoryFuture<'_, ()> {
         let repository = self.clone();
         Box::pin(async move {
             let bundle = build_start_bundle(&repository, start).await?;
             SqliteRepository::persist_run_start(&repository, &bundle)
-                .await
-                .map_err(port_error)
-        })
-    }
-
-    fn checkpoint_run(&self, run: &ModelRun) -> RepositoryFuture<'_, ()> {
-        let repository = self.clone();
-        let run = run.clone();
-        Box::pin(async move {
-            let state = run.state_snapshot();
-            let checkpointed_at = state.checkpointed_at.ok_or_else(|| {
-                RepositoryPortError::InvalidData(format!(
-                    "streaming Run `{}` has no checkpoint timestamp",
-                    run.id
-                ))
-            })?;
-            let checkpoint = RunCheckpoint {
-                output_markdown: state.output_markdown,
-                reasoning_markdown: state.reasoning_markdown,
-                usage_json: encode_usage(state.usage),
-                checkpointed_at,
-            };
-            SqliteRepository::checkpoint_run(&repository, &run.id, &checkpoint)
-                .await
-                .map_err(port_error)
-        })
-    }
-
-    fn finish_run(&self, run: &ModelRun) -> RepositoryFuture<'_, ()> {
-        let repository = self.clone();
-        let run = run.clone();
-        Box::pin(async move {
-            let state = run.state_snapshot();
-            let finished_at = state.finished_at.ok_or_else(|| {
-                RepositoryPortError::InvalidData(format!(
-                    "terminal Run `{}` has no finished timestamp",
-                    run.id
-                ))
-            })?;
-            let finish = RunFinish {
-                status: status_to_record(state.status),
-                output_markdown: state.output_markdown,
-                reasoning_markdown: state.reasoning_markdown,
-                usage_json: encode_usage(state.usage),
-                error_json: state
-                    .error
-                    .map(|message| json!({ "message": message }).to_string()),
-                finished_at,
-            };
-            SqliteRepository::finish_run(&repository, &run.id, &finish)
                 .await
                 .map_err(port_error)
         })
@@ -199,6 +182,17 @@ impl RepositoryPort for SqliteRepository {
                 .into_iter()
                 .map(provider_profile_to_domain)
                 .collect()
+        })
+    }
+
+    fn get_provider_profile(&self, id: &str) -> RepositoryFuture<'_, ProviderProfile> {
+        let repository = self.clone();
+        let id = id.to_owned();
+        Box::pin(async move {
+            let record = SqliteRepository::get_provider_profile(&repository, &id)
+                .await
+                .map_err(port_error)?;
+            provider_profile_to_domain(record)
         })
     }
 
@@ -276,6 +270,19 @@ impl RepositoryPort for SqliteRepository {
         })
     }
 
+    fn list_branch_pointers(&self, workspace_id: &str) -> RepositoryFuture<'_, Vec<BranchPointer>> {
+        let repository = self.clone();
+        let workspace_id = workspace_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::list_branch_pointers(&repository, &workspace_id)
+                .await
+                .map_err(port_error)?
+                .into_iter()
+                .map(branch_pointer_to_domain)
+                .collect()
+        })
+    }
+
     fn save_decision_mark(&self, mark: DecisionMark) -> RepositoryFuture<'_, DecisionMark> {
         let repository = self.clone();
         Box::pin(async move {
@@ -284,6 +291,35 @@ impl RepositoryPort for SqliteRepository {
                 .await
                 .map_err(port_error)?;
             decision_mark_to_domain(stored)
+        })
+    }
+
+    fn get_decision_mark(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+    ) -> RepositoryFuture<'_, DecisionMark> {
+        let repository = self.clone();
+        let workspace_id = workspace_id.to_owned();
+        let run_id = run_id.to_owned();
+        Box::pin(async move {
+            let record = SqliteRepository::get_decision_mark(&repository, &workspace_id, &run_id)
+                .await
+                .map_err(port_error)?;
+            decision_mark_to_domain(record)
+        })
+    }
+
+    fn list_decision_marks(&self, workspace_id: &str) -> RepositoryFuture<'_, Vec<DecisionMark>> {
+        let repository = self.clone();
+        let workspace_id = workspace_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::list_decision_marks(&repository, &workspace_id)
+                .await
+                .map_err(port_error)?
+                .into_iter()
+                .map(decision_mark_to_domain)
+                .collect()
         })
     }
 
@@ -305,6 +341,83 @@ impl RepositoryPort for SqliteRepository {
                 state_json: stored.state_json,
                 updated_at: stored.updated_at,
             })
+        })
+    }
+
+    fn get_view_state(
+        &self,
+        workspace_id: &str,
+        view_key: &str,
+    ) -> RepositoryFuture<'_, ViewState> {
+        let repository = self.clone();
+        let workspace_id = workspace_id.to_owned();
+        let view_key = view_key.to_owned();
+        Box::pin(async move {
+            let stored = SqliteRepository::get_view_state(&repository, &workspace_id, &view_key)
+                .await
+                .map_err(port_error)?;
+            Ok(ViewState {
+                workspace_id: stored.workspace_id,
+                view_key: stored.view_key,
+                state_json: stored.state_json,
+                updated_at: stored.updated_at,
+            })
+        })
+    }
+}
+
+impl RunPersistencePort for SqliteRepository {
+    fn mark_run_streaming(&self, run_id: &str, at: i64) -> RepositoryFuture<'_, ()> {
+        let repository = self.clone();
+        let run_id = run_id.to_owned();
+        Box::pin(async move {
+            SqliteRepository::mark_run_streaming(&repository, &run_id, at)
+                .await
+                .map_err(port_error)
+        })
+    }
+
+    fn checkpoint_run(
+        &self,
+        run_id: &str,
+        checkpoint: PortRunCheckpoint,
+    ) -> RepositoryFuture<'_, CheckpointOutcome> {
+        let repository = self.clone();
+        let run_id = run_id.to_owned();
+        Box::pin(async move {
+            let checkpoint = RunCheckpoint {
+                output_markdown: checkpoint.output_markdown,
+                reasoning_markdown: checkpoint.reasoning_markdown,
+                usage_json: encode_usage(checkpoint.usage),
+                checkpointed_at: checkpoint.checkpointed_at,
+            };
+            SqliteRepository::checkpoint_run(&repository, &run_id, &checkpoint)
+                .await
+                .map(|outcome| match outcome {
+                    CheckpointWriteOutcome::Saved => CheckpointOutcome::Saved,
+                    CheckpointWriteOutcome::SkippedTerminal(status) => {
+                        CheckpointOutcome::SkippedTerminal(status_to_domain(status))
+                    }
+                })
+                .map_err(port_error)
+        })
+    }
+
+    fn finish_run(&self, run_id: &str, finish: PortRunFinish) -> RepositoryFuture<'_, ()> {
+        let repository = self.clone();
+        let run_id = run_id.to_owned();
+        Box::pin(async move {
+            let finish = RunFinish {
+                status: status_to_record(finish.status),
+                output_markdown: finish.output_markdown,
+                reasoning_markdown: finish.reasoning_markdown,
+                usage_json: encode_usage(finish.usage),
+                error_json: encode_failure(finish.error),
+                finished_at: finish.finished_at,
+            };
+            SqliteRepository::finish_run(&repository, &run_id, &finish)
+                .await
+                .map_err(port_error)
         })
     }
 }
@@ -444,9 +557,7 @@ async fn build_start_bundle(
         reasoning_markdown: state.reasoning_markdown,
         provider_snapshot_json: provider_json,
         usage_json: encode_usage(state.usage),
-        error_json: state
-            .error
-            .map(|message| json!({ "message": message }).to_string()),
+        error_json: encode_failure(state.error),
         created_at: start.run.created_at,
         started_at: state.started_at,
         finished_at: state.finished_at,
@@ -528,9 +639,7 @@ fn receipt_to_domain(
                 RepositoryPortError::InvalidData("provider dialect is missing".into())
             })?,
     )?;
-    let parameters =
-        serde_json::from_str::<BTreeMap<String, String>>(&receipt.snapshot.parameters_json)
-            .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?;
+    let parameters = decode_parameters(&receipt.snapshot.parameters_json)?;
     let items = receipt
         .items
         .into_iter()
@@ -574,6 +683,7 @@ fn workspace_to_record(workspace: &Workspace) -> WorkspaceRecord {
     WorkspaceRecord {
         id: workspace.id.clone(),
         title: workspace.title.clone(),
+        goal: workspace.goal.clone(),
         system_prompt: workspace.system_prompt.clone(),
         created_at: workspace.created_at,
         updated_at: workspace.updated_at,
@@ -585,6 +695,7 @@ fn workspace_to_domain(record: WorkspaceRecord) -> Workspace {
     Workspace {
         id: record.id,
         title: record.title,
+        goal: record.goal,
         system_prompt: record.system_prompt,
         created_at: record.created_at,
         updated_at: record.updated_at,
@@ -667,8 +778,7 @@ fn provider_profile_to_domain(
         dialect: dialect_from_str(&record.dialect)?,
         base_url: record.base_url,
         model: record.default_model,
-        parameters: serde_json::from_str(&record.parameters_json)
-            .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?,
+        parameters: decode_parameters(&record.parameters_json)?,
         created_at: record.created_at,
         updated_at: record.updated_at,
     })
@@ -780,18 +890,61 @@ fn decode_usage(value: Option<&str>) -> Result<Option<RunUsage>, RepositoryPortE
     Ok(Some(RunUsage::new(input_tokens, output_tokens)))
 }
 
-fn decode_error(value: Option<&str>) -> Result<Option<String>, RepositoryPortError> {
+fn decode_error(value: Option<&str>) -> Result<Option<RunFailure>, RepositoryPortError> {
     let Some(value) = value else {
         return Ok(None);
     };
     let value: Value = serde_json::from_str(value)
         .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?;
-    Ok(value
+    let message = value
         .get("message")
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| value.as_str().map(str::to_owned))
-        .or_else(|| Some(value.to_string())))
+        .unwrap_or_else(|| value.to_string());
+    Ok(Some(RunFailure {
+        code: value
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("run_failed")
+            .into(),
+        message,
+        retryable: value
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        status: value
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok()),
+    }))
+}
+
+fn encode_failure(failure: Option<RunFailure>) -> Option<String> {
+    failure.map(|failure| {
+        json!({
+            "code": failure.code,
+            "message": failure.message,
+            "retryable": failure.retryable,
+            "status": failure.status,
+        })
+        .to_string()
+    })
+}
+
+fn decode_parameters(value: &str) -> Result<BTreeMap<String, String>, RepositoryPortError> {
+    let values = serde_json::from_str::<BTreeMap<String, Value>>(value)
+        .map_err(|error| RepositoryPortError::InvalidData(error.to_string()))?;
+    Ok(values
+        .into_iter()
+        .map(|(key, value)| {
+            let encoded = match value {
+                Value::String(value) => value,
+                value => value.to_string(),
+            };
+            (key, encoded)
+        })
+        .collect())
 }
 
 fn role_to_str(role: MessageRole) -> &'static str {

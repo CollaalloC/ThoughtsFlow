@@ -70,7 +70,9 @@
 .focus-notice { display: flex; align-items: center; gap: 7px; padding: 8px 24px; border-bottom: 1px solid #c8ded6; background: var(--tf-green-soft); color: var(--tf-green-strong); font-size: 10px; }
 .focus-notice.is-error { border-color: #edc3be; background: var(--tf-red-soft); color: var(--tf-red); }
 .focus-notice .tf-state { min-height: 0; color: inherit; font-size: inherit; }
-.focus-notice > button { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 9px; }
+.focus-notice__actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.focus-notice__actions button,
+.focus-notice > button { border: 0; background: transparent; color: inherit; font-size: 9px; }
 
 .focus-reading { min-height: 0; flex: 1; overflow: auto; scroll-behavior: smooth; }
 .focus-reading__intro, .focus-thread, .focus-composer { width: min(760px, calc(100% - 46px)); margin-inline: auto; }

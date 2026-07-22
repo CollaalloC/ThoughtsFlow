@@ -10,6 +10,7 @@ pub struct SchemaInfo {
 pub struct WorkspaceRecord {
     pub id: String,
     pub title: String,
+    pub goal: String,
     pub system_prompt: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -224,6 +225,12 @@ pub struct RunCheckpoint {
     pub reasoning_markdown: String,
     pub usage_json: Option<String>,
     pub checkpointed_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointWriteOutcome {
+    Saved,
+    SkippedTerminal(RunStatusRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -8,6 +8,10 @@ pub mod ports;
 use std::sync::Arc;
 
 use application::{AppState, ApplicationBackend, DefaultApplicationBackend};
+use infrastructure::{
+    filesystem::LocalDecisionPacketWriter, provider::ReqwestProviderGateway,
+    sqlite::SqliteRepository,
+};
 use interface::*;
 use tauri::Manager;
 
@@ -51,10 +55,15 @@ pub fn run() {
         std::fs::create_dir_all(&data_dir)?;
         let database_path = data_dir.join("thoughsflow.sqlite3");
         let export_root = data_dir.join("exports");
-        let backend = tauri::async_runtime::block_on(DefaultApplicationBackend::initialize(
-            database_path,
-            export_root,
-        ))?;
+        let backend = tauri::async_runtime::block_on(async move {
+            let repository = Arc::new(SqliteRepository::connect(database_path).await?);
+            let provider = Arc::new(ReqwestProviderGateway::with_defaults()?);
+            let exporter = Arc::new(LocalDecisionPacketWriter::new(export_root));
+            let backend =
+                DefaultApplicationBackend::new(repository, provider.clone(), provider, exporter);
+            backend.initialize().await?;
+            Ok::<_, Box<dyn std::error::Error>>(backend)
+        })?;
         app.manage(AppState::new(Arc::new(backend)));
         Ok(())
     });

@@ -426,3 +426,37 @@ fn provider_snapshot_changes_invalidate_the_preview_hash() {
 
     assert!(matches!(error, DomainError::PreviewHashMismatch { .. }));
 }
+
+#[test]
+fn structured_run_failure_survives_rehydration() {
+    let run = ModelRun::rehydrate(
+        RunDraft {
+            id: "run-failed".into(),
+            turn_id: "turn-root".into(),
+            provider_profile_id: Some("provider-1".into()),
+            model: "model".into(),
+            created_at: 1,
+        },
+        RunStateSnapshot {
+            status: RunStatus::Failed,
+            output_markdown: "partial".into(),
+            reasoning_markdown: String::new(),
+            error: Some(RunFailure {
+                code: "rate_limit".into(),
+                message: "Too many requests".into(),
+                retryable: true,
+                status: Some(429),
+            }),
+            usage: None,
+            started_at: Some(2),
+            checkpointed_at: Some(2),
+            finished_at: Some(3),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(run.error(), Some("Too many requests"));
+    assert_eq!(run.failure().unwrap().code, "rate_limit");
+    assert!(run.failure().unwrap().retryable);
+    assert_eq!(run.failure().unwrap().status, Some(429));
+}

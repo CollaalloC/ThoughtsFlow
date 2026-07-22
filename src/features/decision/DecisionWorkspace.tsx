@@ -29,7 +29,6 @@ export interface MarkDecisionInput {
 
 export interface ExportDecisionPacketInput {
   workspaceId: string;
-  destination?: string;
 }
 
 export interface DecisionWorkspaceProps {

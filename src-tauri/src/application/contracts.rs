@@ -13,6 +13,7 @@ pub struct WorkspaceSummary {
     pub id: EntityId,
     pub name: String,
     pub goal: String,
+    pub system_prompt: String,
     pub archived: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -23,6 +24,8 @@ pub struct WorkspaceSummary {
 pub struct CreateWorkspaceInput {
     pub name: String,
     pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +36,8 @@ pub struct UpdateWorkspaceInput {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
 }
@@ -344,11 +349,9 @@ pub struct DecisionMarkView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportDecisionPacketInput {
     pub workspace_id: EntityId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -484,4 +487,36 @@ pub enum RunEventView {
         error: RunErrorView,
         at: Timestamp,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExportDecisionPacketInput, WorkspaceSummary};
+
+    #[test]
+    fn decision_packet_contract_rejects_webview_supplied_paths() {
+        let result = serde_json::from_value::<ExportDecisionPacketInput>(serde_json::json!({
+            "workspaceId": "workspace-1",
+            "destination": "/tmp/overwrite-me"
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn workspace_contract_keeps_goal_and_system_prompt_independent() {
+        let value = serde_json::to_value(WorkspaceSummary {
+            id: "workspace-1".into(),
+            name: "Architecture review".into(),
+            goal: "Choose a migration path".into(),
+            system_prompt: "Challenge unsupported assumptions".into(),
+            archived: false,
+            created_at: "2026-07-22T00:00:00Z".into(),
+            updated_at: "2026-07-22T00:00:00Z".into(),
+        })
+        .unwrap();
+
+        assert_eq!(value["goal"], "Choose a migration path");
+        assert_eq!(value["systemPrompt"], "Challenge unsupported assumptions");
+    }
 }

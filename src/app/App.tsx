@@ -1,9 +1,7 @@
 import { ArrowLeft, GitCompareArrows, Map, MessageSquareText, Settings2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { DecisionWorkspace, type DecisionRunOption } from "../features/decision";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import type { DecisionRunOption } from "../features/decision";
 import { FocusWorkspace } from "../features/conversation";
-import { RouteMap } from "../features/route-map";
-import { ProviderSettings } from "../features/settings";
 import { createDesktopBridge, type DesktopBridge } from "../platform/desktop-bridge";
 import type { RouteProjection, WorkspaceDetail } from "../shared/contracts";
 import { Brand, ErrorState, LoadingState } from "../shared/ui";
@@ -12,6 +10,16 @@ import "../shared/ui/styles.css";
 import "./app.css";
 
 type AppView = "focus" | "route" | "decision" | "settings";
+
+const DecisionWorkspace = lazy(() =>
+  import("../features/decision").then((module) => ({ default: module.DecisionWorkspace })),
+);
+const RouteMap = lazy(() =>
+  import("../features/route-map").then((module) => ({ default: module.RouteMap })),
+);
+const ProviderSettings = lazy(() =>
+  import("../features/settings").then((module) => ({ default: module.ProviderSettings })),
+);
 
 export interface AppProps {
   bridge?: DesktopBridge;
@@ -205,23 +213,24 @@ export function App({ bridge: providedBridge }: AppProps) {
               </div>
             </header>
 
-            {view === "settings" ? <ProviderSettings bridge={bridge} /> : null}
+            <Suspense fallback={<LoadingState label="正在加载工作面" />}>
+              {view === "settings" ? <ProviderSettings bridge={bridge} /> : null}
 
-            {view !== "settings" && loading ? (
-              <LoadingState label={view === "route" ? "正在读取路线投影" : "正在读取决策工作区"} />
-            ) : null}
+              {view !== "settings" && loading ? (
+                <LoadingState label={view === "route" ? "正在读取路线投影" : "正在读取决策工作区"} />
+              ) : null}
 
-            {view !== "settings" && error ? (
-              <div className="app-shell__error">
-                <ErrorState message={error} />
-                <button onClick={() => setReloadKey((value) => value + 1)} type="button">
-                  重试加载
-                </button>
-              </div>
-            ) : null}
+              {view !== "settings" && error ? (
+                <div className="app-shell__error">
+                  <ErrorState message={error} />
+                  <button onClick={() => setReloadKey((value) => value + 1)} type="button">
+                    重试加载
+                  </button>
+                </div>
+              ) : null}
 
-            {view === "route" && !loading && !error && projection ? (
-              <RouteMap
+              {view === "route" && !loading && !error && projection ? (
+                <RouteMap
                 onCreateBranch={(parentRunId) => {
                   setCurrentRunId(parentRunId);
                   setView("focus");
@@ -234,19 +243,20 @@ export function App({ bridge: providedBridge }: AppProps) {
                 }}
                 onViewStateChange={persistViewState}
                 projection={projection}
-              />
-            ) : null}
+                />
+              ) : null}
 
-            {view === "decision" && !loading && !error && detail ? (
-              <DecisionWorkspace
+              {view === "decision" && !loading && !error && detail ? (
+                <DecisionWorkspace
                 existingMarks={detail.decisionMarks}
                 onCompare={(input) => bridge.compareRuns(input)}
                 onExport={(input) => bridge.exportDecisionPacket(input)}
                 onMarkDecision={(input) => bridge.markDecision(input)}
                 runs={runs}
                 workspaceId={detail.workspace.id}
-              />
-            ) : null}
+                />
+              ) : null}
+            </Suspense>
           </section>
         )}
       </main>

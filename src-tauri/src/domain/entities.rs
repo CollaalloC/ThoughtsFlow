@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 pub struct Workspace {
     pub id: String,
     pub title: String,
+    pub goal: String,
     pub system_prompt: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -14,12 +15,14 @@ impl Workspace {
     pub fn new(
         id: impl Into<String>,
         title: impl Into<String>,
+        goal: impl Into<String>,
         system_prompt: impl Into<String>,
         now: i64,
     ) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
+            goal: goal.into(),
             system_prompt: system_prompt.into(),
             created_at: now,
             updated_at: now,

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -13,23 +12,19 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        self, ContextCompileRequest, ContextCompiler, ContextPolicy, ContextSourceKind,
-        ContextWarning, ConversationGraph, InclusionReason, MessageRole, ModelRun, RunDraft,
-        RunStateSnapshot, RunStatus,
-    },
-    infrastructure::{
-        provider::{ReqwestProviderGateway, validate_base_url},
-        sqlite::{
-            BranchPointerRecord, ContentBlockRecord, ContextManifestRecord, ContextSnapshotRecord,
-            DecisionMarkRecord, ModelRunRecord, ProviderProfileRecord, RepositoryError,
-            RunCheckpoint, RunContextItemRecord, RunFinish, RunStartBundle, RunStatusRecord,
-            SqliteRepository, StoredContextItem, StoredRunReceipt, TurnRecord, ViewStateRecord,
-            WorkspaceRecord,
-        },
+        self, BranchPointer, ContextCompileRequest, ContextCompiler, ContextPolicy,
+        ContextSourceKind, ContextWarning, DecisionMark, DecisionStatus, InclusionReason,
+        MessageRole, ModelRun, ProviderProfile, RunDraft, RunFailure, RunStatus, Turn, ViewState,
+        Workspace,
     },
     ports::provider::{
-        CanonicalMessage, CanonicalRequest, MessageRole as ProviderMessageRole, ProviderDialect,
-        ProviderGateway, ProviderInvocation, ProviderTarget, RunEvent, SessionCredential, Usage,
+        CanonicalMessage, CanonicalRequest, MessageRole as ProviderMessageRole,
+        ProviderConnectionTester, ProviderDialect, ProviderGateway, ProviderInvocation,
+        ProviderTarget, RunEvent, SessionCredential, Usage,
+    },
+    ports::{
+        CheckpointOutcome, DecisionPacketWriter, PersistRunStart, RepositoryPort,
+        RepositoryPortError, RunCheckpoint, RunFinish, RunPersistencePort,
     },
 };
 
@@ -53,49 +48,47 @@ struct OverrideItem {
 }
 
 pub struct DefaultApplicationBackend {
-    repository: SqliteRepository,
+    repository: Arc<dyn RepositoryPort>,
+    run_persistence: Arc<dyn RunPersistencePort>,
     provider: Arc<dyn ProviderGateway>,
-    connection_client: reqwest::Client,
+    connection_tester: Arc<dyn ProviderConnectionTester>,
     compiler: ContextCompiler,
     run_registry: Arc<Mutex<HashMap<String, CancellationToken>>>,
     context_overrides: Arc<Mutex<HashMap<OverrideKey, HashMap<String, OverrideItem>>>>,
-    export_root: PathBuf,
+    decision_packet_writer: Arc<dyn DecisionPacketWriter>,
 }
 
 impl DefaultApplicationBackend {
-    pub async fn initialize(database_path: PathBuf, export_root: PathBuf) -> AppResult<Self> {
-        let repository = SqliteRepository::connect(database_path)
-            .await
-            .map_err(repository_error)?;
-        repository
-            .recover_interrupted_runs(now_millis())
-            .await
-            .map_err(repository_error)?;
-
-        let connection_client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .user_agent("ThoughsFlow/0.1")
-            .build()
-            .map_err(|error| AppError::internal("http_client_failed", error.to_string()))?;
-        let provider = Arc::new(
-            ReqwestProviderGateway::with_defaults()
-                .map_err(|error| AppError::internal(error.code(), error.to_string()))?,
-        );
-        let backend = Self {
-            repository,
+    pub fn new<R>(
+        repository: Arc<R>,
+        provider: Arc<dyn ProviderGateway>,
+        connection_tester: Arc<dyn ProviderConnectionTester>,
+        decision_packet_writer: Arc<dyn DecisionPacketWriter>,
+    ) -> Self
+    where
+        R: RepositoryPort + RunPersistencePort + 'static,
+    {
+        Self {
+            repository: repository.clone(),
+            run_persistence: repository,
             provider,
-            connection_client,
+            connection_tester,
             compiler: ContextCompiler::new(ContextPolicy {
                 compiler_version: domain::CONTEXT_COMPILER_VERSION.into(),
                 max_chars: DEFAULT_MAX_CONTEXT_CHARS,
             }),
             run_registry: Arc::new(Mutex::new(HashMap::new())),
             context_overrides: Arc::new(Mutex::new(HashMap::new())),
-            export_root,
-        };
-        backend.ensure_default_provider().await?;
-        Ok(backend)
+            decision_packet_writer,
+        }
+    }
+
+    pub async fn initialize(&self) -> AppResult<()> {
+        self.repository
+            .recover_interrupted_runs(now_millis())
+            .await
+            .map_err(repository_port_error)?;
+        self.ensure_default_provider().await
     }
 
     async fn ensure_default_provider(&self) -> AppResult<()> {
@@ -103,25 +96,25 @@ impl DefaultApplicationBackend {
             .repository
             .list_provider_profiles()
             .await
-            .map_err(repository_error)?
+            .map_err(repository_port_error)?
             .is_empty()
         {
             return Ok(());
         }
         let now = now_millis();
         self.repository
-            .save_provider_profile(&ProviderProfileRecord {
+            .save_provider_profile(ProviderProfile {
                 id: DEFAULT_PROVIDER_ID.into(),
                 name: "Local Ollama".into(),
-                dialect: "ollama_chat".into(),
+                dialect: domain::ProviderDialect::Ollama,
                 base_url: "http://127.0.0.1:11434".into(),
-                default_model: "qwen3".into(),
-                parameters_json: json!({ INTERNAL_DEFAULT_KEY: true }).to_string(),
+                model: "qwen3".into(),
+                parameters: BTreeMap::from([(INTERNAL_DEFAULT_KEY.into(), "true".into())]),
                 created_at: now,
                 updated_at: now,
             })
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         Ok(())
     }
 
@@ -159,13 +152,17 @@ impl DefaultApplicationBackend {
             .repository
             .get_workspace(&input.workspace_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let profile = self
             .repository
             .get_provider_profile(&input.provider_profile_id)
             .await
-            .map_err(repository_error)?;
-        let graph = load_graph(&self.repository, &input.workspace_id).await?;
+            .map_err(repository_port_error)?;
+        let graph = self
+            .repository
+            .load_conversation_graph(&input.workspace_id)
+            .await
+            .map_err(repository_port_error)?;
         let key = Self::override_key(&input.workspace_id, input.parent_run_id.as_deref());
         let override_items = self.overrides_for(&key)?;
         let request = ContextCompileRequest {
@@ -225,7 +222,7 @@ impl DefaultApplicationBackend {
             warnings: actual.warnings.iter().map(context_warning).collect(),
             provider_profile_id: profile.id,
             provider_name: profile.name,
-            model: profile.default_model,
+            model: profile.model,
             base_url: profile.base_url,
             items,
         })
@@ -233,7 +230,7 @@ impl DefaultApplicationBackend {
 }
 
 fn spawn_run(
-    repository: SqliteRepository,
+    run_persistence: Arc<dyn RunPersistencePort>,
     provider: Arc<dyn ProviderGateway>,
     registry: Arc<Mutex<HashMap<String, CancellationToken>>>,
     invocation: ProviderInvocation,
@@ -241,17 +238,17 @@ fn spawn_run(
     events: Arc<dyn RunEventSink>,
 ) {
     let run_id = invocation.request.run_id.clone();
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         let (sender, receiver) = mpsc::channel(128);
         let provider_cancellation = cancellation.clone();
         let persistence_cancellation = cancellation.clone();
-        let provider_task = tauri::async_runtime::spawn(async move {
+        let provider_task = tokio::spawn(async move {
             provider
                 .stream(invocation, provider_cancellation, sender)
                 .await
         });
         run_event_loop(
-            &repository,
+            run_persistence.as_ref(),
             &run_id,
             receiver,
             events,
@@ -266,13 +263,11 @@ fn spawn_run(
 }
 
 async fn run_event_loop(
-    repository: &SqliteRepository,
+    repository: &dyn RunPersistencePort,
     run_id: &str,
     mut receiver: mpsc::Receiver<RunEvent>,
     sink: Arc<dyn RunEventSink>,
-    provider_task: tauri::async_runtime::JoinHandle<
-        Result<(), crate::ports::provider::ProviderError>,
-    >,
+    provider_task: tokio::task::JoinHandle<Result<(), crate::ports::provider::ProviderError>>,
     cancellation: CancellationToken,
 ) {
     let mut output = String::new();
@@ -291,9 +286,14 @@ async fn run_event_loop(
             }
             _ = checkpoint_interval.tick(), if bytes_since_checkpoint > 0 => {
                 match checkpoint(repository, run_id, &output, &reasoning, usage.as_ref()).await {
-                    Ok(()) => {
+                    Ok(CheckpointOutcome::Saved) => {
                         bytes_since_checkpoint = 0;
                         send_checkpoint_saved(run_id, &sink, output.len());
+                    }
+                    Ok(CheckpointOutcome::SkippedTerminal(_)) => {
+                        cancellation.cancel();
+                        terminal = true;
+                        break;
                     }
                     Err(error) => {
                         cancellation.cancel();
@@ -360,7 +360,14 @@ async fn run_event_loop(
                     RunEvent::RunCompleted { .. } => {
                         flush_deltas(run_id, &sink, &mut pending_output, &mut pending_reasoning);
                         match checkpoint(repository, run_id, &output, &reasoning, usage.as_ref()).await {
-                            Ok(()) => send_checkpoint_saved(run_id, &sink, output.len()),
+                            Ok(CheckpointOutcome::Saved) => {
+                                send_checkpoint_saved(run_id, &sink, output.len())
+                            }
+                            Ok(CheckpointOutcome::SkippedTerminal(_)) => {
+                                cancellation.cancel();
+                                terminal = true;
+                                break;
+                            }
                             Err(error) => {
                                 cancellation.cancel();
                                 finalize_storage_failure(
@@ -372,15 +379,15 @@ async fn run_event_loop(
                                 break;
                             }
                         }
-                        let finish = RunFinish {
-                            status: RunStatusRecord::Completed,
-                            output_markdown: output.clone(),
-                            reasoning_markdown: reasoning.clone(),
-                            usage_json: usage.as_ref().and_then(|value| serde_json::to_string(value).ok()),
-                            error_json: None,
-                            finished_at: now_millis(),
-                        };
-                        match repository.finish_run(run_id, &finish).await {
+                        match persist_terminal_run(
+                            repository,
+                            run_id,
+                            RunStatus::Completed,
+                            &output,
+                            &reasoning,
+                            usage.as_ref(),
+                            None,
+                        ).await {
                             Ok(()) => {
                                 let _ = sink.send(RunEventView::RunCompleted {
                                     api_version: CONTRACT_VERSION,
@@ -401,22 +408,20 @@ async fn run_event_loop(
                     }
                     RunEvent::RunFailed { code, message, retryable, status } => {
                         flush_deltas(run_id, &sink, &mut pending_output, &mut pending_reasoning);
-                        let error_json = json!({
-                            "code": code,
-                            "message": message,
-                            "retryable": retryable,
-                            "status": status,
-                        })
-                        .to_string();
-                        let finish = RunFinish {
-                            status: RunStatusRecord::Failed,
-                            output_markdown: output.clone(),
-                            reasoning_markdown: reasoning.clone(),
-                            usage_json: usage.as_ref().and_then(|value| serde_json::to_string(value).ok()),
-                            error_json: Some(error_json),
-                            finished_at: now_millis(),
-                        };
-                        match repository.finish_run(run_id, &finish).await {
+                        match persist_terminal_run(
+                            repository,
+                            run_id,
+                            RunStatus::Failed,
+                            &output,
+                            &reasoning,
+                            usage.as_ref(),
+                            Some(RunFailure {
+                                code: code.clone(),
+                                message: message.clone(),
+                                retryable,
+                                status,
+                            }),
+                        ).await {
                             Ok(()) => {
                                 let _ = sink.send(RunEventView::RunFailed {
                                     api_version: CONTRACT_VERSION,
@@ -443,15 +448,15 @@ async fn run_event_loop(
                     }
                     RunEvent::RunCancelled => {
                         flush_deltas(run_id, &sink, &mut pending_output, &mut pending_reasoning);
-                        let finish = RunFinish {
-                            status: RunStatusRecord::Cancelled,
-                            output_markdown: output.clone(),
-                            reasoning_markdown: reasoning.clone(),
-                            usage_json: usage.as_ref().and_then(|value| serde_json::to_string(value).ok()),
-                            error_json: None,
-                            finished_at: now_millis(),
-                        };
-                        match repository.finish_run(run_id, &finish).await {
+                        match persist_terminal_run(
+                            repository,
+                            run_id,
+                            RunStatus::Cancelled,
+                            &output,
+                            &reasoning,
+                            usage.as_ref(),
+                            None,
+                        ).await {
                             Ok(()) => {
                                 let _ = sink.send(RunEventView::RunCancelled {
                                     api_version: CONTRACT_VERSION,
@@ -473,9 +478,14 @@ async fn run_event_loop(
                 }
                 if bytes_since_checkpoint >= 4096 {
                     match checkpoint(repository, run_id, &output, &reasoning, usage.as_ref()).await {
-                        Ok(()) => {
+                        Ok(CheckpointOutcome::Saved) => {
                             bytes_since_checkpoint = 0;
                             send_checkpoint_saved(run_id, &sink, output.len());
+                        }
+                        Ok(CheckpointOutcome::SkippedTerminal(_)) => {
+                            cancellation.cancel();
+                            terminal = true;
+                            break;
                         }
                         Err(error) => {
                             cancellation.cancel();
@@ -500,17 +510,22 @@ async fn run_event_loop(
             Ok(Err(error)) => error.to_string(),
             Err(error) => format!("Provider task failed: {error}"),
         };
-        let finish = RunFinish {
-            status: RunStatusRecord::Failed,
-            output_markdown: output,
-            reasoning_markdown: reasoning,
-            usage_json: usage
-                .as_ref()
-                .and_then(|value| serde_json::to_string(value).ok()),
-            error_json: Some(json!({"code":"provider_stream_ended","message":message}).to_string()),
-            finished_at: now_millis(),
-        };
-        match repository.finish_run(run_id, &finish).await {
+        match persist_terminal_run(
+            repository,
+            run_id,
+            RunStatus::Failed,
+            &output,
+            &reasoning,
+            usage.as_ref(),
+            Some(RunFailure {
+                code: "provider_stream_ended".into(),
+                message: message.clone(),
+                retryable: true,
+                status: None,
+            }),
+        )
+        .await
+        {
             Ok(()) => {
                 let _ = sink.send(RunEventView::RunFailed {
                     api_version: CONTRACT_VERSION,
@@ -528,8 +543,8 @@ async fn run_event_loop(
                 finalize_storage_failure(
                     repository,
                     run_id,
-                    &finish.output_markdown,
-                    &finish.reasoning_markdown,
+                    &output,
+                    &reasoning,
                     usage.as_ref(),
                     &sink,
                     &error,
@@ -576,24 +591,31 @@ fn send_checkpoint_saved(run_id: &str, sink: &Arc<dyn RunEventSink>, output_byte
 }
 
 async fn finalize_storage_failure(
-    repository: &SqliteRepository,
+    repository: &dyn RunPersistencePort,
     run_id: &str,
     output: &str,
     reasoning: &str,
     usage: Option<&Usage>,
     sink: &Arc<dyn RunEventSink>,
-    error: &RepositoryError,
+    error: &RepositoryPortError,
 ) {
     let message = format!("Run output could not be persisted: {error}");
-    let finish = RunFinish {
-        status: RunStatusRecord::Failed,
-        output_markdown: output.into(),
-        reasoning_markdown: reasoning.into(),
-        usage_json: usage.and_then(|value| serde_json::to_string(value).ok()),
-        error_json: Some(json!({"code":"storage_failure","message":message}).to_string()),
-        finished_at: now_millis(),
-    };
-    let committed = repository.finish_run(run_id, &finish).await.is_ok();
+    let committed = persist_terminal_run(
+        repository,
+        run_id,
+        RunStatus::Failed,
+        output,
+        reasoning,
+        usage,
+        Some(RunFailure {
+            code: "storage_failure".into(),
+            message: message.clone(),
+            retryable: true,
+            status: None,
+        }),
+    )
+    .await
+    .is_ok();
     let event = storage_failure_event(run_id, message, committed);
     let _ = sink.send(event);
 }
@@ -627,134 +649,75 @@ fn storage_failure_event(run_id: &str, message: String, committed: bool) -> RunE
 }
 
 async fn checkpoint(
-    repository: &SqliteRepository,
+    repository: &dyn RunPersistencePort,
     run_id: &str,
     output: &str,
     reasoning: &str,
     usage: Option<&Usage>,
-) -> Result<(), RepositoryError> {
+) -> Result<CheckpointOutcome, RepositoryPortError> {
     repository
         .checkpoint_run(
             run_id,
-            &RunCheckpoint {
+            RunCheckpoint {
                 output_markdown: output.into(),
                 reasoning_markdown: reasoning.into(),
-                usage_json: usage.and_then(|value| serde_json::to_string(value).ok()),
+                usage: usage.map(domain_usage),
                 checkpointed_at: now_millis(),
             },
         )
         .await
 }
 
-async fn load_graph(
-    repository: &SqliteRepository,
-    workspace_id: &str,
-) -> AppResult<ConversationGraph> {
-    let turn_records = repository
-        .list_turns(workspace_id)
-        .await
-        .map_err(repository_error)?;
-    let mut turns = Vec::with_capacity(turn_records.len());
-    let mut runs = Vec::new();
-    let mut blocks = Vec::new();
-    for turn in turn_records {
-        blocks.push(domain::ContentBlock {
-            id: turn.id.clone(),
-            workspace_id: turn.workspace_id.clone(),
-            role: MessageRole::User,
-            content_hash: domain::sha256_hex(turn.prompt_markdown.as_bytes()),
-            content: turn.prompt_markdown.clone(),
-            created_at: turn.created_at,
-        });
-        turns.push(domain::Turn {
-            id: turn.id.clone(),
-            workspace_id: turn.workspace_id,
-            parent_run_id: turn.parent_run_id,
-            prompt_markdown: turn.prompt_markdown,
-            title: (!turn.title.is_empty()).then_some(turn.title),
-            created_at: turn.created_at,
-        });
-        for record in repository
-            .list_runs_for_turn(&turn.id)
-            .await
-            .map_err(repository_error)?
-        {
-            let run = domain_run(&record)?;
-            blocks.push(domain::ContentBlock {
-                id: record.id.clone(),
-                workspace_id: record.workspace_id,
-                role: MessageRole::Assistant,
-                content_hash: domain::sha256_hex(record.output_markdown.as_bytes()),
-                content: record.output_markdown,
-                created_at: record.created_at,
-            });
-            runs.push(run);
-        }
-    }
-    ConversationGraph::try_new(turns, runs, blocks).map_err(domain_error)
-}
-
-fn domain_run(record: &ModelRunRecord) -> AppResult<ModelRun> {
-    let usage = record
-        .usage_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<Usage>(json).ok())
-        .map(|usage| {
-            domain::RunUsage::new(
-                usage.prompt_tokens.unwrap_or(0),
-                usage.completion_tokens.unwrap_or(0),
-            )
-        });
-    let error = record.error_json.as_deref().map(|value| {
-        serde_json::from_str::<Value>(value)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| value.to_owned())
-    });
-    ModelRun::rehydrate(
-        RunDraft {
-            id: record.id.clone(),
-            turn_id: record.turn_id.clone(),
-            provider_profile_id: record.provider_profile_id.clone(),
-            model: record.model.clone(),
-            created_at: record.created_at,
-        },
-        RunStateSnapshot {
-            status: domain_run_status(record.status),
-            output_markdown: record.output_markdown.clone(),
-            reasoning_markdown: record.reasoning_markdown.clone(),
-            error,
-            usage,
-            started_at: record.started_at,
-            checkpointed_at: record.checkpointed_at,
-            finished_at: record.finished_at,
-        },
+fn domain_usage(usage: &Usage) -> domain::RunUsage {
+    domain::RunUsage::new(
+        usage.prompt_tokens.unwrap_or(0),
+        usage.completion_tokens.unwrap_or(0),
     )
-    .map_err(domain_error)
 }
 
-fn exact_retry_turn_id(original: &ModelRunRecord) -> &str {
+async fn persist_terminal_run(
+    repository: &dyn RunPersistencePort,
+    run_id: &str,
+    status: RunStatus,
+    output: &str,
+    reasoning: &str,
+    usage: Option<&Usage>,
+    error: Option<RunFailure>,
+) -> Result<(), RepositoryPortError> {
+    repository
+        .finish_run(
+            run_id,
+            RunFinish {
+                status,
+                output_markdown: output.into(),
+                reasoning_markdown: reasoning.into(),
+                error,
+                usage: usage.map(domain_usage),
+                finished_at: now_millis(),
+            },
+        )
+        .await
+}
+
+fn exact_retry_turn_id(original: &ModelRun) -> &str {
     &original.turn_id
 }
 
 fn content_blocks_for_manifest(
+    workspace_id: &str,
     items: &[domain::RunContextItem],
     now: i64,
-) -> Vec<ContentBlockRecord> {
+) -> Vec<domain::ContentBlock> {
     items
         .iter()
         .map(|item| {
             let id = content_block_id(message_role_name(item.role), &item.content_hash);
             (
                 id.clone(),
-                ContentBlockRecord {
+                domain::ContentBlock {
                     id,
-                    role: message_role_name(item.role).into(),
+                    workspace_id: workspace_id.into(),
+                    role: item.role,
                     content: item.content.clone(),
                     content_hash: item.content_hash.clone(),
                     created_at: now,
@@ -770,121 +733,76 @@ fn content_block_id(role: &str, content_hash: &str) -> String {
     format!("block-{role}-{content_hash}")
 }
 
-fn workspace_view(record: WorkspaceRecord) -> WorkspaceSummary {
+fn workspace_view(record: Workspace) -> WorkspaceSummary {
     WorkspaceSummary {
         id: record.id,
         name: record.title,
-        goal: record.system_prompt,
+        goal: record.goal,
+        system_prompt: record.system_prompt,
         archived: record.archived_at.is_some(),
         created_at: timestamp_view(record.created_at),
         updated_at: timestamp_view(record.updated_at),
     }
 }
 
-fn run_view(
-    record: &ModelRunRecord,
-    profile: Option<&ProviderProfileRecord>,
-) -> AppResult<RunView> {
-    let provider_snapshot =
-        serde_json::from_str::<Value>(&record.provider_snapshot_json).map_err(json_error)?;
-    let usage = record
-        .usage_json
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<Usage>(value).ok())
-        .map(|usage| usage_map(&usage));
-    let error = record.error_json.as_deref().map(|value| {
-        let parsed = serde_json::from_str::<Value>(value).unwrap_or(Value::Null);
-        RunErrorView {
-            code: parsed
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("run_failed")
-                .into(),
-            message: parsed
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or(value)
-                .into(),
-            retryable: parsed
-                .get("retryable")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            status: parsed
-                .get("status")
-                .and_then(Value::as_u64)
-                .and_then(|status| u16::try_from(status).ok()),
-        }
+fn run_view(record: &ModelRun, profile: Option<&ProviderProfile>) -> AppResult<RunView> {
+    let usage = record.usage().map(|usage| {
+        BTreeMap::from([
+            ("prompt_tokens".into(), usage.input_tokens),
+            ("completion_tokens".into(), usage.output_tokens),
+        ])
     });
+    let error = record.failure().map(|failure| RunErrorView {
+        code: failure.code.clone(),
+        message: failure.message.clone(),
+        retryable: failure.retryable,
+        status: failure.status,
+    });
+    let state = record.state_snapshot();
     Ok(RunView {
         id: record.id.clone(),
         turn_id: record.turn_id.clone(),
-        status: run_status_view(record.status),
-        output: record.output_markdown.clone(),
-        reasoning: (!record.reasoning_markdown.is_empty())
-            .then_some(record.reasoning_markdown.clone()),
+        status: domain_run_status_view(record.status()),
+        output: record.output_markdown().into(),
+        reasoning: (!record.reasoning_markdown().is_empty())
+            .then(|| record.reasoning_markdown().to_owned()),
         provider_profile_id: record.provider_profile_id.clone().unwrap_or_default(),
         provider_name: profile
             .map(|profile| profile.name.clone())
-            .or_else(|| {
-                provider_snapshot
-                    .get("providerName")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
             .unwrap_or_else(|| "Unknown provider".into()),
         model: record.model.clone(),
         base_url: profile
             .map(|profile| profile.base_url.clone())
-            .or_else(|| {
-                provider_snapshot
-                    .get("baseUrl")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
             .unwrap_or_default(),
         created_at: timestamp_view(record.created_at),
-        completed_at: record.finished_at.map(timestamp_view),
+        completed_at: state.finished_at.map(timestamp_view),
         usage,
         error,
     })
 }
 
-fn receipt_view(receipt: StoredRunReceipt) -> AppResult<RunSnapshotView> {
-    let parameters =
-        serde_json::from_str::<BTreeMap<String, Value>>(&receipt.snapshot.parameters_json)
-            .map_err(json_error)?;
+fn receipt_view(receipt: domain::ContextSnapshot) -> AppResult<RunSnapshotView> {
+    let parameters = receipt
+        .provider
+        .parameters
+        .iter()
+        .map(|(key, value)| (key.clone(), parse_parameter_value(value)))
+        .collect();
     Ok(RunSnapshotView {
-        id: receipt.snapshot.id,
-        run_id: receipt.snapshot.run_id,
-        canonical_hash: receipt.snapshot.canonical_hash,
-        created_at: timestamp_view(receipt.snapshot.created_at),
-        provider_name: receipt.snapshot.provider,
-        model: receipt.snapshot.model,
-        base_url: receipt.snapshot.base_url,
+        id: receipt.id,
+        run_id: receipt.run_id,
+        canonical_hash: receipt.manifest.canonical_hash,
+        created_at: timestamp_view(receipt.created_at),
+        provider_name: receipt.provider.provider_name,
+        model: receipt.provider.model,
+        base_url: receipt.provider.base_url,
         parameters,
         items: receipt
+            .manifest
             .items
             .iter()
-            .map(|item| stored_context_item_view(item, false))
-            .collect::<AppResult<Vec<_>>>()?,
-    })
-}
-
-fn stored_context_item_view(item: &StoredContextItem, pinned: bool) -> AppResult<ContextItemView> {
-    Ok(ContextItemView {
-        id: item
-            .source_id
-            .clone()
-            .unwrap_or_else(|| format!("manifest-item-{}", item.position)),
-        ordinal: u32::try_from(item.position).unwrap_or(u32::MAX),
-        role: message_role_view(&item.role)?,
-        label: source_label(&item.source_kind),
-        source: item.source_kind.clone(),
-        content: item.content.clone(),
-        reason: item.inclusion_reason.clone(),
-        estimated_tokens: chars_to_tokens(item.content.chars().count()),
-        included: true,
-        pinned,
+            .map(|item| context_item_view(item, true, false))
+            .collect(),
     })
 }
 
@@ -910,9 +828,12 @@ fn context_item_view(
     }
 }
 
-fn provider_profile_view(record: ProviderProfileRecord) -> AppResult<ProviderProfileView> {
-    let mut parameters = serde_json::from_str::<BTreeMap<String, Value>>(&record.parameters_json)
-        .map_err(json_error)?;
+fn provider_profile_view(record: ProviderProfile) -> AppResult<ProviderProfileView> {
+    let mut parameters = record
+        .parameters
+        .iter()
+        .map(|(key, value)| (key.clone(), parse_parameter_value(value)))
+        .collect::<BTreeMap<_, _>>();
     let is_default = parameters
         .remove(INTERNAL_DEFAULT_KEY)
         .and_then(|value| value.as_bool())
@@ -920,96 +841,77 @@ fn provider_profile_view(record: ProviderProfileRecord) -> AppResult<ProviderPro
     Ok(ProviderProfileView {
         id: record.id,
         name: record.name,
-        dialect: match record.dialect.as_str() {
-            "openai_chat_completions" => ProviderDialectView::OpenaiCompatible,
-            "ollama_chat" => ProviderDialectView::Ollama,
-            other => {
-                return Err(AppError::internal(
-                    "invalid_provider_dialect",
-                    format!("Unknown persisted provider dialect: {other}"),
-                ));
-            }
+        dialect: match record.dialect {
+            domain::ProviderDialect::OpenAiCompatible => ProviderDialectView::OpenaiCompatible,
+            domain::ProviderDialect::Ollama => ProviderDialectView::Ollama,
         },
         base_url: record.base_url,
-        model: record.default_model,
+        model: record.model,
         is_default,
         parameters: (!parameters.is_empty()).then_some(parameters),
     })
 }
 
-fn domain_provider_snapshot(record: &ProviderProfileRecord) -> AppResult<domain::ProviderSnapshot> {
-    let parameters = provider_parameters(record)?
-        .into_iter()
-        .map(|(key, value)| {
-            let value = value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.to_string());
-            (key, value)
-        })
+fn domain_provider_snapshot(record: &ProviderProfile) -> AppResult<domain::ProviderSnapshot> {
+    let parameters = record
+        .parameters
+        .iter()
+        .filter(|(key, _)| key.as_str() != INTERNAL_DEFAULT_KEY)
+        .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(domain::ProviderSnapshot {
         profile_id: record.id.clone(),
         provider_name: record.name.clone(),
-        dialect: match record.dialect.as_str() {
-            "openai_chat_completions" => domain::ProviderDialect::OpenAiCompatible,
-            "ollama_chat" => domain::ProviderDialect::Ollama,
-            other => {
-                return Err(AppError::internal(
-                    "invalid_provider_dialect",
-                    format!("Unknown persisted provider dialect: {other}"),
-                ));
-            }
-        },
+        dialect: record.dialect,
         base_url: record.base_url.clone(),
-        model: record.default_model.clone(),
+        model: record.model.clone(),
         parameters,
     })
 }
 
-fn provider_parameters(record: &ProviderProfileRecord) -> AppResult<Map<String, Value>> {
-    let mut parameters =
-        serde_json::from_str::<Map<String, Value>>(&record.parameters_json).map_err(json_error)?;
-    parameters.remove(INTERNAL_DEFAULT_KEY);
-    Ok(parameters)
+fn parse_parameter_value(value: &str) -> Value {
+    serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.into()))
 }
 
-fn decision_view(record: DecisionMarkRecord) -> AppResult<DecisionMarkView> {
+fn provider_parameters(record: &ProviderProfile) -> AppResult<Map<String, Value>> {
+    Ok(record
+        .parameters
+        .iter()
+        .filter(|(key, _)| key.as_str() != INTERNAL_DEFAULT_KEY)
+        .map(|(key, value)| (key.clone(), parse_parameter_value(value)))
+        .collect())
+}
+
+fn decision_view(record: DecisionMark) -> AppResult<DecisionMarkView> {
     Ok(DecisionMarkView {
         id: record.id,
         workspace_id: record.workspace_id,
         run_id: record.run_id,
-        status: match record.status.as_str() {
-            "adopted" => DecisionStatusView::Accepted,
-            "rejected" => DecisionStatusView::Rejected,
-            "needs_validation" => DecisionStatusView::ToVerify,
-            other => {
-                return Err(AppError::internal(
-                    "invalid_decision_status",
-                    format!("Unknown persisted decision status: {other}"),
-                ));
-            }
+        status: match record.status {
+            DecisionStatus::Adopted => DecisionStatusView::Accepted,
+            DecisionStatus::Rejected => DecisionStatusView::Rejected,
+            DecisionStatus::NeedsValidation => DecisionStatusView::ToVerify,
         },
         reason: record.reason,
         created_at: timestamp_view(record.created_at),
     })
 }
 
-fn context_diff_item(item: &StoredContextItem) -> ContextDiffItemView {
+fn context_diff_item(item: &domain::RunContextItem) -> ContextDiffItemView {
     ContextDiffItemView {
         id: context_item_identity(item),
         ordinal: u32::try_from(item.position).unwrap_or(u32::MAX),
-        role: message_role_view(&item.role).unwrap_or(MessageRoleView::User),
-        source: item.source_kind.clone(),
+        role: domain_message_role_view(item.role),
+        source: context_source_name(item.source_kind).into(),
         preview: item.content.chars().take(180).collect(),
     }
 }
 
-fn context_item_identity(item: &StoredContextItem) -> String {
+fn context_item_identity(item: &domain::RunContextItem) -> String {
     format!(
         "{}:{}:{}:{}",
         item.content_hash,
-        item.source_kind,
+        context_source_name(item.source_kind),
         item.source_id.as_deref().unwrap_or("current"),
         item.position,
     )
@@ -1017,8 +919,8 @@ fn context_item_identity(item: &StoredContextItem) -> String {
 
 fn exact_lineage_ids(
     current_run_id: Option<&str>,
-    turns: &[TurnRecord],
-    runs: &HashMap<String, ModelRunRecord>,
+    turns: &[Turn],
+    runs: &HashMap<String, ModelRun>,
 ) -> BTreeSet<String> {
     let turn_by_id = turns
         .iter()
@@ -1040,8 +942,8 @@ fn exact_lineage_ids(
 
 fn effective_route_run_id(
     requested_run_id: Option<&str>,
-    runs: &HashMap<String, ModelRunRecord>,
-    branch_pointers: &[BranchPointerRecord],
+    runs: &HashMap<String, ModelRun>,
+    branch_pointers: &[BranchPointer],
 ) -> Option<String> {
     requested_run_id
         .filter(|run_id| runs.contains_key(*run_id))
@@ -1070,22 +972,18 @@ fn decision_problem<'a>(
         .unwrap_or(workspace_goal)
 }
 
-fn decision_status_record(status: DecisionStatusView) -> &'static str {
+fn decision_status_domain(status: DecisionStatusView) -> DecisionStatus {
     match status {
-        DecisionStatusView::Accepted => "adopted",
-        DecisionStatusView::Rejected => "rejected",
-        DecisionStatusView::ToVerify => "needs_validation",
+        DecisionStatusView::Accepted => DecisionStatus::Adopted,
+        DecisionStatusView::Rejected => DecisionStatus::Rejected,
+        DecisionStatusView::ToVerify => DecisionStatus::NeedsValidation,
     }
 }
 
-fn provider_dialect(value: &str) -> AppResult<ProviderDialect> {
+fn provider_dialect(value: domain::ProviderDialect) -> ProviderDialect {
     match value {
-        "openai_chat_completions" => Ok(ProviderDialect::OpenAiChatCompletions),
-        "ollama_chat" => Ok(ProviderDialect::OllamaChat),
-        other => Err(AppError::internal(
-            "invalid_provider_dialect",
-            format!("Unknown persisted provider dialect: {other}"),
-        )),
+        domain::ProviderDialect::OpenAiCompatible => ProviderDialect::OpenAiChatCompletions,
+        domain::ProviderDialect::Ollama => ProviderDialect::OllamaChat,
     }
 }
 
@@ -1095,26 +993,6 @@ fn provider_message_role(role: MessageRole) -> ProviderMessageRole {
         MessageRole::User => ProviderMessageRole::User,
         MessageRole::Assistant => ProviderMessageRole::Assistant,
     }
-}
-
-fn provider_message_role_from_name(role: &str) -> AppResult<ProviderMessageRole> {
-    match role {
-        "system" => Ok(ProviderMessageRole::System),
-        "user" => Ok(ProviderMessageRole::User),
-        "assistant" => Ok(ProviderMessageRole::Assistant),
-        other => Err(AppError::internal(
-            "invalid_message_role",
-            format!("Unknown persisted message role: {other}"),
-        )),
-    }
-}
-
-fn message_role_view(role: &str) -> AppResult<MessageRoleView> {
-    Ok(match provider_message_role_from_name(role)? {
-        ProviderMessageRole::System => MessageRoleView::System,
-        ProviderMessageRole::User => MessageRoleView::User,
-        ProviderMessageRole::Assistant => MessageRoleView::Assistant,
-    })
 }
 
 fn domain_message_role_view(role: MessageRole) -> MessageRoleView {
@@ -1179,27 +1057,15 @@ fn context_warning(warning: &ContextWarning) -> String {
     }
 }
 
-fn run_status_view(status: RunStatusRecord) -> RunStatusView {
+fn domain_run_status_view(status: RunStatus) -> RunStatusView {
     match status {
-        RunStatusRecord::Queued => RunStatusView::Pending,
-        RunStatusRecord::Connecting => RunStatusView::Connecting,
-        RunStatusRecord::Streaming => RunStatusView::Streaming,
-        RunStatusRecord::Completed => RunStatusView::Completed,
-        RunStatusRecord::Cancelled => RunStatusView::Cancelled,
-        RunStatusRecord::Failed => RunStatusView::Failed,
-        RunStatusRecord::Interrupted => RunStatusView::Interrupted,
-    }
-}
-
-fn domain_run_status(status: RunStatusRecord) -> RunStatus {
-    match status {
-        RunStatusRecord::Queued => RunStatus::Queued,
-        RunStatusRecord::Connecting => RunStatus::Connecting,
-        RunStatusRecord::Streaming => RunStatus::Streaming,
-        RunStatusRecord::Completed => RunStatus::Completed,
-        RunStatusRecord::Cancelled => RunStatus::Cancelled,
-        RunStatusRecord::Failed => RunStatus::Failed,
-        RunStatusRecord::Interrupted => RunStatus::Interrupted,
+        RunStatus::Queued => RunStatusView::Pending,
+        RunStatus::Connecting => RunStatusView::Connecting,
+        RunStatus::Streaming => RunStatusView::Streaming,
+        RunStatus::Completed => RunStatusView::Completed,
+        RunStatus::Cancelled => RunStatusView::Cancelled,
+        RunStatus::Failed => RunStatusView::Failed,
+        RunStatus::Interrupted => RunStatusView::Interrupted,
     }
 }
 
@@ -1263,29 +1129,23 @@ fn timestamp_view(timestamp: i64) -> String {
         .to_rfc3339()
 }
 
-fn repository_error(error: RepositoryError) -> AppError {
+fn repository_port_error(error: RepositoryPortError) -> AppError {
     match error {
-        RepositoryError::NotFound { entity, id } => {
+        RepositoryPortError::NotFound { entity, id } => {
             AppError::validation("not_found", format!("{entity} {id} was not found"))
         }
-        RepositoryError::Conflict(message) => AppError::validation("conflict", message),
-        RepositoryError::InvalidInput(message) => {
-            AppError::validation("invalid_repository_input", message)
+        RepositoryPortError::Conflict(message) => AppError::validation("conflict", message),
+        RepositoryPortError::InvalidData(message) => {
+            AppError::validation("invalid_repository_data", message)
         }
-        other => AppError::internal("repository_error", other.to_string()),
+        RepositoryPortError::Unavailable(message) => {
+            AppError::internal("repository_error", message)
+        }
     }
 }
 
 fn domain_error(error: domain::DomainError) -> AppError {
     AppError::validation("domain_invariant", error.to_string())
-}
-
-fn json_error(error: serde_json::Error) -> AppError {
-    AppError::internal("invalid_json", error.to_string())
-}
-
-fn io_error(error: std::io::Error) -> AppError {
-    AppError::internal("filesystem_error", error.to_string())
 }
 
 impl ApplicationBackend for DefaultApplicationBackend {
@@ -1294,7 +1154,7 @@ impl ApplicationBackend for DefaultApplicationBackend {
             self.repository
                 .list_workspaces(include_archived)
                 .await
-                .map_err(repository_error)
+                .map_err(repository_port_error)
                 .map(|records| records.into_iter().map(workspace_view).collect())
         })
     }
@@ -1303,13 +1163,20 @@ impl ApplicationBackend for DefaultApplicationBackend {
         Box::pin(async move {
             let now = now_millis();
             self.repository
-                .create_workspace(&WorkspaceRecord {
+                .save_workspace(Workspace {
                     id: Uuid::new_v4().to_string(),
                     title: input.name,
-                    system_prompt: if input.goal.trim().is_empty() {
+                    goal: input.goal,
+                    system_prompt: if input
+                        .system_prompt
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                    {
                         DEFAULT_SYSTEM_PROMPT.into()
                     } else {
-                        input.goal
+                        input.system_prompt.unwrap_or_default()
                     },
                     created_at: now,
                     updated_at: now,
@@ -1317,7 +1184,7 @@ impl ApplicationBackend for DefaultApplicationBackend {
                 })
                 .await
                 .map(workspace_view)
-                .map_err(repository_error)
+                .map_err(repository_port_error)
         })
     }
 
@@ -1331,23 +1198,25 @@ impl ApplicationBackend for DefaultApplicationBackend {
                 .repository
                 .get_workspace(&input.id)
                 .await
-                .map_err(repository_error)?;
+                .map_err(repository_port_error)?;
             let archived_at = match input.archived {
                 Some(true) => current.archived_at.or_else(|| Some(now_millis())),
                 Some(false) => None,
                 None => current.archived_at,
             };
             self.repository
-                .update_workspace(
-                    &input.id,
-                    input.name.as_deref().unwrap_or(&current.title),
-                    input.goal.as_deref().unwrap_or(&current.system_prompt),
+                .save_workspace(Workspace {
+                    id: current.id,
+                    title: input.name.unwrap_or(current.title),
+                    goal: input.goal.unwrap_or(current.goal),
+                    system_prompt: input.system_prompt.unwrap_or(current.system_prompt),
+                    created_at: current.created_at,
+                    updated_at: now_millis(),
                     archived_at,
-                    now_millis(),
-                )
+                })
                 .await
                 .map(workspace_view)
-                .map_err(repository_error)
+                .map_err(repository_port_error)
         })
     }
 
@@ -1389,9 +1258,9 @@ impl ApplicationBackend for DefaultApplicationBackend {
     fn get_run_snapshot(&self, run_id: EntityId) -> AppFuture<'_, RunSnapshotView> {
         Box::pin(async move {
             self.repository
-                .get_run_receipt(&run_id)
+                .get_run_snapshot(&run_id)
                 .await
-                .map_err(repository_error)
+                .map_err(repository_port_error)
                 .and_then(receipt_view)
         })
     }
@@ -1423,7 +1292,7 @@ impl ApplicationBackend for DefaultApplicationBackend {
     fn update_view_state(&self, input: UpdateViewStateInput) -> AppFuture<'_, ()> {
         Box::pin(async move {
             self.repository
-                .save_view_state(&ViewStateRecord {
+                .save_view_state(ViewState {
                     workspace_id: input.workspace_id,
                     view_key: format!("route-node:{}", input.turn_id),
                     state_json: json!({
@@ -1435,7 +1304,7 @@ impl ApplicationBackend for DefaultApplicationBackend {
                     updated_at: now_millis(),
                 })
                 .await
-                .map_err(repository_error)?;
+                .map_err(repository_port_error)?;
             Ok(())
         })
     }
@@ -1460,7 +1329,7 @@ impl ApplicationBackend for DefaultApplicationBackend {
             self.repository
                 .list_provider_profiles()
                 .await
-                .map_err(repository_error)
+                .map_err(repository_port_error)
                 .and_then(|records| records.into_iter().map(provider_profile_view).collect())
         })
     }
@@ -1487,12 +1356,12 @@ impl DefaultApplicationBackend {
             .repository
             .get_workspace(workspace_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let profiles = self
             .repository
             .list_provider_profiles()
             .await
-            .map_err(repository_error)?
+            .map_err(repository_port_error)?
             .into_iter()
             .map(|profile| (profile.id.clone(), profile))
             .collect::<HashMap<_, _>>();
@@ -1500,7 +1369,7 @@ impl DefaultApplicationBackend {
             .repository
             .list_turns(workspace_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let mut selected_run_ids = BTreeMap::new();
         let mut turn_views = Vec::with_capacity(turns.len());
         for turn in turns {
@@ -1508,7 +1377,7 @@ impl DefaultApplicationBackend {
                 .repository
                 .list_runs_for_turn(&turn.id)
                 .await
-                .map_err(repository_error)?;
+                .map_err(repository_port_error)?;
             let views = run_records
                 .iter()
                 .map(|run| {
@@ -1521,7 +1390,7 @@ impl DefaultApplicationBackend {
             if let Some(selected) = run_records
                 .iter()
                 .rev()
-                .find(|run| run.status == RunStatusRecord::Completed)
+                .find(|run| run.status() == RunStatus::Completed)
                 .or_else(|| run_records.last())
             {
                 selected_run_ids.insert(turn.id.clone(), selected.id.clone());
@@ -1531,7 +1400,7 @@ impl DefaultApplicationBackend {
                 workspace_id: turn.workspace_id,
                 parent_run_id: turn.parent_run_id,
                 prompt: turn.prompt_markdown,
-                title: (!turn.title.is_empty()).then_some(turn.title),
+                title: turn.title,
                 created_at: timestamp_view(turn.created_at),
                 runs: views,
             });
@@ -1540,7 +1409,7 @@ impl DefaultApplicationBackend {
             .repository
             .list_branch_pointers(workspace_id)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_port_error)?
             .into_iter()
             .map(|pointer| AdjacentBranchView {
                 run_id: pointer.head_run_id,
@@ -1551,7 +1420,7 @@ impl DefaultApplicationBackend {
             .repository
             .list_decision_marks(workspace_id)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_port_error)?
             .into_iter()
             .map(decision_view)
             .collect::<AppResult<Vec<_>>>()?;
@@ -1595,12 +1464,12 @@ impl DefaultApplicationBackend {
             .repository
             .get_run(&input.run_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let turn = self
             .repository
             .get_turn(exact_retry_turn_id(&original))
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         self.prepare_and_launch(
             turn.workspace_id,
             None,
@@ -1632,13 +1501,17 @@ impl DefaultApplicationBackend {
             .repository
             .get_workspace(&workspace_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let profile = self
             .repository
             .get_provider_profile(&provider_profile_id)
             .await
-            .map_err(repository_error)?;
-        let graph = load_graph(&self.repository, &workspace_id).await?;
+            .map_err(repository_port_error)?;
+        let graph = self
+            .repository
+            .load_conversation_graph(&workspace_id)
+            .await
+            .map_err(repository_port_error)?;
         let key = Self::override_key(&workspace_id, parent_run_id.as_deref());
         let override_items = self.overrides_for(&key)?;
         let compiled = self
@@ -1668,125 +1541,50 @@ impl DefaultApplicationBackend {
                 )
             })?,
         };
-        let manifest_id = Uuid::new_v4().to_string();
         let snapshot_id = Uuid::new_v4().to_string();
         let parameters = provider_parameters(&profile)?;
-        let parameter_json = Value::Object(parameters.clone()).to_string();
-        let content_blocks = content_blocks_for_manifest(&compiled.manifest.items, now);
-        let prompt_hash = domain::sha256_hex(prompt.as_bytes());
-        let prompt_block_id = content_block_id("user", &prompt_hash);
-        let turn = new_turn_id.map(|id| TurnRecord {
+        let content_blocks =
+            content_blocks_for_manifest(&workspace_id, &compiled.manifest.items, now);
+        let turn = new_turn_id.map(|id| Turn {
             id,
             workspace_id: workspace_id.clone(),
             parent_run_id: parent_run_id.clone(),
-            prompt_block_id,
             prompt_markdown: prompt.clone(),
-            title: prompt.chars().take(80).collect(),
+            title: Some(prompt.chars().take(80).collect()),
             created_at: now,
-            deleted_at: None,
         });
-        let provider_snapshot = json!({
-            "profileId": profile.id,
-            "providerName": profile.name,
-            "dialect": profile.dialect,
-            "baseUrl": profile.base_url,
-            "model": profile.default_model,
-            "parameters": Value::Object(parameters.clone())
-        });
-        let run = ModelRunRecord {
+        let run = ModelRun::queued(RunDraft {
             id: run_id.clone(),
             turn_id: turn_id.clone(),
-            workspace_id: workspace_id.clone(),
             provider_profile_id: Some(profile.id.clone()),
-            model: profile.default_model.clone(),
-            status: RunStatusRecord::Queued,
-            output_markdown: String::new(),
-            reasoning_markdown: String::new(),
-            provider_snapshot_json: provider_snapshot.to_string(),
-            usage_json: None,
-            error_json: None,
+            model: profile.model.clone(),
             created_at: now,
-            started_at: None,
-            finished_at: None,
-            checkpointed_at: None,
-        };
-        let manifest = ContextManifestRecord {
-            id: manifest_id.clone(),
-            workspace_id: workspace_id.clone(),
-            compiler_version: compiled.manifest.compiler_version.clone(),
-            strategy: "ancestor_path_with_pins".into(),
-            estimated_chars: compiled.estimated_chars as i64,
-            canonical_hash: compiled.canonical_hash.clone(),
-            warnings_json: serde_json::to_string(
-                &compiled
-                    .warnings
-                    .iter()
-                    .map(context_warning)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(json_error)?,
-            created_at: now,
-        };
-        let context_items = compiled
-            .manifest
-            .items
-            .iter()
-            .map(|item| RunContextItemRecord {
-                manifest_id: manifest_id.clone(),
-                workspace_id: workspace_id.clone(),
-                position: item.position as i64,
-                source_id: item.source_id.clone(),
-                source_kind: context_source_name(item.source_kind).into(),
-                role: message_role_name(item.role).into(),
-                content_block_id: content_block_id(
-                    message_role_name(item.role),
-                    &item.content_hash,
-                ),
-                inclusion_reason: inclusion_reason_name(item.inclusion_reason).into(),
-            })
-            .collect();
-        let request_json = json!({
-            "messages": compiled.messages.iter().map(|message| json!({
-                "role": message_role_name(message.role),
-                "content": message.content
-            })).collect::<Vec<_>>()
-        })
-        .to_string();
-        let snapshot = ContextSnapshotRecord {
+        });
+        let snapshot = domain::ContextSnapshot {
             id: snapshot_id,
             run_id: run_id.clone(),
-            manifest_id,
-            workspace_id: workspace_id.clone(),
-            provider_profile_id: Some(profile.id.clone()),
-            provider: profile.name.clone(),
-            model: profile.default_model.clone(),
-            base_url: profile.base_url.clone(),
-            parameters_json: parameter_json,
-            request_json,
-            canonical_hash: compiled.canonical_hash,
+            manifest: compiled.manifest.clone(),
+            provider: domain_provider_snapshot(&profile)?,
             created_at: now,
         };
-        let branch_pointer = turn.as_ref().map(|turn| BranchPointerRecord {
+        let branch_pointer = turn.as_ref().map(|turn| BranchPointer {
             id: Uuid::new_v4().to_string(),
             workspace_id: workspace_id.clone(),
             name: format!("Route {}", &turn.id[..8.min(turn.id.len())]),
             head_run_id: run_id.clone(),
             version: 0,
-            created_at: now,
             updated_at: now,
         });
         self.repository
-            .persist_run_start(&RunStartBundle {
+            .persist_run_start(PersistRunStart {
                 turn,
                 run,
                 content_blocks,
-                manifest,
-                context_items,
                 snapshot,
                 branch_pointer,
             })
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
 
         let credential = credentials
             .credential_for(&profile.id)?
@@ -1798,13 +1596,13 @@ impl DefaultApplicationBackend {
             .transpose()?;
         let invocation = ProviderInvocation {
             target: ProviderTarget {
-                dialect: provider_dialect(&profile.dialect)?,
+                dialect: provider_dialect(profile.dialect),
                 base_url: profile.base_url,
             },
             credential,
             request: CanonicalRequest {
                 run_id: run_id.clone(),
-                model: profile.default_model,
+                model: profile.model,
                 messages: compiled
                     .messages
                     .into_iter()
@@ -1832,10 +1630,10 @@ impl DefaultApplicationBackend {
             if let Ok(mut registry) = self.run_registry.lock() {
                 registry.remove(&run_id);
             }
-            return Err(repository_error(error));
+            return Err(repository_port_error(error));
         }
         spawn_run(
-            self.repository.clone(),
+            self.run_persistence.clone(),
             self.provider.clone(),
             self.run_registry.clone(),
             invocation,
@@ -1853,12 +1651,12 @@ impl DefaultApplicationBackend {
             .repository
             .list_turns(&input.workspace_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let decisions = self
             .repository
             .list_decision_marks(&input.workspace_id)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_port_error)?
             .into_iter()
             .map(|mark| (mark.run_id.clone(), mark))
             .collect::<HashMap<_, _>>();
@@ -1869,7 +1667,7 @@ impl DefaultApplicationBackend {
                 .repository
                 .list_runs_for_turn(&turn.id)
                 .await
-                .map_err(repository_error)?;
+                .map_err(repository_port_error)?;
             for run in &runs {
                 all_runs.insert(run.id.clone(), run.clone());
             }
@@ -1879,7 +1677,7 @@ impl DefaultApplicationBackend {
             .repository
             .list_branch_pointers(&input.workspace_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let effective_current_run_id =
             effective_route_run_id(input.current_run_id.as_deref(), &all_runs, &branch_pointers);
         let lineage = exact_lineage_ids(effective_current_run_id.as_deref(), &turns, &all_runs);
@@ -1894,7 +1692,7 @@ impl DefaultApplicationBackend {
                 .or_else(|| {
                     runs.iter()
                         .rev()
-                        .find(|run| run.status == RunStatusRecord::Completed)
+                        .find(|run| run.status() == RunStatus::Completed)
                 })
                 .or_else(|| runs.last());
             let state = self
@@ -1921,14 +1719,14 @@ impl DefaultApplicationBackend {
             nodes.push(RouteNodeView {
                 id: format!("turn:{}", turn.id),
                 turn_id: turn.id.clone(),
-                title: if turn.title.is_empty() {
-                    turn.prompt_markdown.chars().take(48).collect()
-                } else {
-                    turn.title.clone()
-                },
+                title: turn
+                    .title
+                    .clone()
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| turn.prompt_markdown.chars().take(48).collect()),
                 summary: turn.prompt_markdown.chars().take(140).collect(),
                 status: selected
-                    .map(|run| run_status_view(run.status))
+                    .map(|run| domain_run_status_view(run.status()))
                     .unwrap_or(RunStatusView::Pending),
                 x,
                 y,
@@ -1944,14 +1742,14 @@ impl DefaultApplicationBackend {
                             format!("Run {}", &run.id[..8.min(run.id.len())])
                         },
                         model: run.model.clone(),
-                        status: run_status_view(run.status),
-                        can_branch: run.status == RunStatusRecord::Completed
-                            || (!run.output_markdown.is_empty()
+                        status: domain_run_status_view(run.status()),
+                        can_branch: run.status() == RunStatus::Completed
+                            || (!run.output_markdown().is_empty()
                                 && matches!(
-                                    run.status,
-                                    RunStatusRecord::Cancelled
-                                        | RunStatusRecord::Failed
-                                        | RunStatusRecord::Interrupted
+                                    run.status(),
+                                    RunStatus::Cancelled
+                                        | RunStatus::Failed
+                                        | RunStatus::Interrupted
                                 )),
                     })
                     .collect(),
@@ -1977,45 +1775,50 @@ impl DefaultApplicationBackend {
             .repository
             .get_run(&input.left_run_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let right = self
             .repository
             .get_run(&input.right_run_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let left_receipt = self
             .repository
-            .get_run_receipt(&left.id)
+            .get_run_snapshot(&left.id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let right_receipt = self
             .repository
-            .get_run_receipt(&right.id)
+            .get_run_snapshot(&right.id)
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         let left_ids = left_receipt
+            .manifest
             .items
             .iter()
             .map(context_item_identity)
             .collect::<BTreeSet<_>>();
         let right_ids = right_receipt
+            .manifest
             .items
             .iter()
             .map(context_item_identity)
             .collect::<BTreeSet<_>>();
         let only_left = left_receipt
+            .manifest
             .items
             .iter()
             .filter(|item| !right_ids.contains(&context_item_identity(item)))
             .map(context_diff_item)
             .collect();
         let only_right = right_receipt
+            .manifest
             .items
             .iter()
             .filter(|item| !left_ids.contains(&context_item_identity(item)))
             .map(context_diff_item)
             .collect();
         let shared = left_receipt
+            .manifest
             .items
             .iter()
             .filter(|item| right_ids.contains(&context_item_identity(item)))
@@ -2023,18 +1826,18 @@ impl DefaultApplicationBackend {
             .collect();
         Ok(CompareRunsResult {
             left: ComparableRunView {
-                run_id: left.id,
-                model: left.model,
-                status: run_status_view(left.status),
+                run_id: left.id.clone(),
+                model: left.model.clone(),
+                status: domain_run_status_view(left.status()),
             },
             right: ComparableRunView {
-                run_id: right.id,
-                model: right.model,
-                status: run_status_view(right.status),
+                run_id: right.id.clone(),
+                model: right.model.clone(),
+                status: domain_run_status_view(right.status()),
             },
             answer: AnswerComparison {
-                left_markdown: left.output_markdown,
-                right_markdown: right.output_markdown,
+                left_markdown: left.output_markdown().into(),
+                right_markdown: right.output_markdown().into(),
             },
             context_diff: ContextDiffView {
                 only_left,
@@ -2052,20 +1855,20 @@ impl DefaultApplicationBackend {
             .await
             .ok();
         self.repository
-            .save_decision_mark(&DecisionMarkRecord {
+            .save_decision_mark(DecisionMark {
                 id: existing
                     .as_ref()
                     .map(|mark| mark.id.clone())
                     .unwrap_or_else(|| Uuid::new_v4().to_string()),
                 workspace_id: input.workspace_id,
                 run_id: input.run_id,
-                status: decision_status_record(input.status).into(),
+                status: decision_status_domain(input.status),
                 reason: input.reason,
                 created_at: existing.map(|mark| mark.created_at).unwrap_or(now),
                 updated_at: now,
             })
             .await
-            .map_err(repository_error)
+            .map_err(repository_port_error)
             .and_then(decision_view)
     }
 
@@ -2124,39 +1927,34 @@ impl DefaultApplicationBackend {
                     .repository
                     .get_run(&mark.run_id)
                     .await
-                    .map_err(repository_error)?;
+                    .map_err(repository_port_error)?;
                 let receipt = self
                     .repository
-                    .get_run_receipt(&mark.run_id)
+                    .get_run_snapshot(&mark.run_id)
                     .await
-                    .map_err(repository_error)?;
+                    .map_err(repository_port_error)?;
                 markdown.push_str(&format!(
                     "### {} · {}\n\n**Rationale:** {}\n\n{}\n\n_Context receipt:_ `{}` · {} ordered items · {}\n\n",
                     run.model,
                     mark.run_id,
                     mark.reason,
-                    run.output_markdown,
-                    receipt.snapshot.canonical_hash,
-                    receipt.items.len(),
-                    receipt.snapshot.base_url,
+                    run.output_markdown(),
+                    receipt.manifest.canonical_hash,
+                    receipt.manifest.items.len(),
+                    receipt.provider.base_url,
                 ));
             }
             if !found {
                 markdown.push_str("_None._\n\n");
             }
         }
-        std::fs::create_dir_all(&self.export_root).map_err(io_error)?;
-        let destination = input.destination.map(PathBuf::from).unwrap_or_else(|| {
-            self.export_root.join(format!(
-                "decision-packet-{}-{}.md",
-                input.workspace_id,
-                now_millis()
-            ))
-        });
-        std::fs::write(&destination, markdown.as_bytes()).map_err(io_error)?;
+        let exported = self
+            .decision_packet_writer
+            .write(&input.workspace_id, &markdown)
+            .map_err(|error| AppError::internal("filesystem_error", error.to_string()))?;
         Ok(ExportResult {
-            path: destination.to_string_lossy().into_owned(),
-            bytes_written: markdown.len() as u64,
+            path: exported.path,
+            bytes_written: exported.bytes_written,
         })
     }
 
@@ -2171,22 +1969,26 @@ impl DefaultApplicationBackend {
         parameters.insert(INTERNAL_DEFAULT_KEY.into(), Value::Bool(input.is_default));
         let record = self
             .repository
-            .save_provider_profile(&ProviderProfileRecord {
+            .save_provider_profile(ProviderProfile {
                 id,
                 name: input.name,
                 dialect: match input.dialect {
-                    ProviderDialectView::OpenaiCompatible => "openai_chat_completions",
-                    ProviderDialectView::Ollama => "ollama_chat",
-                }
-                .into(),
+                    ProviderDialectView::OpenaiCompatible => {
+                        domain::ProviderDialect::OpenAiCompatible
+                    }
+                    ProviderDialectView::Ollama => domain::ProviderDialect::Ollama,
+                },
                 base_url: input.base_url,
-                default_model: input.model,
-                parameters_json: Value::Object(parameters.into_iter().collect()).to_string(),
+                model: input.model,
+                parameters: parameters
+                    .into_iter()
+                    .map(|(key, value)| (key, value.to_string()))
+                    .collect(),
                 created_at: existing.map(|profile| profile.created_at).unwrap_or(now),
                 updated_at: now,
             })
             .await
-            .map_err(repository_error)?;
+            .map_err(repository_port_error)?;
         provider_profile_view(record)
     }
 
@@ -2199,37 +2001,39 @@ impl DefaultApplicationBackend {
             .repository
             .get_provider_profile(&input.provider_profile_id)
             .await
-            .map_err(repository_error)?;
-        let mut endpoint = validate_base_url(&profile.base_url)
-            .map_err(|error| AppError::validation(error.code(), error.to_string()))?;
-        let base_path = endpoint.path().trim_end_matches('/');
-        let path = if profile.dialect == "ollama_chat" {
-            if base_path.ends_with("/api") {
-                format!("{base_path}/tags")
-            } else {
-                format!("{base_path}/api/tags")
-            }
-        } else {
-            format!("{base_path}/models")
-        };
-        endpoint.set_path(&path);
-        let mut request = self.connection_client.get(endpoint);
-        if let Some(credential) = credential {
-            request = request.bearer_auth(credential.as_str()?);
-        }
-        let response = request.send().await.map_err(|error| AppError {
-            code: "provider_unreachable".into(),
-            message: error.to_string(),
-            retryable: true,
-            details: Value::Null,
-        })?;
-        let ok = response.status().is_success();
+            .map_err(repository_port_error)?;
+        let credential = credential
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(|secret| SessionCredential::new(secret.to_owned()))
+            })
+            .transpose()?;
+        let response = self
+            .connection_tester
+            .test(
+                ProviderTarget {
+                    dialect: provider_dialect(profile.dialect),
+                    base_url: profile.base_url,
+                },
+                credential,
+            )
+            .await
+            .map_err(|error| AppError {
+                code: error.code().into(),
+                message: error.to_string(),
+                retryable: error.retryable(),
+                details: error
+                    .status()
+                    .map(|status| json!({ "status": status }))
+                    .unwrap_or(Value::Null),
+            })?;
         Ok(ProviderConnectionResult {
-            ok,
-            message: if ok {
+            ok: response.ok,
+            message: if response.ok {
                 format!("Connected to {}", profile.name)
             } else {
-                format!("Provider returned HTTP {}", response.status())
+                format!("Provider returned HTTP {}", response.http_status)
             },
         })
     }
@@ -2238,25 +2042,33 @@ impl DefaultApplicationBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::RunStateSnapshot;
 
-    fn run(id: &str, turn_id: &str) -> ModelRunRecord {
-        ModelRunRecord {
-            id: id.into(),
-            turn_id: turn_id.into(),
-            workspace_id: "workspace-1".into(),
-            provider_profile_id: Some("provider-1".into()),
-            model: "model".into(),
-            status: RunStatusRecord::Completed,
-            output_markdown: "same answer shape".into(),
-            reasoning_markdown: String::new(),
-            provider_snapshot_json: "{}".into(),
-            usage_json: None,
-            error_json: None,
-            created_at: 1,
-            started_at: Some(2),
-            finished_at: Some(3),
-            checkpointed_at: Some(3),
-        }
+    fn run_with_status(id: &str, turn_id: &str, status: RunStatus) -> ModelRun {
+        ModelRun::rehydrate(
+            RunDraft {
+                id: id.into(),
+                turn_id: turn_id.into(),
+                provider_profile_id: Some("provider-1".into()),
+                model: "model".into(),
+                created_at: 1,
+            },
+            RunStateSnapshot {
+                status,
+                output_markdown: "same answer shape".into(),
+                reasoning_markdown: String::new(),
+                error: (status == RunStatus::Failed).then(|| RunFailure::message("failed")),
+                usage: None,
+                started_at: Some(2),
+                finished_at: Some(3),
+                checkpointed_at: Some(3),
+            },
+        )
+        .unwrap()
+    }
+
+    fn run(id: &str, turn_id: &str) -> ModelRun {
+        run_with_status(id, turn_id, RunStatus::Completed)
     }
 
     #[test]
@@ -2293,7 +2105,7 @@ mod tests {
                 inclusion_reason: InclusionReason::ExactAncestorPath,
             },
         ];
-        let blocks = content_blocks_for_manifest(&items, 1);
+        let blocks = content_blocks_for_manifest("workspace-1", &items, 1);
 
         assert_eq!(blocks.len(), 2);
         assert!(
@@ -2329,16 +2141,14 @@ mod tests {
     #[test]
     fn route_projection_falls_back_to_the_latest_persisted_branch_head() {
         let mut runs = HashMap::new();
-        let mut failed = run("run-failed", "turn-root");
-        failed.status = RunStatusRecord::Failed;
+        let failed = run_with_status("run-failed", "turn-root", RunStatus::Failed);
         runs.insert(failed.id.clone(), failed);
-        let pointers = vec![BranchPointerRecord {
+        let pointers = vec![BranchPointer {
             id: "branch-main".into(),
             workspace_id: "workspace-1".into(),
             name: "Main".into(),
             head_run_id: "run-failed".into(),
             version: 1,
-            created_at: 1,
             updated_at: 2,
         }];
 

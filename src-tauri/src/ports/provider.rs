@@ -254,6 +254,23 @@ pub trait ProviderGateway: Send + Sync {
     ) -> ProviderFuture<'a>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderConnectionStatus {
+    pub ok: bool,
+    pub http_status: u16,
+}
+
+pub type ProviderConnectionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ProviderConnectionStatus, ProviderError>> + Send + 'a>>;
+
+pub trait ProviderConnectionTester: Send + Sync {
+    fn test<'a>(
+        &'a self,
+        target: ProviderTarget,
+        credential: Option<SessionCredential>,
+    ) -> ProviderConnectionFuture<'a>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionCredential;

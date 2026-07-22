@@ -15,6 +15,7 @@ const workspace: WorkspaceSummary = {
   id: "workspace-1",
   name: "技术路线评审",
   goal: "选择迁移策略",
+  systemPrompt: "你是一名严谨的技术决策协作者。",
   archived: false,
   createdAt: "2026-07-22T08:00:00Z",
   updatedAt: "2026-07-22T08:00:00Z",

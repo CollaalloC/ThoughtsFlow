@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import type { DesktopBridge } from "../../platform/desktop-bridge";
+import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
   ContextPreview,
   ModelRun,
@@ -68,6 +68,11 @@ type FocusWorkspaceProps = {
 };
 
 type SelectedRuns = Record<string, string>;
+
+type RetryAction = {
+  label: string;
+  execute: () => void;
+};
 
 function millis(value?: number | string | null) {
   if (!value) return 0;
@@ -203,6 +208,7 @@ export function FocusWorkspace({
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryAction, setRetryAction] = useState<RetryAction | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newWorkspaceTitle, setNewWorkspaceTitle] = useState("");
@@ -213,8 +219,22 @@ export function FocusWorkspace({
   const leafTurn = lineage.at(-1);
   const parentRunId = leafTurn ? selectedRuns[leafTurn.id] ?? leafTurn.runs[0]?.id : undefined;
 
-  const openWorkspace = useCallback(async (workspaceId: string) => {
+  const clearError = useCallback(() => {
     setError(null);
+    setRetryAction(null);
+  }, []);
+
+  const reportError = useCallback((
+    reason: unknown,
+    fallback: string,
+    retry?: RetryAction,
+  ) => {
+    setError(reason instanceof Error ? reason.message : fallback);
+    setRetryAction(reason instanceof DesktopBridgeError && reason.retryable && retry ? retry : null);
+  }, []);
+
+  const openWorkspace = useCallback(async (workspaceId: string) => {
+    clearError();
     try {
       const next = (await bridge.openWorkspace(workspaceId)) as WorkspaceDetailView;
       const departureTurn = initialRunId
@@ -230,9 +250,9 @@ export function FocusWorkspace({
       setExcludedSourceIds([]);
       setSnapshot(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法打开本地工作区。");
+      reportError(reason, "无法打开本地工作区。");
     }
-  }, [bridge, initialRunId]);
+  }, [bridge, clearError, initialRunId, reportError]);
 
   useEffect(() => {
     let active = true;
@@ -250,11 +270,11 @@ export function FocusWorkspace({
         if (targetId) await openWorkspace(targetId);
       })
       .catch((reason: unknown) => {
-        if (active) setError(reason instanceof Error ? reason.message : "无法初始化 ThoughsFlow。");
+        if (active) reportError(reason, "无法初始化 ThoughsFlow。");
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [bridge, initialWorkspaceId, openWorkspace]);
+  }, [bridge, initialWorkspaceId, openWorkspace, reportError]);
 
   const inspect = useCallback(async (
     prompt: string,
@@ -279,10 +299,27 @@ export function FocusWorkspace({
     const timer = window.setTimeout(() => {
       inspect(draft)
         .then((result) => { if (active && result) setPreview(result); })
-        .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "无法检查本轮 Context。"); });
+        .catch((reason: unknown) => {
+          if (!active) return;
+          const retryInspection = () => {
+            clearError();
+            void inspect(draft)
+              .then((result) => { if (result) setPreview(result); })
+              .catch((nextReason: unknown) => reportError(
+                nextReason,
+                "无法检查本轮 Context。",
+                { label: "重新检查 Context", execute: retryInspection },
+              ));
+          };
+          reportError(
+            reason,
+            "无法检查本轮 Context。",
+            { label: "重新检查 Context", execute: retryInspection },
+          );
+        });
     }, 120);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [detail, draft, excludedSourceIds, inspect, parentRunId, pinnedSourceIds, selectedProfile]);
+  }, [clearError, detail, draft, excludedSourceIds, inspect, parentRunId, pinnedSourceIds, reportError, selectedProfile]);
 
   const updateRun = (runId: string, change: Partial<RunView>) => {
     setDetail((current) => current ? {
@@ -369,7 +406,7 @@ export function FocusWorkspace({
 
   const startTurn = async (prompt: string, exactParentRunId?: string) => {
     if (!detail || !selectedProfile || busy) return;
-    setError(null);
+    clearError();
     setBusy(true);
     try {
       const checked = await inspect(prompt, exactParentRunId);
@@ -416,7 +453,11 @@ export function FocusWorkspace({
       streamEvents.release();
     } catch (reason) {
       setBusy(false);
-      setError(reason instanceof Error ? reason.message : "发送失败。");
+      reportError(
+        reason,
+        "发送失败。",
+        { label: "重试发送", execute: () => { void startTurn(prompt, exactParentRunId); } },
+      );
     }
   };
 
@@ -435,7 +476,7 @@ export function FocusWorkspace({
     const turn = detail.turns.find((item) => item.id === run.turnId);
     if (!turn) return;
     setBusy(true);
-    setError(null);
+    clearError();
     try {
       const checked = await inspect(turn.prompt, turn.parentRunId ?? null);
       if (!checked || checked.blocked) throw new Error(checked?.warnings[0] || "Context 无法发送。");
@@ -466,7 +507,11 @@ export function FocusWorkspace({
       streamEvents.release();
     } catch (reason) {
       setBusy(false);
-      setError(reason instanceof Error ? reason.message : "重试失败。");
+      reportError(
+        reason,
+        "重试失败。",
+        { label: "重试回答请求", execute: () => { void retryRun(run); } },
+      );
     }
   };
 
@@ -488,7 +533,7 @@ export function FocusWorkspace({
     } catch (reason) {
       setPinnedSourceIds(pinnedSourceIds);
       setExcludedSourceIds(excludedSourceIds);
-      setError(reason instanceof Error ? reason.message : "上下文调整未保存。");
+      reportError(reason, "上下文调整未保存。");
     }
   };
 
@@ -500,7 +545,7 @@ export function FocusWorkspace({
     try {
       setSnapshot(normalizeSnapshot(await bridge.getRunSnapshot(selectedRun.id)));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法读取锁定快照。");
+      reportError(reason, "无法读取锁定快照。");
     } finally {
       setSnapshotLoading(false);
     }
@@ -511,13 +556,13 @@ export function FocusWorkspace({
     const name = newWorkspaceTitle.trim();
     if (!name) return;
     try {
-      const created = (await bridge.createWorkspace({ name, goal: "尚未设置工作区目标" })) as WorkspaceView;
+      const created = (await bridge.createWorkspace({ name, goal: "" })) as WorkspaceView;
       setWorkspaces((current) => [created, ...current]);
       setNewWorkspaceOpen(false);
       setNewWorkspaceTitle("");
       await openWorkspace(created.id);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "创建工作区失败。");
+      reportError(reason, "创建工作区失败。");
     }
   };
 
@@ -530,7 +575,7 @@ export function FocusWorkspace({
       setDetail({ ...detail, workspace: updated });
       setWorkspaces((current) => current.map((item) => item.id === updated.id ? updated : item));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "重命名失败。");
+      reportError(reason, "重命名失败。");
     }
   };
 
@@ -543,7 +588,7 @@ export function FocusWorkspace({
       setDetail(null);
       if (remaining[0]) await openWorkspace(remaining[0].id);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "归档失败。");
+      reportError(reason, "归档失败。");
     }
   };
 
@@ -667,7 +712,17 @@ export function FocusWorkspace({
               </div>
             </header>
 
-            {error && <div className="focus-notice is-error"><ErrorState message={error} /><button type="button" onClick={() => setError(null)}>关闭</button></div>}
+            {error && (
+              <div className="focus-notice is-error">
+                <ErrorState message={error} />
+                <div className="focus-notice__actions">
+                  {retryAction && (
+                    <button type="button" onClick={retryAction.execute}>{retryAction.label}</button>
+                  )}
+                  <button type="button" onClick={clearError}>关闭</button>
+                </div>
+              </div>
+            )}
             {notice && <div className="focus-notice" role="status"><Check size={14} /> {notice}<button type="button" onClick={() => setNotice(null)}>关闭</button></div>}
 
             <div className="focus-reading" ref={readingPane}>

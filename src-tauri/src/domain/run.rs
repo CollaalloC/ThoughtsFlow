@@ -60,6 +60,25 @@ pub struct RunUsage {
     pub output_tokens: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunFailure {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub status: Option<u16>,
+}
+
+impl RunFailure {
+    pub fn message(message: impl Into<String>) -> Self {
+        Self {
+            code: "run_failed".into(),
+            message: message.into(),
+            retryable: false,
+            status: None,
+        }
+    }
+}
+
 impl RunUsage {
     pub const fn new(input_tokens: u64, output_tokens: u64) -> Self {
         Self {
@@ -79,7 +98,7 @@ pub struct ModelRun {
     status: RunStatus,
     output_markdown: String,
     reasoning_markdown: String,
-    error: Option<String>,
+    error: Option<RunFailure>,
     usage: Option<RunUsage>,
     started_at: Option<i64>,
     checkpointed_at: Option<i64>,
@@ -91,7 +110,7 @@ pub struct RunStateSnapshot {
     pub status: RunStatus,
     pub output_markdown: String,
     pub reasoning_markdown: String,
-    pub error: Option<String>,
+    pub error: Option<RunFailure>,
     pub usage: Option<RunUsage>,
     pub started_at: Option<i64>,
     pub checkpointed_at: Option<i64>,
@@ -181,7 +200,11 @@ impl ModelRun {
     }
 
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.error.as_ref().map(|failure| failure.message.as_str())
+    }
+
+    pub fn failure(&self) -> Option<&RunFailure> {
+        self.error.as_ref()
     }
 
     pub fn usage(&self) -> Option<RunUsage> {
@@ -233,7 +256,7 @@ impl ModelRun {
             return Err(DomainError::TerminalRunMutation(self.status));
         }
         self.status = RunStatus::Failed;
-        self.error = Some(error.into());
+        self.error = Some(RunFailure::message(error));
         self.finished_at = Some(at);
         Ok(())
     }
@@ -286,7 +309,7 @@ impl ModelRun {
     fn finish(
         &mut self,
         to: RunStatus,
-        error: Option<String>,
+        error: Option<RunFailure>,
         usage: Option<RunUsage>,
         at: i64,
     ) -> Result<(), DomainError> {
