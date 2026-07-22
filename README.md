@@ -35,10 +35,13 @@ npm run tauri -- build
 
 在“Provider 设置”中选择：
 
-- `OpenAI-compatible`：填写服务的 Base URL、model 与参数，Rust 会请求其 Chat Completions streaming 端点；
-- `Ollama`：默认 `http://127.0.0.1:11434`，Rust 使用原生 `/api/chat` NDJSON。
+- `OpenAI`、`OpenRouter` 或 `Generic OpenAI-compatible`：模板提供默认端点、Bearer 认证位置与 SSE 协议；
+- `Ollama`：模板默认 `http://127.0.0.1:11434`，本地端点使用原生 `/api/chat` NDJSON，不需要 API Key；改为远端或代理端点时可设置 Bearer 会话凭据，只有内存中存在非空凭据才会发送认证头；
+- Anthropic、Google 与 Azure OpenAI 模板会展示其协议和认证要求，但在对应流式协议完成前不可保存为可运行 Profile。
 
-远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码。API Key 只保存在当前 Rust 进程内存，退出应用后清除，不写入 SQLite、前端持久状态、日志或导出文件。
+Rust Core 内置并唯一维护 7 个权威模板：OpenAI、Generic OpenAI-compatible、Ollama、Anthropic、Google、Azure OpenAI 和 OpenRouter；前端不能改写其协议或认证位置。选择模板会填入默认 Base URL，用户仍可覆盖为代理或自托管端点。新的 Context Receipt 会锁定模板 ID/revision、实际协议、非敏感认证位置、静态头与最终生效参数；API Key 不进入 Receipt。迁移前生成的历史 Receipt 保留其原有参数，新增模板元数据明确显示为 `legacy/unknown`，不会用当前模板反向推断或伪造历史事实。
+
+远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码，Provider 请求也不会跟随 3xx 重定向。API Key 只保存在当前 Rust 进程内存，退出应用后清除，不写入 SQLite、前端持久状态、日志或导出文件。若 Provider 原样回显当前会话凭据，Rust 会在内容进入 `RunEvent` 或 SQLite 前进行跨 delta 的精确脱敏；该防线只匹配已知凭据原文，不能识别经过变形或编码的泄露。
 
 ## 数据、隐私与恢复
 
@@ -57,7 +60,7 @@ macOS 的默认位置通常是：
 
 “数据保存在本机”只描述 SQLite 和导出文件的位置。每轮发送前，Composer 与 Inspector 会另行显示本轮 Context 将发往的 Provider、Model 和 Host；调用远程 Provider 时，相应 Context 会离开本机。
 
-Run、Manifest 与 Snapshot 在 Provider I/O 前由同一数据库事务落盘。流式输出约每 400ms 或累计 4KB 做 checkpoint；应用启动时，数据库中的 `queued`、`connecting` 或 `streaming` Run 会变为 `interrupted`，已有部分输出不会丢失。首版没有数据库透明加密，也不承诺删除后物理不可恢复。
+Run、Manifest 与 Snapshot 在 Provider I/O 前由同一数据库事务落盘。流式输出约每 400ms 或累计 4KB 做 checkpoint；应用启动时，数据库中的 `connecting` 或 `streaming` Run 会变为 `interrupted`，已有部分输出不会丢失。首版没有数据库透明加密，也不承诺删除后物理不可恢复。
 
 Decision Packet 只能由 Rust 文件适配器在上述 `exports` 目录创建新文件；WebView 命令不接受目标路径，也不会覆盖已有文件。
 
