@@ -118,6 +118,188 @@ pub async fn inspect_context(
 }
 
 #[tauri::command]
+pub async fn preview_context_transition(
+    state: State<'_, AppState>,
+    input: PreviewContextTransitionInput,
+) -> AppResult<ApiResponse<ContextPreview>> {
+    validate_preview_context_transition(&input)?;
+    state
+        .backend()
+        .preview_context_transition(input)
+        .await
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn get_context_tree(
+    state: State<'_, AppState>,
+    input: GetContextTreeInput,
+) -> AppResult<ApiResponse<ContextTreeProjection>> {
+    require_non_empty("workspaceId", &input.workspace_id)?;
+    state
+        .backend()
+        .get_context_tree(input)
+        .await
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn set_active_context(
+    state: State<'_, AppState>,
+    input: SetActiveContextInput,
+) -> AppResult<ApiResponse<ContextCursorView>> {
+    validate_set_active_context(&input)?;
+    state
+        .backend()
+        .set_active_context(input)
+        .await
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn rename_branch(
+    state: State<'_, AppState>,
+    input: RenameBranchInput,
+) -> AppResult<ApiResponse<ContextBranchView>> {
+    require_non_empty("workspaceId", &input.workspace_id)?;
+    require_non_empty("branchId", &input.branch_id)?;
+    require_non_empty("name", &input.name)?;
+    state
+        .backend()
+        .rename_branch(input)
+        .await
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn update_context_draft(
+    state: State<'_, AppState>,
+    input: UpdateContextDraftInput,
+) -> AppResult<ApiResponse<UpdateContextDraftResult>> {
+    validate_context_draft(&input)?;
+    state
+        .backend()
+        .update_context_draft(input)
+        .await
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn create_context_checkpoint(
+    state: State<'_, AppState>,
+    input: CreateContextCheckpointInput,
+) -> AppResult<ApiResponse<ContextCheckpointView>> {
+    validate_context_checkpoint(&input)?;
+    state
+        .backend()
+        .create_context_checkpoint(input)
+        .await
+        .map(ApiResponse::new)
+}
+
+#[tauri::command]
+pub async fn summarize_and_set_active_context(
+    state: State<'_, AppState>,
+    input: SummarizeAndSetActiveContextInput,
+) -> AppResult<ApiResponse<SummarizeAndSetActiveContextResult>> {
+    validate_summarize_context(&input)?;
+    #[cfg(feature = "webview-e2e")]
+    let client_operation_id = input.client_operation_id.clone();
+    #[cfg(feature = "webview-e2e")]
+    capture_context_maintenance_input_if_requested(&input)?;
+    let provider_profile_lock = state.provider_profile_lock(&input.provider_profile_id)?;
+    let _provider_profile_operation = provider_profile_lock.lock().await;
+    let credentials: Arc<dyn SessionCredentialLookup> = state.credentials().clone();
+    let result = state
+        .backend()
+        .summarize_and_set_active_context(input, credentials)
+        .await?;
+    #[cfg(feature = "webview-e2e")]
+    abort_after_context_maintenance_commit_if_requested(&client_operation_id);
+    Ok(ApiResponse::new(result))
+}
+
+#[cfg(feature = "webview-e2e")]
+const CRASH_AFTER_MAINTENANCE_COMMIT_ENV: &str =
+    "THOUGHSFLOW_WEBVIEW_E2E_CRASH_AFTER_MAINTENANCE_COMMIT";
+
+#[cfg(feature = "webview-e2e")]
+fn should_abort_after_context_maintenance_commit(
+    requested_client_operation_id: Option<&str>,
+    completed_client_operation_id: &str,
+) -> bool {
+    requested_client_operation_id == Some(completed_client_operation_id)
+}
+
+#[cfg(feature = "webview-e2e")]
+fn abort_after_context_maintenance_commit_if_requested(client_operation_id: &str) {
+    let requested_client_operation_id = std::env::var(CRASH_AFTER_MAINTENANCE_COMMIT_ENV).ok();
+    if should_abort_after_context_maintenance_commit(
+        requested_client_operation_id.as_deref(),
+        client_operation_id,
+    ) {
+        std::process::abort();
+    }
+}
+
+#[cfg(feature = "webview-e2e")]
+fn capture_context_maintenance_input_if_requested(
+    input: &SummarizeAndSetActiveContextInput,
+) -> AppResult<()> {
+    let requested_client_operation_id = std::env::var(CRASH_AFTER_MAINTENANCE_COMMIT_ENV).ok();
+    if !should_abort_after_context_maintenance_commit(
+        requested_client_operation_id.as_deref(),
+        &input.client_operation_id,
+    ) {
+        return Ok(());
+    }
+    let Some(data_dir) = std::env::var_os("THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR") else {
+        return Err(AppError::internal(
+            "webview_e2e_data_dir",
+            "The WebView E2E data directory is required for maintenance capture",
+        ));
+    };
+    let data_dir = std::path::PathBuf::from(data_dir);
+    if !data_dir.is_absolute() {
+        return Err(AppError::internal(
+            "webview_e2e_data_dir",
+            "The WebView E2E data directory must be absolute",
+        ));
+    }
+    let capture_path = data_dir.join("maintenance-replay-input.json");
+    let serialized = serde_json::to_vec(input).map_err(|error| {
+        AppError::internal(
+            "webview_e2e_capture_serialize",
+            "The WebView E2E maintenance input could not be serialized",
+        )
+        .with_details(serde_json::json!({ "cause": error.to_string() }))
+    })?;
+    std::fs::write(&capture_path, serialized).map_err(|error| {
+        AppError::internal(
+            "webview_e2e_capture_write",
+            "The WebView E2E maintenance input could not be captured",
+        )
+        .with_details(serde_json::json!({
+            "path": capture_path,
+            "cause": error.to_string(),
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn cancel_context_maintenance(
+    state: State<'_, AppState>,
+    client_operation_id: String,
+) -> AppResult<ApiResponse<CommandAcknowledgement>> {
+    validate_client_operation_id(&client_operation_id)?;
+    state
+        .backend()
+        .cancel_context_maintenance(client_operation_id)
+        .await?;
+    Ok(ApiResponse::new(CommandAcknowledgement { accepted: true }))
+}
+
+#[tauri::command]
 pub async fn create_turn_and_start_run(
     state: State<'_, AppState>,
     input: CreateTurnAndStartRunInput,
@@ -146,11 +328,19 @@ pub async fn retry_run(
         provider_profile_id,
         preview_hash,
         credential_id,
+        branch_id,
+        expected_cursor_version,
+        expected_branch_version,
+        expected_draft_version,
     } = input;
     let input = RetryRunInput {
         run_id,
         provider_profile_id,
         preview_hash,
+        branch_id,
+        expected_cursor_version,
+        expected_branch_version,
+        expected_draft_version,
     };
     require_non_empty("runId", &input.run_id)?;
     require_non_empty("providerProfileId", &input.provider_profile_id)?;
@@ -181,6 +371,12 @@ pub struct RetryRunCommandInput {
     preview_hash: String,
     #[serde(default)]
     credential_id: Option<String>,
+    #[serde(default)]
+    branch_id: Option<EntityId>,
+    expected_cursor_version: u64,
+    #[serde(default)]
+    expected_branch_version: Option<u64>,
+    expected_draft_version: u64,
 }
 
 async fn retry_run_with_selected_credential<Start, StartFuture>(
@@ -696,6 +892,145 @@ pub async fn test_provider_connection(
 fn validate_inspect_context(input: &InspectContextInput) -> AppResult<()> {
     require_non_empty("workspaceId", &input.workspace_id)?;
     require_non_empty("providerProfileId", &input.provider_profile_id)?;
+    if let Some(branch_id) = input.branch_id.as_deref() {
+        require_non_empty("branchId", branch_id)?;
+    }
+    Ok(())
+}
+
+fn validate_preview_context_transition(input: &PreviewContextTransitionInput) -> AppResult<()> {
+    validate_inspect_context(&InspectContextInput {
+        workspace_id: input.workspace_id.clone(),
+        parent_run_id: input.parent_run_id.clone(),
+        prompt: input.prompt.clone(),
+        provider_profile_id: input.provider_profile_id.clone(),
+        branch_id: input.branch_id.clone(),
+    })
+}
+
+fn validate_set_active_context(input: &SetActiveContextInput) -> AppResult<()> {
+    require_non_empty("workspaceId", &input.workspace_id)?;
+    if let Some(run_id) = input.run_id.as_deref() {
+        require_non_empty("runId", run_id)?;
+    }
+    if let Some(branch_id) = input.branch_id.as_deref() {
+        require_non_empty("branchId", branch_id)?;
+    }
+    Ok(())
+}
+
+fn validate_context_draft(input: &UpdateContextDraftInput) -> AppResult<()> {
+    require_non_empty("workspaceId", &input.workspace_id)?;
+    let mut identities = std::collections::BTreeSet::new();
+    for item in &input.items {
+        if let Some(id) = item.source_ref.id.as_deref() {
+            require_non_empty("sourceRef.id", id)?;
+        }
+        let identity = format!("{:?}:{:?}", item.source_ref.kind, item.source_ref.id);
+        if !identities.insert(identity) {
+            return Err(AppError::validation(
+                "duplicate_context_draft_item",
+                "A Context Draft can override each typed source only once",
+            ));
+        }
+        if item.pinned && !item.included {
+            return Err(AppError::validation(
+                "invalid_context_draft_item",
+                "A pinned Context item must also be included",
+            ));
+        }
+        if item.pinned
+            && item
+                .content_block_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(AppError::validation(
+                "missing_content_block_identity",
+                "A pinned Context item must identify its exact Content Block",
+            ));
+        }
+        if matches!(
+            item.source_ref.kind,
+            ContextSourceKindView::WorkspaceSystem | ContextSourceKindView::CurrentPrompt
+        ) && (!item.included || item.pinned)
+        {
+            return Err(AppError::validation(
+                "mandatory_context_item",
+                "System and current-prompt Context items are mandatory and cannot be pinned",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_context_checkpoint(input: &CreateContextCheckpointInput) -> AppResult<()> {
+    validate_client_operation_id(&input.client_operation_id)?;
+    require_non_empty("workspaceId", &input.workspace_id)?;
+    require_non_empty("branchId", &input.branch_id)?;
+    require_non_empty("summary", &input.summary)?;
+    validate_checkpoint_range(
+        input.kind,
+        &input.source_run_ids,
+        input.first_kept_run_id.as_deref(),
+    )
+}
+
+fn validate_summarize_context(input: &SummarizeAndSetActiveContextInput) -> AppResult<()> {
+    validate_client_operation_id(&input.client_operation_id)?;
+    require_non_empty("workspaceId", &input.workspace_id)?;
+    require_non_empty("targetRunId", &input.target_run_id)?;
+    require_non_empty("branchId", &input.branch_id)?;
+    require_non_empty("summaryPrompt", &input.summary_prompt)?;
+    require_non_empty("providerProfileId", &input.provider_profile_id)?;
+    validate_checkpoint_range(
+        ContextCheckpointKindView::Compaction,
+        &input.source_run_ids,
+        input.first_kept_run_id.as_deref(),
+    )
+}
+
+fn validate_checkpoint_range(
+    kind: ContextCheckpointKindView,
+    source_run_ids: &[EntityId],
+    first_kept_run_id: Option<&str>,
+) -> AppResult<()> {
+    if source_run_ids.is_empty() {
+        return Err(AppError::validation(
+            "empty_checkpoint_source",
+            "A Context checkpoint must name at least one source Run",
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for run_id in source_run_ids {
+        require_non_empty("sourceRunIds", run_id)?;
+        if !unique.insert(run_id) {
+            return Err(AppError::validation(
+                "duplicate_checkpoint_source",
+                "A Context checkpoint source range cannot contain duplicate Runs",
+            ));
+        }
+    }
+    if kind == ContextCheckpointKindView::Compaction
+        && first_kept_run_id.is_none_or(|id| id.trim().is_empty())
+    {
+        return Err(AppError::validation(
+            "missing_checkpoint_boundary",
+            "A compaction checkpoint must identify the first kept Run",
+        ));
+    }
+    if kind == ContextCheckpointKindView::BranchSummary
+        && let Some(first_kept_run_id) = first_kept_run_id
+    {
+        return Err(AppError::validation(
+            "unexpected_checkpoint_boundary",
+            "A branch-summary checkpoint cannot carry a compaction kept boundary",
+        )
+        .with_details(serde_json::json!({
+            "kind": "branch-summary",
+            "firstKeptRunId": first_kept_run_id,
+        })));
+    }
     Ok(())
 }
 
@@ -764,6 +1099,17 @@ fn require_non_empty(field: &str, value: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_client_operation_id(value: &str) -> AppResult<()> {
+    require_non_empty("clientOperationId", value)?;
+    Uuid::parse_str(value).map_err(|_| {
+        AppError::validation(
+            "invalid_client_operation_id",
+            "clientOperationId must be a UUID generated once per maintenance operation",
+        )
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,7 +1171,11 @@ mod tests {
             "runId": "run-failed",
             "providerProfileId": "profile-1",
             "previewHash": "sha256:preview",
-            "credentialId": "credential-backup"
+            "credentialId": "credential-backup",
+            "branchId": "branch-1",
+            "expectedCursorVersion": 2,
+            "expectedBranchVersion": 3,
+            "expectedDraftVersion": 4
         }))
         .expect("exact credential retry command deserializes");
         assert_eq!(input.run_id, "run-failed");
@@ -839,6 +1189,8 @@ mod tests {
                 "providerProfileId": "profile-1",
                 "previewHash": "sha256:preview",
                 "credentialId": "credential-backup",
+                "expectedCursorVersion": 2,
+                "expectedDraftVersion": 4,
                 "credential": "must-not-be-accepted"
             }))
             .is_err()
@@ -903,6 +1255,10 @@ mod tests {
                 Ok(RunHandle {
                     turn_id: "turn-1".into(),
                     run_id: "run-recovered".into(),
+                    cursor_version: 2,
+                    draft_version: 3,
+                    branch_id: "branch-1".into(),
+                    branch_version: 4,
                 })
             },
         )
@@ -1150,6 +1506,7 @@ mod tests {
             parent_run_id: None,
             prompt: String::new(),
             provider_profile_id: "provider-1".into(),
+            branch_id: None,
         };
         assert!(validate_inspect_context(&inspect).is_ok());
 
@@ -1159,12 +1516,119 @@ mod tests {
             prompt: String::new(),
             provider_profile_id: inspect.provider_profile_id,
             preview_hash: "hash".into(),
+            branch_id: None,
+            expected_cursor_version: 0,
+            expected_branch_version: None,
+            expected_draft_version: 0,
         };
         assert_eq!(
             validate_start_run(&start)
                 .expect_err("start requires a prompt")
                 .code,
             "missing_required_field"
+        );
+    }
+
+    #[test]
+    fn context_draft_rejects_mandatory_exclusion_and_untyped_pins() {
+        let mandatory = UpdateContextDraftInput {
+            workspace_id: "workspace-1".into(),
+            parent_run_id: None,
+            expected_draft_version: 0,
+            items: vec![ContextDraftItemInput {
+                source_ref: ContextSourceRefView {
+                    kind: ContextSourceKindView::WorkspaceSystem,
+                    id: Some("workspace-1".into()),
+                },
+                content_block_id: Some("block-system".into()),
+                included: false,
+                pinned: false,
+            }],
+        };
+        assert_eq!(
+            validate_context_draft(&mandatory)
+                .expect_err("the System Context cannot be removed")
+                .code,
+            "mandatory_context_item"
+        );
+
+        let pin_without_block = UpdateContextDraftInput {
+            items: vec![ContextDraftItemInput {
+                source_ref: ContextSourceRefView {
+                    kind: ContextSourceKindView::ModelRun,
+                    id: Some("run-1".into()),
+                },
+                content_block_id: None,
+                included: true,
+                pinned: true,
+            }],
+            ..mandatory
+        };
+        assert_eq!(
+            validate_context_draft(&pin_without_block)
+                .expect_err("a pin needs exact Content Block identity")
+                .code,
+            "missing_content_block_identity"
+        );
+    }
+
+    #[cfg(feature = "webview-e2e")]
+    #[test]
+    fn maintenance_commit_crash_hook_requires_the_exact_operation_id() {
+        let completed = "0f6f8d8b-9065-4bb6-91d3-9bfec751b2d4";
+
+        assert!(!should_abort_after_context_maintenance_commit(
+            None, completed
+        ));
+        assert!(!should_abort_after_context_maintenance_commit(
+            Some("c17e5958-c8ef-4543-8915-4dd73c665280"),
+            completed,
+        ));
+        assert!(should_abort_after_context_maintenance_commit(
+            Some(completed),
+            completed,
+        ));
+    }
+
+    #[test]
+    fn compaction_requires_an_explicit_nonempty_source_range_and_kept_boundary() {
+        let input = CreateContextCheckpointInput {
+            client_operation_id: Uuid::new_v4().to_string(),
+            workspace_id: "workspace-1".into(),
+            branch_id: "branch-1".into(),
+            kind: ContextCheckpointKindView::Compaction,
+            source_run_ids: vec!["run-1".into()],
+            first_kept_run_id: None,
+            summary: "Summary".into(),
+            expected_cursor_version: 1,
+            expected_branch_version: 2,
+        };
+
+        let mut invalid_operation = input.clone();
+        invalid_operation.client_operation_id = "new-on-every-retry".into();
+        assert_eq!(
+            validate_context_checkpoint(&invalid_operation)
+                .expect_err("maintenance idempotency keys must be UUIDs")
+                .code,
+            "invalid_client_operation_id"
+        );
+        assert_eq!(
+            validate_context_checkpoint(&input)
+                .expect_err("compaction must retain an explicit tail")
+                .code,
+            "missing_checkpoint_boundary"
+        );
+
+        let branch_summary_with_boundary = CreateContextCheckpointInput {
+            kind: ContextCheckpointKindView::BranchSummary,
+            first_kept_run_id: Some("run-1".into()),
+            ..input
+        };
+        assert_eq!(
+            validate_context_checkpoint(&branch_summary_with_boundary)
+                .expect_err("branch summaries cannot smuggle in compaction semantics")
+                .code,
+            "unexpected_checkpoint_boundary"
         );
     }
 

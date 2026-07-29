@@ -50,6 +50,7 @@ pub struct WorkspaceDetail {
     pub selected_run_ids: BTreeMap<EntityId, EntityId>,
     pub adjacent_branches: Vec<AdjacentBranchView>,
     pub decision_marks: Vec<DecisionMarkView>,
+    pub context_cursor: ContextCursorView,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +118,9 @@ pub struct RunErrorView {
 #[serde(rename_all = "camelCase")]
 pub struct ContextItemView {
     pub id: EntityId,
+    pub source_ref: ContextSourceRefView,
+    pub content_block_id: Option<EntityId>,
+    pub content_hash: String,
     pub ordinal: u32,
     pub role: MessageRoleView,
     pub label: String,
@@ -126,6 +130,32 @@ pub struct ContextItemView {
     pub estimated_tokens: u64,
     pub included: bool,
     pub pinned: bool,
+    pub mandatory: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ContextSourceKindView {
+    #[serde(rename = "workspace-system")]
+    WorkspaceSystem,
+    #[serde(rename = "turn-prompt")]
+    TurnPrompt,
+    #[serde(rename = "model-run")]
+    ModelRun,
+    #[serde(rename = "content-block")]
+    ContentBlock,
+    #[serde(rename = "current-prompt")]
+    CurrentPrompt,
+    #[serde(rename = "checkpoint-summary")]
+    CheckpointSummary,
+    #[serde(rename = "branch-summary")]
+    BranchSummary,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextSourceRefView {
+    pub kind: ContextSourceKindView,
+    pub id: Option<EntityId>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,6 +179,9 @@ pub struct ContextPreview {
     pub model: String,
     pub base_url: String,
     pub items: Vec<ContextItemView>,
+    pub raw_items: Vec<ContextItemView>,
+    pub draft_version: u64,
+    pub applied_checkpoint: Option<ContextCheckpointView>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,6 +191,8 @@ pub struct InspectContextInput {
     pub parent_run_id: Option<EntityId>,
     pub prompt: String,
     pub provider_profile_id: EntityId,
+    #[serde(default)]
+    pub branch_id: Option<EntityId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,6 +203,12 @@ pub struct CreateTurnAndStartRunInput {
     pub prompt: String,
     pub provider_profile_id: EntityId,
     pub preview_hash: String,
+    #[serde(default)]
+    pub branch_id: Option<EntityId>,
+    pub expected_cursor_version: u64,
+    #[serde(default)]
+    pub expected_branch_version: Option<u64>,
+    pub expected_draft_version: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +217,12 @@ pub struct RetryRunInput {
     pub run_id: EntityId,
     pub provider_profile_id: EntityId,
     pub preview_hash: String,
+    #[serde(default)]
+    pub branch_id: Option<EntityId>,
+    pub expected_cursor_version: u64,
+    #[serde(default)]
+    pub expected_branch_version: Option<u64>,
+    pub expected_draft_version: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,6 +230,208 @@ pub struct RetryRunInput {
 pub struct RunHandle {
     pub turn_id: EntityId,
     pub run_id: EntityId,
+    pub cursor_version: u64,
+    pub draft_version: u64,
+    pub branch_id: EntityId,
+    pub branch_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCursorView {
+    pub workspace_id: EntityId,
+    pub active_run_id: Option<EntityId>,
+    pub branch_id: Option<EntityId>,
+    pub version: u64,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetContextTreeInput {
+    pub workspace_id: EntityId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextTreeProjection {
+    pub workspace_id: EntityId,
+    pub root_id: EntityId,
+    pub draft_version: u64,
+    pub cursor: ContextCursorView,
+    pub nodes: Vec<ContextTreeRunNodeView>,
+    pub edges: Vec<ContextTreeEdgeView>,
+    pub branches: Vec<ContextBranchView>,
+    pub checkpoints: Vec<ContextCheckpointView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextTreeRunNodeView {
+    pub run_id: EntityId,
+    pub turn_id: EntityId,
+    pub parent_run_id: Option<EntityId>,
+    pub prompt: String,
+    pub title: String,
+    pub output_preview: String,
+    pub model: String,
+    pub status: RunStatusView,
+    pub created_at: Timestamp,
+    pub can_continue: bool,
+    pub is_active: bool,
+    pub is_on_active_path: bool,
+    pub branch_ids: Vec<EntityId>,
+    pub checkpoint_ids: Vec<EntityId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextTreeEdgeView {
+    pub id: EntityId,
+    pub source_run_id: Option<EntityId>,
+    pub target_run_id: EntityId,
+    pub is_on_active_path: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextBranchView {
+    pub id: EntityId,
+    pub name: String,
+    pub head_run_id: EntityId,
+    pub version: u64,
+    pub is_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextCheckpointKindView {
+    Compaction,
+    BranchSummary,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextMaintenanceStatusView {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Conflicted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCheckpointView {
+    pub id: EntityId,
+    pub workspace_id: EntityId,
+    pub branch_id: Option<EntityId>,
+    pub branch_version: Option<u64>,
+    pub kind: ContextCheckpointKindView,
+    pub anchor_run_id: Option<EntityId>,
+    pub source_run_ids: Vec<EntityId>,
+    pub source_hash: String,
+    pub first_kept_run_id: Option<EntityId>,
+    pub summary: String,
+    /// Present only when a Provider actually generated the checkpoint summary.
+    pub provider: Option<ContextCheckpointProviderSnapshotView>,
+    pub status: ContextMaintenanceStatusView,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetActiveContextInput {
+    pub workspace_id: EntityId,
+    pub run_id: Option<EntityId>,
+    #[serde(default)]
+    pub branch_id: Option<EntityId>,
+    pub expected_cursor_version: u64,
+    pub expected_draft_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenameBranchInput {
+    pub workspace_id: EntityId,
+    pub branch_id: EntityId,
+    pub name: String,
+    pub expected_branch_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextDraftItemInput {
+    pub source_ref: ContextSourceRefView,
+    #[serde(default)]
+    pub content_block_id: Option<EntityId>,
+    pub included: bool,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateContextDraftInput {
+    pub workspace_id: EntityId,
+    pub parent_run_id: Option<EntityId>,
+    pub expected_draft_version: u64,
+    pub items: Vec<ContextDraftItemInput>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateContextDraftResult {
+    pub draft_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewContextTransitionInput {
+    pub workspace_id: EntityId,
+    pub parent_run_id: Option<EntityId>,
+    pub prompt: String,
+    pub provider_profile_id: EntityId,
+    #[serde(default)]
+    pub branch_id: Option<EntityId>,
+    pub draft_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateContextCheckpointInput {
+    pub client_operation_id: EntityId,
+    pub workspace_id: EntityId,
+    pub branch_id: EntityId,
+    pub kind: ContextCheckpointKindView,
+    pub source_run_ids: Vec<EntityId>,
+    pub first_kept_run_id: Option<EntityId>,
+    pub summary: String,
+    pub expected_cursor_version: u64,
+    pub expected_branch_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SummarizeAndSetActiveContextInput {
+    pub client_operation_id: EntityId,
+    pub workspace_id: EntityId,
+    pub target_run_id: EntityId,
+    pub branch_id: EntityId,
+    pub source_run_ids: Vec<EntityId>,
+    pub first_kept_run_id: Option<EntityId>,
+    pub summary_prompt: String,
+    pub provider_profile_id: EntityId,
+    pub expected_cursor_version: u64,
+    pub expected_branch_version: u64,
+    pub expected_draft_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummarizeAndSetActiveContextResult {
+    pub cursor: ContextCursorView,
+    pub checkpoint: Option<ContextCheckpointView>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -317,6 +566,8 @@ pub struct ContextDiffView {
     pub only_left: Vec<ContextDiffItemView>,
     pub only_right: Vec<ContextDiffItemView>,
     pub shared: Vec<ContextDiffItemView>,
+    pub left_checkpoint_provenance: Vec<ContextCheckpointProvenanceView>,
+    pub right_checkpoint_provenance: Vec<ContextCheckpointProvenanceView>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -327,6 +578,39 @@ pub struct ContextDiffItemView {
     pub role: MessageRoleView,
     pub source: String,
     pub preview: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCheckpointProvenanceView {
+    pub checkpoint_id: EntityId,
+    pub maintenance_run_id: EntityId,
+    pub kind: ContextCheckpointKindView,
+    pub branch_id: Option<EntityId>,
+    pub branch_version: Option<u64>,
+    pub anchor_run_id: EntityId,
+    pub first_kept_run_id: Option<EntityId>,
+    pub summary_content_block_id: EntityId,
+    pub source_run_ids: Vec<EntityId>,
+    pub source_hash: String,
+    pub provider: Option<ContextCheckpointProviderSnapshotView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCheckpointProviderSnapshotView {
+    pub profile_id: EntityId,
+    pub provider_id: Option<EntityId>,
+    pub template_revision: Option<u16>,
+    pub provider_name: String,
+    pub dialect: ProviderDialectView,
+    pub stream_protocol: Option<ProviderStreamProtocolView>,
+    pub auth_placement: Option<ProviderAuthPlacementView>,
+    pub auth_header_name: Option<String>,
+    pub additional_headers: BTreeMap<String, String>,
+    pub base_url: String,
+    pub model: String,
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -573,8 +857,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ExportDecisionPacketInput, ModelInfoView, ProtocolProfileView, ProviderAuthPlacementView,
-        ProviderStreamProtocolView, ProviderTemplateView, RunSnapshotView, WorkspaceSummary,
+        ContextCursorView, ContextSourceKindView, ContextSourceRefView, ContextTreeProjection,
+        ContextTreeRunNodeView, ExportDecisionPacketInput, ModelInfoView, ProtocolProfileView,
+        ProviderAuthPlacementView, ProviderStreamProtocolView, ProviderTemplateView,
+        RunSnapshotView, RunStatusView, SetActiveContextInput, WorkspaceSummary,
     };
 
     #[test]
@@ -602,6 +888,82 @@ mod tests {
 
         assert_eq!(value["goal"], "Choose a migration path");
         assert_eq!(value["systemPrompt"], "Challenge unsupported assumptions");
+    }
+
+    #[test]
+    fn context_tree_contract_keeps_exact_run_cursor_and_typed_source_identity() {
+        let source = serde_json::to_value(ContextSourceRefView {
+            kind: ContextSourceKindView::ModelRun,
+            id: Some("run-parent".into()),
+        })
+        .expect("source identity serializes");
+        assert_eq!(
+            source,
+            serde_json::json!({"kind": "model-run", "id": "run-parent"})
+        );
+
+        let value = serde_json::to_value(ContextTreeProjection {
+            workspace_id: "workspace-1".into(),
+            root_id: "workspace-root:workspace-1".into(),
+            draft_version: 7,
+            cursor: ContextCursorView {
+                workspace_id: "workspace-1".into(),
+                active_run_id: Some("run-child".into()),
+                branch_id: Some("branch-1".into()),
+                version: 4,
+                updated_at: "2026-07-28T00:00:00Z".into(),
+            },
+            nodes: vec![ContextTreeRunNodeView {
+                run_id: "run-child".into(),
+                turn_id: "turn-child".into(),
+                parent_run_id: Some("run-parent".into()),
+                prompt: "Continue".into(),
+                title: "Continue".into(),
+                output_preview: "Result".into(),
+                model: "model-1".into(),
+                status: RunStatusView::Completed,
+                created_at: "2026-07-28T00:00:00Z".into(),
+                can_continue: true,
+                is_active: true,
+                is_on_active_path: true,
+                branch_ids: vec!["branch-1".into()],
+                checkpoint_ids: vec![],
+            }],
+            edges: vec![],
+            branches: vec![],
+            checkpoints: vec![],
+        })
+        .expect("tree projection serializes");
+
+        assert_eq!(value["cursor"]["activeRunId"], "run-child");
+        assert_eq!(value["draftVersion"], 7);
+        assert_eq!(value["nodes"][0]["parentRunId"], "run-parent");
+        assert_eq!(value["nodes"][0]["isOnActivePath"], true);
+    }
+
+    #[test]
+    fn set_active_context_contract_requires_both_cursor_and_draft_versions() {
+        let value = serde_json::json!({
+            "workspaceId": "workspace-1",
+            "runId": "run-1",
+            "branchId": null,
+            "expectedCursorVersion": 4,
+            "expectedDraftVersion": 7,
+        });
+        let input: SetActiveContextInput =
+            serde_json::from_value(value.clone()).expect("both CAS guards deserialize");
+        assert_eq!(input.expected_cursor_version, 4);
+        assert_eq!(input.expected_draft_version, 7);
+
+        let mut missing_draft = value;
+        missing_draft
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedDraftVersion");
+        assert!(
+            serde_json::from_value::<SetActiveContextInput>(missing_draft).is_err(),
+            "navigation cannot silently omit the draft CAS guard",
+        );
     }
 
     #[test]

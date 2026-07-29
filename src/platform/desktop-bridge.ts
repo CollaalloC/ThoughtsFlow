@@ -2,7 +2,14 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   ApiEnvelope,
   CompareRunsResult,
+  ContextBranchView,
+  ContextCheckpointProvenance,
+  ContextCheckpointProviderSnapshot,
+  ContextCheckpointView,
+  ContextCursor,
   ContextPreview,
+  ContextTreeProjection,
+  CreateContextCheckpointInput,
   CreateTurnAndStartRunInput,
   DecisionMark,
   DecisionStatus,
@@ -12,13 +19,20 @@ import type {
   ProviderModelInfo,
   ProviderProfile,
   ProviderTemplate,
+  PreviewContextTransitionInput,
+  RenameBranchInput,
   RetryRunInput,
   RouteProjection,
   RunEvent,
   RunHandle,
   RunSnapshot,
   SaveProviderProfileInput,
+  SetActiveContextInput,
   SessionCredentialSummary,
+  SummarizeAndSetActiveContextInput,
+  SummarizeAndSetActiveContextResult,
+  UpdateContextDraftInput,
+  UpdateContextDraftResult,
   WorkspaceDetail,
   WorkspaceSummary,
 } from "../shared/contracts";
@@ -39,6 +53,16 @@ export interface DesktopBridge {
     archived?: boolean;
   }): Promise<WorkspaceSummary>;
   inspectContext(input: InspectContextInput): Promise<ContextPreview>;
+  previewContextTransition(input: PreviewContextTransitionInput): Promise<ContextPreview>;
+  getContextTree(input: { workspaceId: string }): Promise<ContextTreeProjection>;
+  setActiveContext(input: SetActiveContextInput): Promise<ContextCursor>;
+  renameBranch(input: RenameBranchInput): Promise<ContextBranchView>;
+  updateContextDraft(input: UpdateContextDraftInput): Promise<UpdateContextDraftResult>;
+  createContextCheckpoint(input: CreateContextCheckpointInput): Promise<ContextCheckpointView>;
+  summarizeAndSetActiveContext(
+    input: SummarizeAndSetActiveContextInput,
+  ): Promise<SummarizeAndSetActiveContextResult>;
+  cancelContextMaintenance(clientOperationId: string): Promise<void>;
   createTurnAndStartRun(
     input: CreateTurnAndStartRunInput,
     onEvent: (event: RunEvent) => void,
@@ -205,6 +229,16 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
     openWorkspace: (id) => request("open_workspace", { id }),
     updateWorkspace: (input) => request("update_workspace", { input }),
     inspectContext: (input) => request("inspect_context", { input }),
+    previewContextTransition: (input) => request("preview_context_transition", { input }),
+    getContextTree: (input) => request("get_context_tree", { input }),
+    setActiveContext: (input) => request("set_active_context", { input }),
+    renameBranch: (input) => request("rename_branch", { input }),
+    updateContextDraft: (input) => request("update_context_draft", { input }),
+    createContextCheckpoint: (input) => request("create_context_checkpoint", { input }),
+    summarizeAndSetActiveContext: (input) =>
+      request("summarize_and_set_active_context", { input }),
+    cancelContextMaintenance: (clientOperationId) =>
+      request("cancel_context_maintenance", { clientOperationId }),
     createTurnAndStartRun: (input, onEvent) =>
       streamingInvoke("create_turn_and_start_run", input, onEvent),
     retryRun: (input, onEvent) => streamingInvoke("retry_run", input, onEvent),
@@ -261,7 +295,13 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
 
 export type {
   CompareRunsResult,
+  ContextBranchView,
+  ContextCheckpointProvenance,
+  ContextCheckpointProviderSnapshot,
+  ContextCheckpointView,
+  ContextCursor,
   ContextPreview,
+  ContextTreeProjection,
   ProviderModelInfo,
   ProviderProfile,
   ProviderTemplate,

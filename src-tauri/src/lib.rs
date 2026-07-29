@@ -13,15 +13,30 @@ use infrastructure::{
     sqlite::SqliteRepository,
 };
 use interface::*;
-use tauri::Manager;
+use tauri::{Manager, Runtime};
 
-fn register_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+fn desktop_builder() -> tauri::Builder<tauri::Wry> {
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "webview-e2e")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
+}
+
+fn register_handlers<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
         list_workspaces,
         create_workspace,
         open_workspace,
         update_workspace,
         inspect_context,
+        preview_context_transition,
+        get_context_tree,
+        set_active_context,
+        rename_branch,
+        update_context_draft,
+        create_context_checkpoint,
+        summarize_and_set_active_context,
+        cancel_context_maintenance,
         create_turn_and_start_run,
         retry_run,
         cancel_run,
@@ -46,7 +61,17 @@ fn register_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
 }
 
 pub fn builder(backend: Arc<dyn ApplicationBackend>) -> tauri::Builder<tauri::Wry> {
-    register_handlers(tauri::Builder::default().manage(AppState::new(backend)))
+    builder_for_runtime(backend, desktop_builder())
+}
+
+/// Builds the production command surface for a caller-selected Tauri runtime.
+/// The desktop entry point uses `Wry`; tests use Tauri's built-in mock runtime
+/// to exercise the exact IPC serialization and managed `AppState` boundary.
+pub fn builder_for_runtime<R: Runtime>(
+    backend: Arc<dyn ApplicationBackend>,
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    register_handlers(builder.manage(AppState::new(backend)))
 }
 
 pub fn run_with_backend(backend: Arc<dyn ApplicationBackend>) {
@@ -56,7 +81,23 @@ pub fn run_with_backend(backend: Arc<dyn ApplicationBackend>) {
 /// Production entry point. Database migrations and interruption recovery run
 /// before the main window can invoke an application command.
 pub fn run() {
-    let builder = tauri::Builder::default().setup(|app| {
+    let builder = desktop_builder().setup(|app| {
+        #[cfg(feature = "webview-e2e")]
+        let data_dir = match std::env::var_os("THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR") {
+            Some(value) if !value.is_empty() => {
+                let path = std::path::PathBuf::from(value);
+                if !path.is_absolute() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR must be an absolute path",
+                    )
+                    .into());
+                }
+                path
+            }
+            _ => app.path().app_data_dir()?,
+        };
+        #[cfg(not(feature = "webview-e2e"))]
         let data_dir = app.path().app_data_dir()?;
         std::fs::create_dir_all(&data_dir)?;
         let database_path = data_dir.join("thoughsflow.sqlite3");

@@ -71,6 +71,27 @@ pub trait ApplicationBackend: Send + Sync + 'static {
     fn open_workspace(&self, workspace_id: EntityId) -> AppFuture<'_, WorkspaceDetail>;
     fn update_workspace(&self, input: UpdateWorkspaceInput) -> AppFuture<'_, WorkspaceSummary>;
     fn inspect_context(&self, input: InspectContextInput) -> AppFuture<'_, ContextPreview>;
+    fn preview_context_transition(
+        &self,
+        input: PreviewContextTransitionInput,
+    ) -> AppFuture<'_, ContextPreview>;
+    fn get_context_tree(&self, input: GetContextTreeInput) -> AppFuture<'_, ContextTreeProjection>;
+    fn set_active_context(&self, input: SetActiveContextInput) -> AppFuture<'_, ContextCursorView>;
+    fn rename_branch(&self, input: RenameBranchInput) -> AppFuture<'_, ContextBranchView>;
+    fn update_context_draft(
+        &self,
+        input: UpdateContextDraftInput,
+    ) -> AppFuture<'_, UpdateContextDraftResult>;
+    fn create_context_checkpoint(
+        &self,
+        input: CreateContextCheckpointInput,
+    ) -> AppFuture<'_, ContextCheckpointView>;
+    fn summarize_and_set_active_context(
+        &self,
+        input: SummarizeAndSetActiveContextInput,
+        credentials: Arc<dyn SessionCredentialLookup>,
+    ) -> AppFuture<'_, SummarizeAndSetActiveContextResult>;
+    fn cancel_context_maintenance(&self, client_operation_id: EntityId) -> AppFuture<'_, ()>;
     fn create_turn_and_start_run(
         &self,
         input: CreateTurnAndStartRunInput,

@@ -493,4 +493,235 @@ describe("DesktopBridge errors", () => {
     expect(calls.some(({ command }) => command === "save_provider_profile")).toBe(false);
     expect(calls.some(({ command }) => command === "set_session_credential")).toBe(false);
   });
+
+  it("routes Context Tree reads and cursor CAS updates through versioned commands", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const invokeCommand = async <T,>(
+      command: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      calls.push({ command, args });
+      if (command === "get_context_tree") {
+        return {
+          apiVersion: 1,
+          data: {
+            workspaceId: "workspace-1",
+            rootId: "workspace-root:workspace-1",
+            draftVersion: 6,
+            cursor: {
+              workspaceId: "workspace-1",
+              activeRunId: "run-1",
+              branchId: "branch-1",
+              version: 2,
+              updatedAt: "2026-07-28T00:00:00.000Z",
+            },
+            nodes: [],
+            edges: [],
+            branches: [],
+            checkpoints: [],
+          },
+        } as T;
+      }
+      return {
+        apiVersion: 1,
+        data: {
+          workspaceId: "workspace-1",
+          activeRunId: "run-2",
+          branchId: "branch-1",
+          version: 3,
+          updatedAt: "2026-07-28T00:01:00.000Z",
+        },
+      } as T;
+    };
+    const bridge = createDesktopBridge(invokeCommand);
+
+    const tree = await bridge.getContextTree({ workspaceId: "workspace-1" });
+    const cursor = await bridge.setActiveContext({
+      workspaceId: "workspace-1",
+      runId: "run-2",
+      branchId: "branch-1",
+      expectedCursorVersion: tree.cursor.version,
+      expectedDraftVersion: tree.draftVersion,
+    });
+
+    expect(cursor).toMatchObject({ activeRunId: "run-2", version: 3 });
+    expect(calls).toEqual([
+      {
+        command: "get_context_tree",
+        args: { input: { workspaceId: "workspace-1" } },
+      },
+      {
+        command: "set_active_context",
+        args: {
+          input: {
+            workspaceId: "workspace-1",
+            runId: "run-2",
+            branchId: "branch-1",
+            expectedCursorVersion: 2,
+            expectedDraftVersion: 6,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("persists next-send Context Draft identities and returns its new version", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const invokeCommand = async <T,>(
+      command: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      calls.push({ command, args });
+      return { apiVersion: 1, data: { draftVersion: 8 } } as T;
+    };
+
+    const result = await createDesktopBridge(invokeCommand).updateContextDraft({
+      workspaceId: "workspace-1",
+      parentRunId: "run-7",
+      expectedDraftVersion: 7,
+      items: [
+        {
+          sourceRef: { kind: "model-run", id: "run-2" },
+          contentBlockId: "block-2",
+          included: true,
+          pinned: true,
+        },
+      ],
+    });
+
+    expect(result).toEqual({ draftVersion: 8 });
+    expect(calls).toEqual([
+      {
+        command: "update_context_draft",
+        args: {
+          input: {
+            workspaceId: "workspace-1",
+            parentRunId: "run-7",
+            expectedDraftVersion: 7,
+            items: [
+              {
+                sourceRef: { kind: "model-run", id: "run-2" },
+                contentBlockId: "block-2",
+                included: true,
+                pinned: true,
+              },
+            ],
+          },
+        },
+      },
+    ]);
+  });
+
+  it("keeps checkpoint preview, creation, and summarize-and-activate as distinct IPC actions", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const invokeCommand = async <T,>(
+      command: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      calls.push({ command, args });
+      return {
+        apiVersion: 1,
+        data:
+          command === "preview_context_transition"
+            ? {
+                hash: "sha256:preview",
+                estimatedTokens: 42,
+                limitTokens: 1000,
+                blocked: false,
+                warnings: [],
+                providerProfileId: "provider-1",
+                providerName: "Provider",
+                model: "model-1",
+                baseUrl: "https://provider.example/v1",
+                items: [],
+                rawItems: [],
+                draftVersion: 4,
+                appliedCheckpoint: null,
+              }
+            : command === "create_context_checkpoint"
+              ? {
+                  id: "checkpoint-1",
+                  workspaceId: "workspace-1",
+                  branchId: "branch-1",
+                  branchVersion: 1,
+                  kind: "compaction",
+                  anchorRunId: "run-2",
+                  sourceRunIds: ["run-1"],
+                  sourceHash: "sha256:sources",
+                  firstKeptRunId: "run-2",
+                  summary: "Stable summary",
+                  provider: null,
+                  status: "completed",
+                  createdAt: "2026-07-28T00:00:00.000Z",
+                }
+              : {
+                  cursor: {
+                    workspaceId: "workspace-1",
+                    activeRunId: "run-2",
+                    branchId: "branch-1",
+                    version: 5,
+                    updatedAt: "2026-07-28T00:00:00.000Z",
+                  },
+                  checkpoint: null,
+                },
+      } as T;
+    };
+    const bridge = createDesktopBridge(invokeCommand);
+
+    await bridge.previewContextTransition({
+      workspaceId: "workspace-1",
+      parentRunId: "run-2",
+      prompt: "Next",
+      providerProfileId: "provider-1",
+      draftVersion: 4,
+    });
+    await bridge.createContextCheckpoint({
+      clientOperationId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "workspace-1",
+      branchId: "branch-1",
+      kind: "compaction",
+      sourceRunIds: ["run-1"],
+      firstKeptRunId: "run-2",
+      summary: "Stable summary",
+      expectedCursorVersion: 4,
+      expectedBranchVersion: 1,
+    });
+    await bridge.summarizeAndSetActiveContext({
+      clientOperationId: "22222222-2222-4222-8222-222222222222",
+      workspaceId: "workspace-1",
+      targetRunId: "run-2",
+      branchId: "branch-1",
+      sourceRunIds: ["run-1"],
+      firstKeptRunId: "run-2",
+      summaryPrompt: "Summarize decisions",
+      providerProfileId: "provider-1",
+      expectedCursorVersion: 4,
+      expectedBranchVersion: 1,
+      expectedDraftVersion: 4,
+    });
+    await bridge.cancelContextMaintenance("22222222-2222-4222-8222-222222222222");
+
+    expect(calls.map(({ command }) => command)).toEqual([
+      "preview_context_transition",
+      "create_context_checkpoint",
+      "summarize_and_set_active_context",
+      "cancel_context_maintenance",
+    ]);
+    expect(calls[1]?.args).toStrictEqual({
+      input: {
+        clientOperationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "workspace-1",
+        branchId: "branch-1",
+        kind: "compaction",
+        sourceRunIds: ["run-1"],
+        firstKeptRunId: "run-2",
+        summary: "Stable summary",
+        expectedCursorVersion: 4,
+        expectedBranchVersion: 1,
+      },
+    });
+    expect(calls.at(-1)?.args).toEqual({
+      clientOperationId: "22222222-2222-4222-8222-222222222222",
+    });
+  });
 });
