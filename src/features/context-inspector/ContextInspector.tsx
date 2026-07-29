@@ -11,24 +11,15 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type {
+  ContextCheckpointView,
+  ContextItem,
   ProviderAuthPlacement,
   ProviderStreamProtocol,
 } from "../../shared/contracts";
 import { ProviderDestination } from "../../shared/ui";
 import "./context-inspector.css";
 
-export type ContextInspectorItem = {
-  key: string;
-  ordinal: number;
-  label: string;
-  source: string;
-  role: string;
-  content: string;
-  reason: string;
-  estimatedTokens: number;
-  included: boolean;
-  pinned: boolean;
-};
+export type ContextInspectorItem = ContextItem;
 
 export type LockedSnapshotProviderMetadata =
   | {
@@ -70,11 +61,14 @@ export type InspectorRun = {
   error?: string;
 };
 
-export type InspectorTab = "next" | "snapshot" | "runs";
+export type InspectorTab = "raw" | "next" | "snapshot" | "runs";
 
 type Props = {
   open: boolean;
   items: ContextInspectorItem[];
+  rawItems?: ContextInspectorItem[];
+  draftVersion?: number;
+  appliedCheckpoint?: ContextCheckpointView | null;
   estimatedTokens: number;
   limitTokens: number;
   warnings: string[];
@@ -90,7 +84,8 @@ type Props = {
 };
 
 const tabs: Array<{ id: InspectorTab; label: string }> = [
-  { id: "next", label: "下次发送" },
+  { id: "raw", label: "原始路径" },
+  { id: "next", label: "下一轮实际上下文" },
   { id: "snapshot", label: "本次实际发送的内容" },
   { id: "runs", label: "运行记录" },
 ];
@@ -139,6 +134,9 @@ function parameterValue(value: unknown) {
 export function ContextInspector({
   open,
   items,
+  rawItems = items,
+  draftVersion = 0,
+  appliedCheckpoint = null,
   estimatedTokens,
   limitTokens,
   warnings,
@@ -164,7 +162,12 @@ export function ContextInspector({
   const includedCount = items.filter((item) => item.included).length;
   const pinnedCount = items.filter((item) => item.pinned).length;
   const excludedCount = items.length - includedCount;
-  const shownItems = tab === "snapshot" ? snapshot?.items ?? [] : items;
+  const shownItems = tab === "snapshot"
+    ? snapshot?.items ?? []
+    : tab === "raw"
+      ? rawItems
+      : items;
+  const itemsReadOnly = tab === "snapshot";
   const snapshotProvider = snapshot
     ? {
         name: snapshot.providerName,
@@ -228,6 +231,7 @@ export function ContextInspector({
           <span><EyeOff size={11} /> {excludedCount} 排除</span>
           <span>{limitTokens.toLocaleString()} 上限</span>
         </small>
+        <p className="context-inspector__draft-version">草稿版本 v{draftVersion}</p>
       </section>
 
       {warnings.length > 0 && (
@@ -263,6 +267,41 @@ export function ContextInspector({
         id={`context-panel-${tab}`}
         aria-labelledby={`context-tab-${tab}`}
       >
+        {tab === "raw" ? (
+          <p className="context-inspector__path-note">
+            原始内容只读；检查点不会删除历史内容，下方操作只调整下一轮 Context 草稿。
+          </p>
+        ) : null}
+
+        {tab === "next" && appliedCheckpoint ? (
+          <section className="context-inspector__checkpoint" aria-label="已应用 Context 检查点">
+            <span>
+              {appliedCheckpoint.kind === "compaction" ? "压缩检查点" : "分支摘要"}
+              {" · "}
+              {appliedCheckpoint.sourceRunIds.length} 个来源 Run
+            </span>
+            <strong>{appliedCheckpoint.summary}</strong>
+            <dl>
+              <div>
+                <dt>保留边界</dt>
+                <dd>{appliedCheckpoint.firstKeptRunId ?? "不保留尾部"}</dd>
+              </div>
+              <div>
+                <dt>来源 Hash</dt>
+                <dd>{appliedCheckpoint.sourceHash}</dd>
+              </div>
+              <div>
+                <dt>摘要来源</dt>
+                <dd>
+                  {appliedCheckpoint.provider
+                    ? `${appliedCheckpoint.provider.providerName} · ${appliedCheckpoint.provider.model}`
+                    : "人工摘要"}
+                </dd>
+              </div>
+            </dl>
+          </section>
+        ) : null}
+
         {tab === "snapshot" && (
           <div className="context-inspector__snapshot-heading">
             {snapshotLoading ? (
@@ -335,7 +374,7 @@ export function ContextInspector({
           <div className="context-inspector__items">
             {shownItems.map((item) => (
               <article
-                key={`${tab}-${item.key}`}
+                key={`${tab}-${item.id}`}
                 className={`context-item ${item.included ? "is-included" : "is-excluded"} ${item.pinned ? "is-pinned" : ""}`}
               >
                 <span className="context-item__ordinal">{item.ordinal}</span>
@@ -353,7 +392,7 @@ export function ContextInspector({
                     type="button"
                     aria-label={`${item.pinned ? "取消固定" : "固定"} ${item.label}`}
                     aria-pressed={item.pinned}
-                    disabled={tab === "snapshot"}
+                    disabled={itemsReadOnly || item.mandatory}
                     className={item.pinned ? "is-active is-pin" : ""}
                     onClick={() => onTogglePinned(item)}
                   >
@@ -363,12 +402,13 @@ export function ContextInspector({
                     type="button"
                     aria-label={`${item.included ? "排除" : "重新纳入"} ${item.label}`}
                     aria-pressed={item.included}
-                    disabled={tab === "snapshot"}
+                    disabled={itemsReadOnly || item.mandatory}
                     className={item.included ? "is-active" : ""}
                     onClick={() => onToggleIncluded(item)}
                   >
                     {item.included ? <Eye size={13} /> : <EyeOff size={13} />}
                   </button>
+                  {item.mandatory ? <span className="context-item__mandatory">必须纳入</span> : null}
                 </div>
               </article>
             ))}

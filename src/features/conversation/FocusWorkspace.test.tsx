@@ -1,8 +1,17 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
-import type { WorkspaceDetail } from "../../shared/contracts";
-import { FocusWorkspace } from "./FocusWorkspace";
+import type {
+  ContextPreview,
+  ContextTreeProjection,
+  RunHandle,
+  RunSnapshot,
+  WorkspaceDetail,
+} from "../../shared/contracts";
+import {
+  FocusWorkspace,
+  nextCheckpointOperationId,
+} from "./FocusWorkspace";
 
 const workspace = {
   id: "workspace-1",
@@ -54,9 +63,16 @@ const detail: WorkspaceDetail = {
   selectedRunIds: { "turn-1": "run-a" },
   adjacentBranches: [],
   decisionMarks: [],
+  contextCursor: {
+    workspaceId: workspace.id,
+    activeRunId: "run-a",
+    branchId: "branch-a",
+    version: 4,
+    updatedAt: "2026-07-22T10:00:00Z",
+  },
 };
 
-const preview = {
+const preview: ContextPreview = {
   hash: "sha256:preview",
   estimatedTokens: 842,
   limitTokens: 8192,
@@ -69,6 +85,9 @@ const preview = {
   items: [
     {
       id: "context-system",
+      sourceRef: { kind: "workspace-system", id: workspace.id },
+      contentBlockId: "block-system",
+      contentHash: "sha256:system",
       ordinal: 1,
       role: "system" as const,
       label: "系统说明",
@@ -78,9 +97,13 @@ const preview = {
       estimatedTokens: 12,
       included: true,
       pinned: false,
+      mandatory: true,
     },
     {
       id: "context-run-a",
+      sourceRef: { kind: "model-run", id: "run-a" },
+      contentBlockId: "block-run-a",
+      contentHash: "sha256:run-a",
       ordinal: 2,
       role: "assistant" as const,
       label: "回答 A",
@@ -90,9 +113,145 @@ const preview = {
       estimatedTokens: 18,
       included: true,
       pinned: false,
+      mandatory: false,
     },
   ],
+  rawItems: [],
+  draftVersion: 0,
+  appliedCheckpoint: null,
 };
+preview.rawItems = preview.items;
+
+const contextTree: ContextTreeProjection = {
+  workspaceId: workspace.id,
+  rootId: `workspace-root:${workspace.id}`,
+  draftVersion: 0,
+  cursor: {
+    workspaceId: workspace.id,
+    activeRunId: "run-a",
+    branchId: "branch-a",
+    version: 4,
+    updatedAt: "2026-07-22T10:00:00Z",
+  },
+  nodes: detail.turns[0].runs.map((run) => ({
+    runId: run.id,
+    turnId: run.turnId,
+    parentRunId: null,
+    prompt: detail.turns[0].prompt,
+    title: "默认界面",
+    outputPreview: run.output,
+    model: run.model,
+    status: run.status,
+    createdAt: run.createdAt,
+    canContinue: run.status === "completed",
+    isActive: run.id === "run-a",
+    isOnActivePath: run.id === "run-a",
+    branchIds: [run.id === "run-a" ? "branch-a" : "branch-b"],
+    checkpointIds: [],
+  })),
+  edges: detail.turns[0].runs.map((run) => ({
+    id: `edge-${run.id}`,
+    sourceRunId: null,
+    targetRunId: run.id,
+    isOnActivePath: run.id === "run-a",
+  })),
+  branches: [
+    {
+      id: "branch-a",
+      name: "主路线",
+      headRunId: "run-a",
+      version: 2,
+      isActive: true,
+    },
+    {
+      id: "branch-b",
+      name: "备选路线",
+      headRunId: "run-b",
+      version: 1,
+      isActive: false,
+    },
+  ],
+  checkpoints: [],
+};
+
+function contextTreeAt(runId: "run-a" | "run-b"): ContextTreeProjection {
+  const branchId = runId === "run-a" ? "branch-a" : "branch-b";
+  return {
+    ...contextTree,
+    draftVersion: contextTree.draftVersion + (runId === "run-b" ? 1 : 0),
+    cursor: {
+      ...contextTree.cursor,
+      activeRunId: runId,
+      branchId,
+      version: contextTree.cursor.version + (runId === "run-b" ? 1 : 0),
+    },
+    nodes: contextTree.nodes.map((node) => ({
+      ...node,
+      isActive: node.runId === runId,
+      isOnActivePath: node.runId === runId,
+    })),
+    edges: contextTree.edges.map((edge) => ({
+      ...edge,
+      isOnActivePath: edge.targetRunId === runId,
+    })),
+    branches: contextTree.branches.map((branch) => ({
+      ...branch,
+      isActive: branch.id === branchId,
+    })),
+  };
+}
+
+function maintenanceTreeFixture(): ContextTreeProjection {
+  return {
+    ...contextTree,
+    nodes: [
+      {
+        ...contextTree.nodes[0],
+        runId: "run-parent",
+        turnId: "turn-parent",
+        parentRunId: null,
+        title: "事实基线",
+        prompt: "先确认事实",
+        isActive: false,
+        isOnActivePath: true,
+        branchIds: ["branch-a"],
+      },
+      {
+        ...contextTree.nodes[0],
+        parentRunId: "run-parent",
+        isActive: true,
+        isOnActivePath: true,
+      },
+      contextTree.nodes[1],
+    ],
+    edges: [
+      {
+        id: "edge-run-parent",
+        sourceRunId: null,
+        targetRunId: "run-parent",
+        isOnActivePath: true,
+      },
+      {
+        id: "edge-run-a",
+        sourceRunId: "run-parent",
+        targetRunId: "run-a",
+        isOnActivePath: true,
+      },
+      contextTree.edges[1],
+    ],
+  };
+}
+
+function runHandle(runId: string, turnId = "turn-2"): RunHandle {
+  return {
+    turnId,
+    runId,
+    cursorVersion: 5,
+    draftVersion: 1,
+    branchId: "branch-a",
+    branchVersion: 3,
+  };
+}
 
 function bridgeFixture() {
   return {
@@ -101,9 +260,20 @@ function bridgeFixture() {
     openWorkspace: vi.fn().mockResolvedValue(detail),
     updateWorkspace: vi.fn(),
     inspectContext: vi.fn().mockResolvedValue(preview),
+    previewContextTransition: vi.fn().mockResolvedValue(preview),
+    getContextTree: vi.fn().mockResolvedValue(contextTree),
+    setActiveContext: vi.fn().mockResolvedValue({
+      ...contextTree.cursor,
+      version: contextTree.cursor.version + 1,
+    }),
+    renameBranch: vi.fn(),
+    updateContextDraft: vi.fn().mockResolvedValue({ draftVersion: 1 }),
+    createContextCheckpoint: vi.fn(),
+    summarizeAndSetActiveContext: vi.fn(),
+    cancelContextMaintenance: vi.fn(),
     createTurnAndStartRun: vi
       .fn()
-      .mockResolvedValue({ turnId: "turn-2", runId: "run-2" }),
+      .mockResolvedValue(runHandle("run-2")),
     retryRun: vi.fn(),
     cancelRun: vi.fn(),
     getRunSnapshot: vi.fn(),
@@ -138,6 +308,17 @@ function bridgeFixture() {
 }
 
 describe("FocusWorkspace", () => {
+  it("keeps random UUID generation unless a valid WebView E2E operation ID is supplied", () => {
+    const randomId = "11111111-1111-4111-8111-111111111111";
+    const forcedId = "22222222-2222-4222-8222-222222222222";
+    const randomUuid = vi.fn(() => randomId);
+
+    expect(nextCheckpointOperationId(undefined, randomUuid)).toBe(randomId);
+    expect(nextCheckpointOperationId("not-a-uuid", randomUuid)).toBe(randomId);
+    expect(nextCheckpointOperationId(forcedId, randomUuid)).toBe(forcedId);
+    expect(randomUuid).toHaveBeenCalledTimes(2);
+  });
+
   it("recovers a quota failure with the failed Run's exact Provider and creates a new version", async () => {
     const bridge = bridgeFixture();
     const composerProfile = {
@@ -188,17 +369,18 @@ describe("FocusWorkspace", () => {
       { credentialId: "primary", label: "Primary", order: 0, isActive: true },
       { credentialId: "backup", label: "Backup", order: 1, isActive: false },
     ]);
-    vi.mocked(bridge.inspectContext).mockImplementation(async (input) => ({
+    const previewForProvider = async (input: { providerProfileId: string }) => ({
       ...preview,
       hash: input.providerProfileId === failedProfile.id
         ? "sha256:failed-exact-profile"
         : "sha256:composer-profile",
       providerProfileId: input.providerProfileId,
-    }));
-    vi.mocked(bridge.retryRun).mockResolvedValue({
-      turnId: "turn-1",
-      runId: "run-recovered",
     });
+    vi.mocked(bridge.inspectContext).mockImplementation(previewForProvider);
+    vi.mocked(bridge.previewContextTransition).mockImplementation(previewForProvider);
+    vi.mocked(bridge.retryRun).mockResolvedValue(
+      runHandle("run-recovered", "turn-1"),
+    );
 
     render(<FocusWorkspace bridge={bridge} />);
 
@@ -210,25 +392,33 @@ describe("FocusWorkspace", () => {
     expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "选择备用凭据" }));
-    await screen.findByRole("combobox", { name: "备用凭据" });
+    await screen.findByRole(
+      "combobox",
+      { name: "备用凭据" },
+      { timeout: 5_000 },
+    );
     expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "切换并新增回答版本" }));
 
     await waitFor(() => expect(bridge.retryRun).toHaveBeenCalledTimes(1));
     expect(bridge.activateSessionCredential).not.toHaveBeenCalled();
-    expect(bridge.inspectContext).toHaveBeenCalledWith({
-      workspaceId: workspace.id,
-      parentRunId: null,
-      prompt: detail.turns[0].prompt,
-      providerProfileId: failedProfile.id,
-    });
+    expect(bridge.previewContextTransition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: workspace.id,
+        parentRunId: null,
+        prompt: detail.turns[0].prompt,
+        providerProfileId: failedProfile.id,
+      }),
+    );
     expect(bridge.retryRun).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         runId: failedRun.id,
         providerProfileId: failedProfile.id,
         previewHash: "sha256:failed-exact-profile",
         credentialId: "backup",
-      },
+        expectedCursorVersion: 4,
+        expectedDraftVersion: 0,
+      }),
       expect.any(Function),
     );
     expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue(
@@ -236,7 +426,7 @@ describe("FocusWorkspace", () => {
     );
     expect(await screen.findByRole("button", { name: /回答 B · gpt-exact/ })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /回答 A · gpt-exact/ }));
-    expect(screen.getByText("已保留的失败部分输出")).toBeVisible();
+    expect(await screen.findByText("已保留的失败部分输出")).toBeVisible();
   });
 
   it("keeps an atomic credential retry rejected when Run creation fails", async () => {
@@ -388,13 +578,13 @@ describe("FocusWorkspace", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("creates an untitled-goal workspace without turning placeholder copy into model context", async () => {
+  it("requires and persists an explicit workspace goal", async () => {
     const bridge = bridgeFixture();
     vi.mocked(bridge.createWorkspace).mockResolvedValue({
       ...workspace,
       id: "workspace-new",
       name: "新工作区",
-      goal: "",
+      goal: "验证 Context Tree",
     });
     render(<FocusWorkspace bridge={bridge} />);
 
@@ -403,15 +593,120 @@ describe("FocusWorkspace", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "工作区名称" }), {
       target: { value: "新工作区" },
     });
+    expect(screen.getByRole("button", { name: "确认创建" })).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "工作区目标" }), {
+      target: { value: "验证 Context Tree" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "确认创建" }));
 
     await waitFor(() =>
-      expect(bridge.createWorkspace).toHaveBeenCalledWith({ name: "新工作区", goal: "" }),
+      expect(bridge.createWorkspace).toHaveBeenCalledWith({
+        name: "新工作区",
+        goal: "验证 Context Tree",
+      }),
     );
   });
 
   it("buffers early stream events and surfaces an uncommitted persistence failure", async () => {
     const bridge = bridgeFixture();
+    const interruptedRun = {
+      ...detail.turns[0].runs[0],
+      id: "run-early",
+      turnId: "turn-early",
+      status: "interrupted" as const,
+      output: "已先到达的部分输出",
+      createdAt: "2026-07-22T10:10:00Z",
+      completedAt: "2026-07-22T10:10:01Z",
+      error: { code: "storage_failure_uncommitted", message: "磁盘不可写" },
+    };
+    const authoritativeDetail: WorkspaceDetail = {
+      ...detail,
+      turns: [
+        ...detail.turns,
+        {
+          id: "turn-early",
+          workspaceId: workspace.id,
+          parentRunId: "run-a",
+          prompt: "验证事件竞态",
+          createdAt: "2026-07-22T10:10:00Z",
+          runs: [interruptedRun],
+        },
+      ],
+      selectedRunIds: {
+        ...detail.selectedRunIds,
+        "turn-early": "run-early",
+      },
+      contextCursor: {
+        ...detail.contextCursor!,
+        activeRunId: "run-early",
+        branchId: "branch-fork",
+        version: 5,
+      },
+    };
+    const authoritativeTree: ContextTreeProjection = {
+      ...contextTree,
+      draftVersion: 1,
+      cursor: {
+        ...contextTree.cursor,
+        activeRunId: "run-early",
+        branchId: "branch-fork",
+        version: 5,
+      },
+      nodes: [
+        ...contextTree.nodes.map((node) => ({
+          ...node,
+          isActive: false,
+          isOnActivePath: node.runId === "run-a",
+          branchIds: node.runId === "run-a"
+            ? ["branch-a", "branch-fork"]
+            : node.branchIds,
+        })),
+        {
+          runId: "run-early",
+          turnId: "turn-early",
+          parentRunId: "run-a",
+          prompt: "验证事件竞态",
+          title: "验证事件竞态",
+          outputPreview: interruptedRun.output,
+          model: interruptedRun.model,
+          status: interruptedRun.status,
+          createdAt: interruptedRun.createdAt,
+          canContinue: false,
+          isActive: true,
+          isOnActivePath: true,
+          branchIds: ["branch-fork"],
+          checkpointIds: [],
+        },
+      ],
+      edges: [
+        ...contextTree.edges.map((edge) => ({
+          ...edge,
+          isOnActivePath: edge.targetRunId === "run-a",
+        })),
+        {
+          id: "edge-run-early",
+          sourceRunId: "run-a",
+          targetRunId: "run-early",
+          isOnActivePath: true,
+        },
+      ],
+      branches: [
+        ...contextTree.branches.map((branch) => ({ ...branch, isActive: false })),
+        {
+          id: "branch-fork",
+          name: "故障分支",
+          headRunId: "run-early",
+          version: 0,
+          isActive: true,
+        },
+      ],
+    };
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValue(authoritativeDetail);
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(authoritativeTree);
     vi.mocked(bridge.createTurnAndStartRun).mockImplementation(async (_input, onEvent) => {
       onEvent({
         apiVersion: 1,
@@ -427,7 +722,11 @@ describe("FocusWorkspace", () => {
         error: { code: "storage_failure_uncommitted", message: "磁盘不可写" },
         at: "2026-07-22T10:10:01Z",
       });
-      return { turnId: "turn-early", runId: "run-early" };
+      return {
+        ...runHandle("run-early", "turn-early"),
+        branchId: "branch-fork",
+        branchVersion: 0,
+      };
     });
     render(<FocusWorkspace bridge={bridge} />);
 
@@ -439,11 +738,25 @@ describe("FocusWorkspace", () => {
 
     expect(await screen.findByText("已先到达的部分输出")).toBeVisible();
     expect(await screen.findByRole("alert")).toHaveTextContent("磁盘不可写");
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
     expect(screen.queryByText("请求凭证已锁定，正在等待 Provider 返回。")).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
       target: { value: "可以继续编辑" },
     });
-    expect(screen.getByRole("button", { name: "发送" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByText(/当前 Run 不可继续/)).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /run-a/ }));
+    await waitFor(() =>
+      expect(bridge.setActiveContext).toHaveBeenCalledWith({
+        workspaceId: workspace.id,
+        runId: "run-a",
+        branchId: "branch-fork",
+        expectedCursorVersion: 5,
+        expectedDraftVersion: 1,
+      }),
+    );
   });
 
   it("offers an explicit retry when sending fails with a retryable bridge error", async () => {
@@ -454,7 +767,7 @@ describe("FocusWorkspace", () => {
         message: "Provider 暂时不可达",
         retryable: true,
       }))
-      .mockResolvedValueOnce({ turnId: "turn-2", runId: "run-2" });
+      .mockResolvedValueOnce(runHandle("run-2"));
     render(<FocusWorkspace bridge={bridge} />);
 
     await screen.findByRole("heading", { name: workspace.name });
@@ -477,7 +790,7 @@ describe("FocusWorkspace", () => {
         message: "Provider 响应超时",
         retryable: true,
       }))
-      .mockResolvedValueOnce({ turnId: "turn-1", runId: "run-c" });
+      .mockResolvedValueOnce(runHandle("run-c", "turn-1"));
     render(<FocusWorkspace bridge={bridge} />);
 
     await screen.findByRole("heading", { name: workspace.name });
@@ -509,18 +822,35 @@ describe("FocusWorkspace", () => {
 
   it("opens a route-map departure at the exact selected Run", async () => {
     const bridge = bridgeFixture();
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(contextTreeAt("run-b"));
+    vi.mocked(bridge.setActiveContext).mockResolvedValue(contextTreeAt("run-b").cursor);
     render(<FocusWorkspace bridge={bridge} initialRunId="run-b" />);
 
     expect(await screen.findByText("以专注阅读为主，路线图按需打开。")).toBeVisible();
+    expect(bridge.setActiveContext).toHaveBeenCalledWith({
+      workspaceId: workspace.id,
+      runId: "run-b",
+      branchId: "branch-b",
+      expectedCursorVersion: 4,
+      expectedDraftVersion: 0,
+    });
     expect(screen.getByText(/从精确 Run run-b 继续/)).toBeVisible();
   });
 
   it("creates a branch from the exact selected answer version", async () => {
     const bridge = bridgeFixture();
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(contextTreeAt("run-b"));
+    vi.mocked(bridge.setActiveContext).mockResolvedValue(contextTreeAt("run-b").cursor);
     render(<FocusWorkspace bridge={bridge} />);
 
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /回答 B.*qwen3:14b/i }));
+    await waitFor(() => expect(bridge.setActiveContext).toHaveBeenCalled());
+    await screen.findByText(/从精确 Run run-b 继续/);
     fireEvent.click(screen.getByRole("button", { name: "从此回答创建分支" }));
 
     const branchForm = screen.getByRole("form", { name: "创建精确回答分支" });
@@ -544,7 +874,11 @@ describe("FocusWorkspace", () => {
 
   it("retries a root Turn against its original null parent instead of its own selected Run", async () => {
     const bridge = bridgeFixture();
-    vi.mocked(bridge.retryRun).mockResolvedValue({ turnId: "turn-1", runId: "run-c" });
+    vi.mocked(bridge.retryRun).mockResolvedValue({
+      ...runHandle("run-c", "turn-1"),
+      branchId: "branch-retry",
+      branchVersion: 0,
+    });
     render(<FocusWorkspace bridge={bridge} />);
 
     await screen.findByRole("heading", { name: workspace.name });
@@ -560,12 +894,22 @@ describe("FocusWorkspace", () => {
       ),
     );
     expect(bridge.retryRun).toHaveBeenCalledWith(
-      expect.objectContaining({
+      {
         runId: "run-a",
+        providerProfileId: "provider-cloud",
         previewHash: "sha256:preview",
-      }),
+        branchId: "branch-a",
+        expectedCursorVersion: 4,
+        expectedBranchVersion: 2,
+        expectedDraftVersion: 0,
+      },
       expect.any(Function),
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
+    expect(screen.getByRole("treeitem", { name: /run-c.*当前 Context/ })).toBeVisible();
+    expect(screen.queryByRole("treeitem", { name: /run-a/ })).not.toBeInTheDocument();
+    expect(screen.getByText("重试分支")).toBeVisible();
   });
 
   it("keeps provider destination visible and blocks sending an over-limit context", async () => {
@@ -614,12 +958,18 @@ describe("FocusWorkspace", () => {
     fireEvent.click(await screen.findByRole("button", { name: "排除 回答 A" }));
 
     await waitFor(() =>
-      expect(bridge.updateContextOverrides).toHaveBeenCalledWith({
+      expect(bridge.updateContextDraft).toHaveBeenCalledWith({
         workspaceId: "workspace-1",
         parentRunId: "run-a",
-        itemId: "context-run-a",
-        included: false,
-        pinned: false,
+        expectedDraftVersion: 0,
+        items: expect.arrayContaining([
+          {
+            sourceRef: { kind: "model-run", id: "run-a" },
+            contentBlockId: "block-run-a",
+            included: false,
+            pinned: false,
+          },
+        ]),
       }),
     );
 
@@ -634,6 +984,107 @@ describe("FocusWorkspace", () => {
     expect(screen.getByText("0.2")).toBeVisible();
     expect(screen.getByText('["DONE"]')).toBeVisible();
     expect(screen.getByRole("button", { name: "排除 回答 A" })).toBeDisabled();
+  });
+
+  it("atomically rebases a persisted draft when moving to root and sends with the authoritative version", async () => {
+    const bridge = bridgeFixture();
+    const rebasedTree: ContextTreeProjection = {
+      ...contextTree,
+      draftVersion: 2,
+      cursor: {
+        ...contextTree.cursor,
+        activeRunId: null,
+        branchId: null,
+        version: 5,
+      },
+      nodes: contextTree.nodes.map((node) => ({
+        ...node,
+        isActive: false,
+        isOnActivePath: false,
+      })),
+      edges: contextTree.edges.map((edge) => ({
+        ...edge,
+        isOnActivePath: false,
+      })),
+      branches: contextTree.branches.map((branch) => ({
+        ...branch,
+        isActive: false,
+      })),
+    };
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValue({
+        ...detail,
+        contextCursor: rebasedTree.cursor,
+      });
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(rebasedTree);
+    vi.mocked(bridge.setActiveContext).mockResolvedValue(rebasedTree.cursor);
+    vi.mocked(bridge.updateContextDraft).mockResolvedValue({ draftVersion: 1 });
+    vi.mocked(bridge.inspectContext)
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValue({ ...preview, draftVersion: 2 });
+    vi.mocked(bridge.previewContextTransition).mockImplementation(async (input) => ({
+      ...preview,
+      draftVersion: input.draftVersion,
+    }));
+    vi.mocked(bridge.createTurnAndStartRun).mockResolvedValue({
+      ...runHandle("run-from-root", "turn-from-root"),
+      draftVersion: 3,
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(screen.getByRole("button", { name: "打开上下文检查器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "排除 回答 A" }));
+    await waitFor(() =>
+      expect(bridge.previewContextTransition).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parentRunId: "run-a",
+          draftVersion: 1,
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /工作区起点/ }));
+
+    await waitFor(() =>
+      expect(bridge.setActiveContext).toHaveBeenCalledWith({
+        workspaceId: workspace.id,
+        runId: null,
+        branchId: null,
+        expectedCursorVersion: 4,
+        expectedDraftVersion: 1,
+      }),
+    );
+    await waitFor(() =>
+      expect(bridge.inspectContext).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          workspaceId: workspace.id,
+          parentRunId: null,
+        }),
+      ),
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
+      target: { value: "从根节点重新开始" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() =>
+      expect(bridge.createTurnAndStartRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceId: workspace.id,
+          parentRunId: null,
+          expectedCursorVersion: 5,
+          expectedDraftVersion: 2,
+        }),
+        expect.any(Function),
+      ),
+    );
   });
 
   it("falls back atomically for a legacy snapshot instead of rendering partial provider metadata", async () => {
@@ -660,5 +1111,374 @@ describe("FocusWorkspace", () => {
     expect(screen.queryByText(/undefined|rundefined/)).not.toBeInTheDocument();
     expect(screen.getByText("temperature")).toBeVisible();
     expect(screen.getByText("0.7")).toBeVisible();
+  });
+
+  it("discards a delayed snapshot after the persisted cursor moves to another Run", async () => {
+    const bridge = bridgeFixture();
+    const movedTree = contextTreeAt("run-b");
+    let resolveSnapshot!: (snapshot: RunSnapshot) => void;
+    const delayedSnapshot = new Promise<RunSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(movedTree);
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValue({
+        ...detail,
+        selectedRunIds: { "turn-1": "run-b" },
+        contextCursor: movedTree.cursor,
+      });
+    vi.mocked(bridge.setActiveContext).mockResolvedValue(movedTree.cursor);
+    vi.mocked(bridge.getRunSnapshot).mockReturnValue(delayedSnapshot);
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(screen.getByRole("button", { name: "打开上下文检查器" }));
+    fireEvent.click(screen.getByRole("tab", { name: "本次实际发送的内容" }));
+    await waitFor(() => expect(bridge.getRunSnapshot).toHaveBeenCalledWith("run-a"));
+
+    fireEvent.click(screen.getByRole("button", { name: /回答 B.*qwen3:14b/i }));
+    await screen.findByText(/从精确 Run run-b 继续/);
+
+    await act(async () => {
+      resolveSnapshot({
+        id: "snapshot-stale",
+        runId: "run-a",
+        canonicalHash: "sha256:must-not-cross-runs",
+        createdAt: "2026-07-22T09:11:00Z",
+        providerName: "OpenAI compatible",
+        additionalHeaders: {},
+        model: "gpt-4.1",
+        baseUrl: "https://api.example.com/v1",
+        parameters: {},
+        items: preview.items,
+      });
+      await delayedSnapshot;
+    });
+
+    expect(screen.queryByText("sha256:must-not-cross-runs")).not.toBeInTheDocument();
+  });
+
+  it("moves the persisted Context cursor to an exact Run and keeps the composer draft", async () => {
+    const bridge = bridgeFixture();
+    const movedTree = contextTreeAt("run-b");
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(movedTree);
+    vi.mocked(bridge.setActiveContext).mockResolvedValue(movedTree.cursor);
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
+      target: { value: "这段草稿不能丢" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
+    fireEvent.click(screen.getByRole("button", { name: "全部节点" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /run-b/ }));
+
+    await waitFor(() =>
+      expect(bridge.setActiveContext).toHaveBeenCalledWith({
+        workspaceId: workspace.id,
+        runId: "run-b",
+        branchId: "branch-b",
+        expectedCursorVersion: 4,
+        expectedDraftVersion: 0,
+      }),
+    );
+    expect((await screen.findAllByText("以专注阅读为主，路线图按需打开。")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("这段草稿不能丢");
+    expect(screen.getByText(/从精确 Run run-b 继续/)).toBeVisible();
+  });
+
+  it("refreshes a stale cursor without losing the composer draft", async () => {
+    const bridge = bridgeFixture();
+    const remoteRun = {
+      ...detail.turns[0].runs[0],
+      id: "run-remote",
+      turnId: "turn-remote",
+      output: "另一窗口已经落盘的权威回答。",
+      createdAt: "2026-07-22T10:20:00Z",
+      completedAt: "2026-07-22T10:20:05Z",
+    };
+    const remoteDetail: WorkspaceDetail = {
+      ...detail,
+      turns: [
+        ...detail.turns,
+        {
+          id: "turn-remote",
+          workspaceId: workspace.id,
+          parentRunId: "run-a",
+          prompt: "另一窗口继续了这条路线",
+          createdAt: "2026-07-22T10:19:00Z",
+          runs: [remoteRun],
+        },
+      ],
+      selectedRunIds: {
+        ...detail.selectedRunIds,
+        "turn-remote": remoteRun.id,
+      },
+      contextCursor: {
+        ...detail.contextCursor!,
+        activeRunId: remoteRun.id,
+        version: 5,
+      },
+    };
+    const remoteTree: ContextTreeProjection = {
+      ...contextTree,
+      cursor: {
+        ...contextTree.cursor,
+        activeRunId: remoteRun.id,
+        version: 5,
+      },
+      nodes: [
+        ...contextTree.nodes.map((node) => ({
+          ...node,
+          isActive: false,
+          isOnActivePath: node.runId === "run-a",
+        })),
+        {
+          runId: remoteRun.id,
+          turnId: remoteRun.turnId,
+          parentRunId: "run-a",
+          prompt: "另一窗口继续了这条路线",
+          title: "另一窗口继续",
+          outputPreview: remoteRun.output,
+          model: remoteRun.model,
+          status: remoteRun.status,
+          createdAt: remoteRun.createdAt,
+          canContinue: true,
+          isActive: true,
+          isOnActivePath: true,
+          branchIds: ["branch-a"],
+          checkpointIds: [],
+        },
+      ],
+      edges: [
+        ...contextTree.edges.map((edge) => ({
+          ...edge,
+          isOnActivePath: edge.targetRunId === "run-a",
+        })),
+        {
+          id: "edge-run-remote",
+          sourceRunId: "run-a",
+          targetRunId: remoteRun.id,
+          isOnActivePath: true,
+        },
+      ],
+      branches: contextTree.branches.map((branch) => branch.id === "branch-a"
+        ? { ...branch, headRunId: remoteRun.id, version: 3, isActive: true }
+        : { ...branch, isActive: false }),
+    };
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValue(remoteDetail);
+    vi.mocked(bridge.getContextTree)
+      .mockResolvedValueOnce(contextTree)
+      .mockResolvedValue(remoteTree);
+    vi.mocked(bridge.setActiveContext).mockRejectedValue(
+      new DesktopBridgeError({
+        code: "context_cursor_conflict",
+        message: "Context 位置已在其他窗口变化。",
+        retryable: true,
+      }),
+    );
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
+      target: { value: "保留冲突前草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /工作区起点/ }));
+
+    expect(await screen.findByText("Context 位置已在其他窗口变化。")).toBeVisible();
+    expect(bridge.getContextTree).toHaveBeenCalledTimes(2);
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(2);
+    expect((await screen.findAllByText("另一窗口已经落盘的权威回答。")).length)
+      .toBeGreaterThan(0);
+    expect(screen.getByText(/从精确 Run run-remote 继续/)).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("保留冲突前草稿");
+  });
+
+  it("creates a manual checkpoint only after confirming an exact source range", async () => {
+    const bridge = bridgeFixture();
+    const maintenanceTree: ContextTreeProjection = {
+      ...contextTree,
+      nodes: [
+        {
+          ...contextTree.nodes[0],
+          runId: "run-parent",
+          turnId: "turn-parent",
+          parentRunId: null,
+          title: "事实基线",
+          prompt: "先确认事实",
+          isActive: false,
+          isOnActivePath: true,
+          branchIds: ["branch-a"],
+        },
+        {
+          ...contextTree.nodes[0],
+          parentRunId: "run-parent",
+          isActive: true,
+          isOnActivePath: true,
+        },
+        contextTree.nodes[1],
+      ],
+      edges: [
+        {
+          id: "edge-run-parent",
+          sourceRunId: null,
+          targetRunId: "run-parent",
+          isOnActivePath: true,
+        },
+        {
+          id: "edge-run-a",
+          sourceRunId: "run-parent",
+          targetRunId: "run-a",
+          isOnActivePath: true,
+        },
+        contextTree.edges[1],
+      ],
+    };
+    vi.mocked(bridge.getContextTree).mockResolvedValue(maintenanceTree);
+    vi.mocked(bridge.createContextCheckpoint).mockResolvedValue({
+      id: "checkpoint-manual",
+      workspaceId: workspace.id,
+      branchId: "branch-a",
+      branchVersion: 2,
+      kind: "compaction",
+      anchorRunId: "run-a",
+      sourceRunIds: ["run-parent"],
+      sourceHash: "sha256:sources",
+      firstKeptRunId: "run-a",
+      summary: "保留已验证事实。",
+      provider: null,
+      status: "completed",
+      createdAt: "2026-07-28T10:00:00Z",
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    const openMaintenance = screen.getByRole("button", { name: "准备 Context 压缩" });
+    await waitFor(() => expect(openMaintenance).toBeEnabled());
+    fireEvent.click(openMaintenance);
+    fireEvent.change(screen.getByRole("textbox", { name: "人工摘要" }), {
+      target: { value: "保留已验证事实。" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存人工压缩检查点" }));
+
+    await waitFor(() =>
+      expect(bridge.createContextCheckpoint).toHaveBeenCalledWith({
+        clientOperationId: expect.any(String),
+        workspaceId: workspace.id,
+        branchId: "branch-a",
+        kind: "compaction",
+        sourceRunIds: ["run-parent"],
+        firstKeptRunId: "run-a",
+        summary: "保留已验证事实。",
+        expectedCursorVersion: 4,
+        expectedBranchVersion: 2,
+      }),
+    );
+    expect(await screen.findByText("Context 检查点已保存并激活。")).toBeVisible();
+    expect(screen.queryByRole("complementary", { name: "Context 压缩预览" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("summarizes and moves Context atomically with cursor, branch, and draft CAS versions", async () => {
+    const bridge = bridgeFixture();
+    const maintenanceTree = maintenanceTreeFixture();
+    vi.mocked(bridge.getContextTree).mockResolvedValue(maintenanceTree);
+    vi.mocked(bridge.summarizeAndSetActiveContext).mockResolvedValue({
+      cursor: { ...maintenanceTree.cursor, version: 5 },
+      checkpoint: null,
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalled());
+    const openMaintenance = screen.getByRole("button", { name: "准备 Context 压缩" });
+    await waitFor(() => expect(openMaintenance).toBeEnabled());
+    fireEvent.click(openMaintenance);
+    fireEvent.click(screen.getByRole("button", { name: "Provider 生成摘要" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "摘要请求" }), {
+      target: { value: "只总结已验证事实。" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认生成并切换 Context" }));
+
+    await waitFor(() =>
+      expect(bridge.summarizeAndSetActiveContext).toHaveBeenCalledWith({
+        clientOperationId: expect.any(String),
+        workspaceId: workspace.id,
+        targetRunId: "run-a",
+        branchId: "branch-a",
+        sourceRunIds: ["run-parent"],
+        firstKeptRunId: "run-a",
+        summaryPrompt: "只总结已验证事实。",
+        providerProfileId: "provider-cloud",
+        expectedCursorVersion: 4,
+        expectedBranchVersion: 2,
+        expectedDraftVersion: 0,
+      }),
+    );
+    expect(await screen.findByText("摘要已生成，Context 已原子切换。")).toBeVisible();
+  });
+
+  it("can cancel an in-flight Provider summary with the stable maintenance operation id", async () => {
+    const bridge = bridgeFixture();
+    const maintenanceTree = maintenanceTreeFixture();
+    let rejectSummary: ((reason?: unknown) => void) | undefined;
+    vi.mocked(bridge.getContextTree).mockResolvedValue(maintenanceTree);
+    vi.mocked(bridge.summarizeAndSetActiveContext).mockImplementation(
+      () => new Promise((_resolve, reject) => {
+        rejectSummary = reject;
+      }),
+    );
+    vi.mocked(bridge.cancelContextMaintenance).mockImplementation(async () => {
+      rejectSummary?.(new DesktopBridgeError({
+        code: "context_maintenance_cancelled",
+        message: "Context summary generation was cancelled",
+        retryable: false,
+      }));
+    });
+
+    render(<FocusWorkspace bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: workspace.name });
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalled());
+    const openMaintenance = screen.getByRole("button", { name: "准备 Context 压缩" });
+    await waitFor(() => expect(openMaintenance).toBeEnabled());
+    fireEvent.click(openMaintenance);
+    fireEvent.click(screen.getByRole("button", { name: "Provider 生成摘要" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认生成并切换 Context" }));
+
+    await waitFor(() => expect(bridge.summarizeAndSetActiveContext).toHaveBeenCalled());
+    const operationId = vi.mocked(bridge.summarizeAndSetActiveContext)
+      .mock.calls[0]?.[0].clientOperationId;
+    fireEvent.click(
+      screen.getByRole("button", { name: "取消正在生成的 Context 摘要" }),
+    );
+
+    await waitFor(() =>
+      expect(bridge.cancelContextMaintenance).toHaveBeenCalledWith(operationId),
+    );
+    expect(await screen.findByText("已请求取消摘要；检查点和当前 Context 不会移动。"))
+      .toBeVisible();
+    const submit = screen.getByRole("button", { name: "确认生成并切换 Context" });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(bridge.summarizeAndSetActiveContext).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      vi.mocked(bridge.summarizeAndSetActiveContext).mock.calls[1]?.[0].clientOperationId,
+    ).not.toBe(operationId);
   });
 });

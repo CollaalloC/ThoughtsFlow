@@ -177,6 +177,12 @@
   text-align: left;
   font: 600 11px/1.3 ui-sans-serif, system-ui, sans-serif;
 }
+.route-run-port__select.is-active {
+  border-color: color-mix(in srgb, var(--route-blue) 58%, var(--route-line));
+  background: color-mix(in srgb, var(--route-blue) 9%, var(--route-panel));
+  color: var(--route-blue);
+  box-shadow: inset 3px 0 var(--route-blue);
+}
 
 .route-run-port__select code {
   overflow: hidden;

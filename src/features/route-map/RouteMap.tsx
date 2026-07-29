@@ -64,6 +64,9 @@ export interface RouteProjection {
 
 export interface RouteMapProps {
   projection: RouteProjection;
+  selectedRunIds?: Record<string, string>;
+  /** @deprecated Prefer selectedRunIds so every Turn on the active path is exact. */
+  activeRunId?: string | null;
   onSelectTurn?: (turnId: string) => void;
   onSelectRun: (runId: string) => void;
   onCreateBranch: (parentRunId: string) => void;
@@ -73,6 +76,7 @@ export interface RouteMapProps {
 type RouteNodeData = Record<string, unknown> & {
   view: RouteNodeView;
   runs: RouteRunView[];
+  selectedRunId?: string | null;
   onSelectTurn?: (turnId: string) => void;
   onSelectRun: (runId: string) => void;
   onCreateBranch: (parentRunId: string) => void;
@@ -109,7 +113,7 @@ function normalizeRuns(view: RouteNodeView): RouteRunView[] {
 }
 
 function RouteTurnNode({ data }: NodeProps<Node<RouteNodeData>>) {
-  const { view, runs, onSelectTurn, onSelectRun, onCreateBranch } = data;
+  const { view, runs, selectedRunId, onSelectTurn, onSelectRun, onCreateBranch } = data;
 
   return (
     <article
@@ -142,7 +146,8 @@ function RouteTurnNode({ data }: NodeProps<Node<RouteNodeData>>) {
             <div className="route-run-port" key={run.runId}>
               <button
                 aria-label={`选择${view.title}的${run.label}`}
-                className="route-run-port__select nodrag"
+                aria-pressed={run.runId === selectedRunId}
+                className={`route-run-port__select nodrag ${run.runId === selectedRunId ? "is-active" : ""}`}
                 data-run-id={run.runId}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -186,6 +191,8 @@ const nodeTypes = { routeTurn: RouteTurnNode };
 
 export function RouteMap({
   projection,
+  selectedRunIds,
+  activeRunId,
   onSelectTurn,
   onSelectRun,
   onCreateBranch,
@@ -210,6 +217,10 @@ export function RouteMap({
         data: {
           view,
           runs: normalizeRuns(view),
+          selectedRunId: selectedRunIds?.[view.turnId]
+            ?? (normalizeRuns(view).some((run) => run.runId === activeRunId)
+              ? activeRunId
+              : null),
           onSelectTurn,
           onSelectRun,
           onCreateBranch,
@@ -217,7 +228,14 @@ export function RouteMap({
         className: view.isOnCurrentLineage ?? view.isCurrent ? "is-lineage" : undefined,
         ariaLabel: view.title,
       })),
-    [onCreateBranch, onSelectRun, onSelectTurn, projection.nodes],
+    [
+      activeRunId,
+      onCreateBranch,
+      onSelectRun,
+      onSelectTurn,
+      projection.nodes,
+      selectedRunIds,
+    ],
   );
 
   const turnNodeIds = useMemo(

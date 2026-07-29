@@ -2,6 +2,7 @@ import { Check, Download, GitCompareArrows, ShieldQuestion, X } from "lucide-rea
 import { useMemo, useState } from "react";
 import type {
   CompareRunsResult,
+  ContextCheckpointProvenance,
   ContextDiffItem,
   DecisionMark,
   DecisionStatus,
@@ -123,6 +124,84 @@ function ContextList({ emptyLabel, items }: { emptyLabel: string; items: Context
         </li>
       ))}
     </ol>
+  );
+}
+
+function CheckpointProvenanceList({
+  items,
+  routeLabel,
+}: {
+  items: ContextCheckpointProvenance[] | undefined;
+  routeLabel: string;
+}) {
+  return (
+    <article aria-label={`${routeLabel} 的 checkpoint 来源凭据`}>
+      <h4>{routeLabel} · Checkpoint 来源</h4>
+      {!items?.length ? (
+        <p className="decision-empty">本路线没有应用 checkpoint</p>
+      ) : (
+        <ol className="checkpoint-provenance-list">
+          {items.map((checkpoint) => (
+            <li key={checkpoint.checkpointId}>
+              <header>
+                <strong>{checkpoint.checkpointId}</strong>
+                <span>
+                  {checkpoint.kind === "compaction" ? "压缩检查点" : "分支摘要"}
+                </span>
+              </header>
+              <dl>
+                <div>
+                  <dt>维护 Run</dt>
+                  <dd><code>{checkpoint.maintenanceRunId}</code></dd>
+                </div>
+                <div>
+                  <dt>分支修订</dt>
+                  <dd>
+                    <code>
+                      {checkpoint.branchId
+                        ? `${checkpoint.branchId} · revision ${checkpoint.branchVersion ?? "未知"}`
+                        : "无分支修订"}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>锚点 Run</dt>
+                  <dd><code>{checkpoint.anchorRunId}</code></dd>
+                </div>
+                <div>
+                  <dt>来源 Run</dt>
+                  <dd><code>{checkpoint.sourceRunIds.join(" → ")}</code></dd>
+                </div>
+                <div>
+                  <dt>来源 Hash</dt>
+                  <dd><code>{checkpoint.sourceHash}</code></dd>
+                </div>
+                <div>
+                  <dt>首个保留 Run</dt>
+                  <dd>
+                    <code>{checkpoint.firstKeptRunId ?? "无保留边界"}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>摘要内容块</dt>
+                  <dd><code>{checkpoint.summaryContentBlockId}</code></dd>
+                </div>
+                <div>
+                  <dt>摘要 Provider</dt>
+                  <dd>
+                    <code>
+                      {checkpoint.provider
+                        ? `${checkpoint.provider.providerName} · ${checkpoint.provider.model}`
+                        : "人工摘要"}
+                    </code>
+                  </dd>
+                </div>
+              </dl>
+            </li>
+          ))}
+        </ol>
+      )}
+    </article>
   );
 }
 
@@ -363,6 +442,16 @@ export function DecisionWorkspace({
               <span className="decision-workspace__eyebrow">CONTEXT DIFF</span>
               <h3>两次运行实际使用的 Context</h3>
             </header>
+            <div className="checkpoint-provenance">
+              <CheckpointProvenanceList
+                items={comparison.contextDiff.leftCheckpointProvenance}
+                routeLabel="路线 A"
+              />
+              <CheckpointProvenanceList
+                items={comparison.contextDiff.rightCheckpointProvenance}
+                routeLabel="路线 B"
+              />
+            </div>
             <div className="context-diff__columns">
               <article>
                 <h4>仅路线 A · {comparison.contextDiff.onlyLeft.length}</h4>

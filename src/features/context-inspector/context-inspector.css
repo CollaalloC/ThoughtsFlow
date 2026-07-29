@@ -36,15 +36,24 @@
 .context-inspector__meter small { justify-content: flex-start; color: var(--tf-ink-faint); font-size: 9px; }
 .context-inspector__meter small span { display: inline-flex; align-items: center; gap: 4px; color: inherit; font-size: inherit; }
 .context-inspector__meter small span:last-child { margin-left: auto; }
+.context-inspector__draft-version { margin: 8px 0 0; color: var(--tf-ink-faint); font: 8px/1.3 var(--tf-mono); text-align: right; }
 
 .context-inspector__warnings { display: flex; gap: 8px; margin: 0 16px 12px; padding: 9px 10px; border-radius: 8px; background: var(--tf-amber-soft); color: #7f5527; font-size: 10.5px; line-height: 1.45; }
 .context-inspector__warnings p { margin: 0; }
 
-.context-inspector__tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; margin: 0 16px 10px; padding: 3px; border-radius: 8px; background: #e5e3dd; }
+.context-inspector__tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; margin: 0 16px 10px; padding: 3px; border-radius: 8px; background: #e5e3dd; }
 .context-inspector__tabs button { min-width: 0; padding: 8px 5px; overflow: hidden; border: 0; border-radius: 6px; background: transparent; color: var(--tf-ink-soft); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .context-inspector__tabs button.is-active { background: var(--tf-paper-strong); color: var(--tf-ink); box-shadow: var(--tf-shadow-sm); }
 
 .context-inspector__body { min-height: 0; flex: 1; overflow: auto; padding: 0 10px 12px; }
+.context-inspector__path-note { margin: 0 6px 8px; padding: 8px 9px; border-radius: 7px; background: var(--tf-ground-deep); color: var(--tf-ink-faint); font-size: 9px; line-height: 1.45; }
+.context-inspector__checkpoint { display: grid; gap: 5px; margin: 0 6px 9px; padding: 10px; border: 1px solid #d7c38d; border-radius: 8px; background: #faf6e9; }
+.context-inspector__checkpoint > span { color: #7a6334; font-size: 8.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.context-inspector__checkpoint > strong { color: var(--tf-ink); font-size: 10px; line-height: 1.4; }
+.context-inspector__checkpoint dl { display: grid; gap: 3px; margin: 2px 0 0; }
+.context-inspector__checkpoint dl > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 7px; }
+.context-inspector__checkpoint dt { color: var(--tf-ink-faint); font-size: 8px; }
+.context-inspector__checkpoint dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #675d46; font: 8px/1.4 var(--tf-mono); }
 .context-inspector__snapshot-heading { display: grid; gap: 5px; margin: 0 6px 9px; padding: 9px; border-radius: 7px; background: var(--tf-green-soft); color: var(--tf-green-strong); font-size: 10px; }
 .context-inspector__snapshot-heading span { display: inline-flex; align-items: center; gap: 5px; }
 .context-inspector__snapshot-heading code { overflow: hidden; font: 9px var(--tf-mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -72,6 +81,8 @@
 .context-item__actions button { display: grid; width: 23px; height: 23px; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--tf-ink-faint); }
 .context-item__actions button:hover, .context-item__actions button.is-active { background: var(--tf-green-soft); color: var(--tf-green); }
 .context-item__actions button.is-pin { background: var(--tf-amber-soft); color: var(--tf-amber); }
+.context-item__actions button:disabled { cursor: not-allowed; opacity: .42; }
+.context-item__mandatory { color: var(--tf-green); font-size: 7px; line-height: 1.2; text-align: center; writing-mode: vertical-rl; }
 
 .context-inspector__runs { display: grid; gap: 6px; padding: 0 6px; margin: 0; list-style: none; }
 .context-inspector__runs li { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 9px; align-items: start; padding: 10px; border-radius: 8px; background: rgb(255 255 255 / 70%); }

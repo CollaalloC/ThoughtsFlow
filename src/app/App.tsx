@@ -2,8 +2,13 @@ import { ArrowLeft, GitCompareArrows, Map, MessageSquareText, Settings2 } from "
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { DecisionRunOption } from "../features/decision";
 import { FocusWorkspace } from "../features/conversation";
+import { resolveContextBranchId } from "../features/context-tree";
 import { createDesktopBridge, type DesktopBridge } from "../platform/desktop-bridge";
-import type { RouteProjection, WorkspaceDetail } from "../shared/contracts";
+import type {
+  ContextTreeProjection,
+  RouteProjection,
+  WorkspaceDetail,
+} from "../shared/contracts";
 import { Brand, ErrorState, LoadingState } from "../shared/ui";
 import "../shared/tokens/index.css";
 import "../shared/ui/styles.css";
@@ -47,9 +52,9 @@ export function App({ bridge: providedBridge }: AppProps) {
 
   const [view, setView] = useState<AppView>("focus");
   const [workspaceId, setWorkspaceId] = useState<string>();
-  const [currentRunId, setCurrentRunId] = useState<string>();
   const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
   const [projection, setProjection] = useState<RouteProjection | null>(null);
+  const [contextTree, setContextTree] = useState<ContextTreeProjection | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -76,6 +81,7 @@ export function App({ bridge: providedBridge }: AppProps) {
     if (!workspaceId) {
       setDetail(null);
       setProjection(null);
+      setContextTree(null);
       setLoading(false);
       setError("当前没有可打开的本地工作区。");
       return;
@@ -89,14 +95,17 @@ export function App({ bridge: providedBridge }: AppProps) {
       view === "route"
         ? Promise.all([
             bridge.openWorkspace(workspaceId),
-            bridge.getRouteProjection({ workspaceId, currentRunId }),
-          ]).then(([nextDetail, nextProjection]) => ({
+            bridge.getRouteProjection({ workspaceId }),
+            bridge.getContextTree({ workspaceId }),
+          ]).then(([nextDetail, nextProjection, nextContextTree]) => ({
             detail: nextDetail,
             projection: nextProjection,
+            contextTree: nextContextTree,
           }))
         : bridge.openWorkspace(workspaceId).then((nextDetail) => ({
             detail: nextDetail,
             projection: null,
+            contextTree: null,
           }));
 
     request
@@ -104,11 +113,13 @@ export function App({ bridge: providedBridge }: AppProps) {
         if (!active) return;
         setDetail(result.detail);
         setProjection(result.projection);
+        setContextTree(result.contextTree);
       })
       .catch((reason: unknown) => {
         if (!active) return;
         setDetail(null);
         setProjection(null);
+        setContextTree(null);
         setError(reason instanceof Error ? reason.message : "无法读取工作区视图。");
       })
       .finally(() => {
@@ -118,9 +129,18 @@ export function App({ bridge: providedBridge }: AppProps) {
     return () => {
       active = false;
     };
-  }, [bridge, currentRunId, reloadKey, view, workspaceId]);
+  }, [bridge, reloadKey, view, workspaceId]);
 
   const runs = useMemo(() => (detail ? decisionRuns(detail) : []), [detail]);
+  const routeSelectedRunIds = useMemo(() => {
+    const selected: Record<string, string> = {};
+    contextTree?.nodes
+      .filter((node) => node.isOnActivePath)
+      .forEach((node) => {
+        selected[node.turnId] = node.runId;
+      });
+    return selected;
+  }, [contextTree]);
 
   const openOrdinaryView = (nextView: Exclude<AppView, "settings">) => {
     setSettingsProviderProfileId(undefined);
@@ -133,9 +153,8 @@ export function App({ bridge: providedBridge }: AppProps) {
     setView("settings");
   };
 
-  const openRoute = (nextWorkspaceId: string, runId?: string) => {
+  const openRoute = (nextWorkspaceId: string, _runId?: string) => {
     setWorkspaceId(nextWorkspaceId);
-    setCurrentRunId(runId);
     setProjection(null);
     setError(null);
     openOrdinaryView("route");
@@ -160,6 +179,41 @@ export function App({ bridge: providedBridge }: AppProps) {
       .catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : "无法保存路线图位置。");
       });
+  };
+
+  const selectRouteRun = async (runId: string, returnToFocus = false) => {
+    if (!workspaceId || !contextTree) return;
+    const node = contextTree.nodes.find((item) => item.runId === runId);
+    const branchId = node
+      ? resolveContextBranchId(contextTree, node.branchIds)
+      : null;
+    setError(null);
+    try {
+      const cursor = await bridge.setActiveContext({
+        workspaceId,
+        runId,
+        branchId,
+        expectedCursorVersion: contextTree.cursor.version,
+        expectedDraftVersion: contextTree.draftVersion,
+      });
+      setContextTree((current) => current ? {
+        ...current,
+        cursor,
+      } : current);
+      if (returnToFocus) {
+        openOrdinaryView("focus");
+      } else {
+        setProjection(null);
+        setReloadKey((current) => current + 1);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法切换 Context 位置。");
+      try {
+        setContextTree(await bridge.getContextTree({ workspaceId }));
+      } catch {
+        // The structured cursor failure remains the most useful error.
+      }
+    }
   };
 
   return (
@@ -204,7 +258,6 @@ export function App({ bridge: providedBridge }: AppProps) {
         {view === "focus" ? (
           <FocusWorkspace
             bridge={bridge}
-            initialRunId={currentRunId}
             initialWorkspaceId={workspaceId}
             onOpenDecisions={openDecisions}
             onOpenRouteMap={openRoute}
@@ -249,15 +302,19 @@ export function App({ bridge: providedBridge }: AppProps) {
 
               {view === "route" && !loading && !error && projection ? (
                 <RouteMap
+                selectedRunIds={routeSelectedRunIds}
                 onCreateBranch={(parentRunId) => {
-                  setCurrentRunId(parentRunId);
-                  openOrdinaryView("focus");
+                  void selectRouteRun(parentRunId, true);
                 }}
-                onSelectRun={(runId) => setCurrentRunId(runId)}
+                onSelectRun={(runId) => void selectRouteRun(runId)}
                 onSelectTurn={(turnId) => {
                   const node = projection.nodes.find((item) => item.turnId === turnId);
-                  const runId = node?.runs.find((run) => run.status === "completed")?.runId;
-                  if (runId) setCurrentRunId(runId);
+                  const activeRunId = contextTree?.nodes.find(
+                    (item) => item.turnId === turnId && item.isOnActivePath,
+                  )?.runId;
+                  const runId = activeRunId
+                    ?? node?.runs.find((run) => run.status === "completed")?.runId;
+                  if (runId) void selectRouteRun(runId);
                 }}
                 onViewStateChange={persistViewState}
                 projection={projection}

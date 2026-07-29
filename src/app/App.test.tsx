@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DesktopBridge } from "../platform/desktop-bridge";
 import type {
   CompareRunsResult,
+  ContextTreeProjection,
   ProviderProfile,
   RouteProjection,
   WorkspaceDetail,
@@ -72,6 +73,13 @@ const detail: WorkspaceDetail = {
   selectedRunIds: { "turn-root": "run-root-b" },
   adjacentBranches: [],
   decisionMarks: [],
+  contextCursor: {
+    workspaceId: workspace.id,
+    activeRunId: "run-root-b",
+    branchId: "branch-main",
+    version: 3,
+    updatedAt: "2026-07-22T08:05:00Z",
+  },
 };
 
 const routeProjection: RouteProjection = {
@@ -108,6 +116,58 @@ const routeProjection: RouteProjection = {
   edges: [],
 };
 
+const appContextTree: ContextTreeProjection = {
+  workspaceId: workspace.id,
+  rootId: `workspace-root:${workspace.id}`,
+  draftVersion: 7,
+  cursor: {
+    workspaceId: workspace.id,
+    activeRunId: "run-root-b",
+    branchId: "branch-main",
+    version: 3,
+    updatedAt: "2026-07-22T08:05:00Z",
+  },
+  nodes: detail.turns[0].runs.map((run) => ({
+    runId: run.id,
+    turnId: run.turnId,
+    parentRunId: null,
+    prompt: detail.turns[0].prompt,
+    title: detail.turns[0].title ?? detail.turns[0].prompt,
+    outputPreview: run.output,
+    model: run.model,
+    status: run.status,
+    createdAt: run.createdAt,
+    canContinue: true,
+    isActive: run.id === "run-root-b",
+    isOnActivePath: run.id === "run-root-b",
+    branchIds: [run.id === "run-root-a" ? "branch-alt" : "branch-main"],
+    checkpointIds: [],
+  })),
+  edges: detail.turns[0].runs.map((run) => ({
+    id: `edge-${run.id}`,
+    sourceRunId: null,
+    targetRunId: run.id,
+    isOnActivePath: run.id === "run-root-b",
+  })),
+  branches: [
+    {
+      id: "branch-alt",
+      name: "备选",
+      headRunId: "run-root-a",
+      version: 1,
+      isActive: false,
+    },
+    {
+      id: "branch-main",
+      name: "主路线",
+      headRunId: "run-root-b",
+      version: 2,
+      isActive: true,
+    },
+  ],
+  checkpoints: [],
+};
+
 const comparison: CompareRunsResult = {
   left: { runId: "run-root-a", model: provider.model, status: "completed" },
   right: { runId: "run-root-b", model: provider.model, status: "completed" },
@@ -132,7 +192,37 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
       model: provider.model,
       baseUrl: provider.baseUrl,
       items: [],
+      rawItems: [],
+      draftVersion: 0,
+      appliedCheckpoint: null,
     }),
+    previewContextTransition: vi.fn().mockResolvedValue({
+      hash: "preview-hash",
+      estimatedTokens: 0,
+      limitTokens: 10_000,
+      blocked: false,
+      warnings: [],
+      providerProfileId: provider.id,
+      providerName: provider.name,
+      model: provider.model,
+      baseUrl: provider.baseUrl,
+      items: [],
+      rawItems: [],
+      draftVersion: 0,
+      appliedCheckpoint: null,
+    }),
+    getContextTree: vi.fn().mockResolvedValue(appContextTree),
+    setActiveContext: vi.fn().mockResolvedValue({
+      ...appContextTree.cursor,
+      activeRunId: "run-root-a",
+      branchId: "branch-alt",
+      version: 4,
+    }),
+    renameBranch: vi.fn(),
+    updateContextDraft: vi.fn().mockResolvedValue({ draftVersion: 1 }),
+    createContextCheckpoint: vi.fn(),
+    summarizeAndSetActiveContext: vi.fn(),
+    cancelContextMaintenance: vi.fn(),
     createTurnAndStartRun: vi.fn(),
     retryRun: vi.fn(),
     cancelRun: vi.fn().mockResolvedValue(undefined),
@@ -194,6 +284,20 @@ describe("App", () => {
     };
     const bridge = bridgeFixture({
       openWorkspace: vi.fn().mockResolvedValue(failedDetail),
+      getContextTree: vi.fn().mockResolvedValue({
+        ...appContextTree,
+        cursor: {
+          ...appContextTree.cursor,
+          activeRunId: "run-root-a",
+          branchId: "branch-alt",
+        },
+        nodes: appContextTree.nodes
+          .filter((node) => node.runId === "run-root-a")
+          .map((node) => ({ ...node, isActive: true, isOnActivePath: true })),
+        edges: appContextTree.edges
+          .filter((edge) => edge.targetRunId === "run-root-a")
+          .map((edge) => ({ ...edge, isOnActivePath: true })),
+      }),
       listProviderProfiles: vi.fn().mockResolvedValue([provider, failedProvider]),
       listSessionCredentials: vi.fn().mockResolvedValue([
         { credentialId: "primary", label: "Primary", order: 0, isActive: true },
@@ -242,6 +346,135 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "返回 Focus" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
+  });
+
+  it("highlights the exact answer version for every Turn on the active Context path", async () => {
+    const user = userEvent.setup();
+    const childRun = {
+      ...detail.turns[0].runs[0],
+      id: "run-child",
+      turnId: "turn-child",
+      output: "子问题回答",
+      createdAt: "2026-07-22T08:06:00Z",
+      completedAt: "2026-07-22T08:07:00Z",
+    };
+    const lineageDetail: WorkspaceDetail = {
+      ...detail,
+      turns: [
+        ...detail.turns,
+        {
+          id: "turn-child",
+          workspaceId: workspace.id,
+          parentRunId: "run-root-b",
+          prompt: "继续验证候选路线",
+          title: "候选路线",
+          createdAt: "2026-07-22T08:06:00Z",
+          runs: [childRun],
+        },
+      ],
+      selectedRunIds: {
+        "turn-root": "run-root-b",
+        "turn-child": "run-child",
+      },
+    };
+    const lineageProjection: RouteProjection = {
+      ...routeProjection,
+      nodes: [
+        {
+          ...routeProjection.nodes[0],
+          isCurrent: false,
+        },
+        {
+          id: "node-child",
+          turnId: "turn-child",
+          title: "候选路线",
+          summary: "继续验证候选路线",
+          status: "completed",
+          x: 420,
+          y: 80,
+          isCurrent: true,
+          isOnCurrentLineage: true,
+          runs: [{
+            runId: "run-child",
+            label: "回答 A",
+            model: provider.model,
+            status: "completed",
+            canBranch: true,
+          }],
+        },
+      ],
+      edges: [{
+        id: "edge-child",
+        sourceRunId: "run-root-b",
+        targetTurnId: "turn-child",
+        isOnCurrentLineage: true,
+      }],
+    };
+    const lineageTree: ContextTreeProjection = {
+      ...appContextTree,
+      cursor: {
+        ...appContextTree.cursor,
+        activeRunId: "run-child",
+      },
+      nodes: [
+        ...appContextTree.nodes.map((node) => ({
+          ...node,
+          isActive: false,
+          isOnActivePath: node.runId === "run-root-b",
+        })),
+        {
+          runId: "run-child",
+          turnId: "turn-child",
+          parentRunId: "run-root-b",
+          prompt: "继续验证候选路线",
+          title: "候选路线",
+          outputPreview: childRun.output,
+          model: childRun.model,
+          status: childRun.status,
+          createdAt: childRun.createdAt,
+          canContinue: true,
+          isActive: true,
+          isOnActivePath: true,
+          branchIds: ["branch-main"],
+          checkpointIds: [],
+        },
+      ],
+      edges: [
+        ...appContextTree.edges.map((edge) => ({
+          ...edge,
+          isOnActivePath: edge.targetRunId === "run-root-b",
+        })),
+        {
+          id: "edge-run-child",
+          sourceRunId: "run-root-b",
+          targetRunId: "run-child",
+          isOnActivePath: true,
+        },
+      ],
+      branches: appContextTree.branches.map((branch) => branch.id === "branch-main"
+        ? { ...branch, headRunId: "run-child", isActive: true }
+        : { ...branch, isActive: false }),
+    };
+    const bridge = bridgeFixture({
+      openWorkspace: vi.fn().mockResolvedValue(lineageDetail),
+      getRouteProjection: vi.fn().mockResolvedValue(lineageProjection),
+      getContextTree: vi.fn().mockResolvedValue(lineageTree),
+    });
+
+    render(<App bridge={bridge} />);
+    expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
+    await user.click(
+      within(screen.getByRole("navigation", { name: "工作面" }))
+        .getByRole("button", { name: "路线图" }),
+    );
+
+    const route = await screen.findByRole("region", { name: "对话路线图" });
+    expect(within(route).getByRole("button", { name: "选择事实基线的回答 B" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(within(route).getByRole("button", { name: "选择事实基线的回答 A" }))
+      .toHaveAttribute("aria-pressed", "false");
+    expect(within(route).getByRole("button", { name: "选择候选路线的回答 A" }))
+      .toHaveAttribute("aria-pressed", "true");
   });
 
   it("connects comparison, decision marking, and export to the DesktopBridge", async () => {
@@ -336,9 +569,17 @@ describe("App", () => {
 
     await user.click(within(route).getByRole("button", { name: "选择事实基线的回答 A" }));
     await waitFor(() =>
+      expect(bridge.setActiveContext).toHaveBeenCalledWith({
+        workspaceId: workspace.id,
+        runId: "run-root-a",
+        branchId: "branch-alt",
+        expectedCursorVersion: 3,
+        expectedDraftVersion: 7,
+      }),
+    );
+    await waitFor(() =>
       expect(bridge.getRouteProjection).toHaveBeenCalledWith({
         workspaceId: workspace.id,
-        currentRunId: "run-root-a",
       }),
     );
     await waitFor(() => expect(route).not.toBeInTheDocument());

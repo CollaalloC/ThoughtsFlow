@@ -15,13 +15,16 @@ import {
   Search,
   Send,
   Settings2,
+  Sparkles,
   Square,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
   ContextPreview,
+  ContextTreeProjection,
   ModelRun,
   ProviderAuthPlacement,
   ProviderProfile,
@@ -31,6 +34,13 @@ import type {
   WorkspaceDetail,
   WorkspaceSummary,
 } from "../../shared/contracts";
+import {
+  ContextMaintenancePanel,
+  ContextTree,
+  resolveContextBranchId,
+  type ManualCheckpointProposal,
+  type ProviderCheckpointProposal,
+} from "../context-tree";
 import {
   ContextInspector,
   type ContextInspectorItem,
@@ -53,6 +63,19 @@ import { CredentialRecovery } from "./CredentialRecovery";
 import "../../shared/tokens/index.css";
 import "../../shared/ui/styles.css";
 import "./focus-workspace.css";
+
+const clientOperationIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function nextCheckpointOperationId(
+  webviewE2eOperationId: string | undefined,
+  randomUuid: () => string = () => crypto.randomUUID(),
+) {
+  return webviewE2eOperationId
+    && clientOperationIdPattern.test(webviewE2eOperationId)
+    ? webviewE2eOperationId
+    : randomUuid();
+}
 
 type WorkspaceView = WorkspaceSummary;
 type RunView = ModelRun;
@@ -129,14 +152,20 @@ function deriveSelectedRuns(turns: TurnView[]): SelectedRuns {
   return selected;
 }
 
-function deriveLineage(turns: TurnView[], leafId?: string): TurnView[] {
-  if (turns.length === 0) return [];
+function deriveLineage(turns: TurnView[], activeRunId?: string | null): TurnView[] {
+  if (turns.length === 0 || activeRunId === null) return [];
   const runOwners = new Map<string, TurnView>();
   turns.forEach((turn) => turn.runs.forEach((run) => runOwners.set(run.id, turn)));
-  const parentTurnIds = new Set(turns.map((turn) => turn.parentRunId).filter(Boolean).map((runId) => runOwners.get(runId as string)?.id).filter(Boolean));
-  let cursor = turns.find((turn) => turn.id === leafId)
-    ?? [...turns].reverse().find((turn) => !parentTurnIds.has(turn.id))
-    ?? turns.at(-1);
+  const parentTurnIds = new Set(
+    turns
+      .map((turn) => turn.parentRunId)
+      .filter(Boolean)
+      .map((runId) => runOwners.get(runId as string)?.id)
+      .filter(Boolean),
+  );
+  let cursor = activeRunId
+    ? runOwners.get(activeRunId)
+    : [...turns].reverse().find((turn) => !parentTurnIds.has(turn.id)) ?? turns.at(-1);
   const lineage: TurnView[] = [];
   const visited = new Set<string>();
   while (cursor && !visited.has(cursor.id)) {
@@ -147,19 +176,47 @@ function deriveLineage(turns: TurnView[], leafId?: string): TurnView[] {
   return lineage;
 }
 
+function runPathTo(
+  nodes: ContextTreeProjection["nodes"],
+  leafRunId: string | null,
+) {
+  const parentByRun = new Map(nodes.map((node) => [node.runId, node.parentRunId]));
+  const path = new Set<string>();
+  let cursor = leafRunId;
+  while (cursor && !path.has(cursor)) {
+    path.add(cursor);
+    cursor = parentByRun.get(cursor) ?? null;
+  }
+  return path;
+}
+
 function toInspectorItem(item: ContextPreview["items"][number]): ContextInspectorItem {
-  return {
-    key: item.id,
-    ordinal: item.ordinal,
-    label: item.label,
-    source: item.source,
-    role: item.role,
-    content: item.content,
-    reason: item.reason,
-    estimatedTokens: item.estimatedTokens,
-    included: item.included,
-    pinned: item.pinned,
-  };
+  return item;
+}
+
+function sourceIdentity(item: ContextInspectorItem) {
+  return [
+    item.sourceRef.kind,
+    item.sourceRef.id ?? "",
+    item.contentBlockId ?? "",
+  ].join(":");
+}
+
+function isContextVersionConflict(reason: unknown) {
+  return reason instanceof DesktopBridgeError
+    && [
+      "context_cursor_conflict",
+      "context_draft_conflict",
+      "branch_version_conflict",
+      "stale_context_version",
+    ].includes(reason.code);
+}
+
+function isTerminalContextMaintenanceError(reason: unknown) {
+  if (!(reason instanceof DesktopBridgeError) || !isRecord(reason.details)) return false;
+  return ["failed", "cancelled", "conflicted"].includes(
+    String(reason.details.maintenanceStatus ?? ""),
+  );
 }
 
 const providerStreamProtocols = new Set<ProviderStreamProtocol>([
@@ -264,14 +321,17 @@ export function FocusWorkspace({
   const [profiles, setProfiles] = useState<ProviderProfileView[]>([]);
   const [providerId, setProviderId] = useState("");
   const [selectedRuns, setSelectedRuns] = useState<SelectedRuns>({});
-  const [activeLeafId, setActiveLeafId] = useState<string>();
+  const [contextTree, setContextTree] = useState<ContextTreeProjection | null>(null);
+  const [contextTreeOpen, setContextTreeOpen] = useState(false);
+  const [contextTreeBusy, setContextTreeBusy] = useState(false);
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false);
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string>();
   const [draft, setDraft] = useState("");
   const [branchRunId, setBranchRunId] = useState<string | null>(null);
   const [branchDraft, setBranchDraft] = useState("");
   const [preview, setPreview] = useState<ContextPreviewView | null>(null);
-  const [pinnedSourceIds, setPinnedSourceIds] = useState<string[]>([]);
-  const [excludedSourceIds, setExcludedSourceIds] = useState<string[]>([]);
+  const [draftVersion, setDraftVersion] = useState<number | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [snapshot, setSnapshot] = useState<LockedSnapshot | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
@@ -282,12 +342,42 @@ export function FocusWorkspace({
   const [notice, setNotice] = useState<string | null>(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newWorkspaceTitle, setNewWorkspaceTitle] = useState("");
+  const [newWorkspaceGoal, setNewWorkspaceGoal] = useState("");
   const readingPane = useRef<HTMLDivElement>(null);
+  const manualCheckpointOperation = useRef<{ fingerprint: string; id: string } | null>(null);
+  const providerCheckpointOperation = useRef<{ fingerprint: string; id: string } | null>(null);
+  const snapshotRequestToken = useRef(0);
 
   const selectedProfile = profiles.find((profile) => profile.id === providerId) ?? profiles[0];
-  const lineage = useMemo(() => deriveLineage(detail?.turns ?? [], activeLeafId), [detail?.turns, activeLeafId]);
-  const leafTurn = lineage.at(-1);
-  const parentRunId = leafTurn ? selectedRuns[leafTurn.id] ?? leafTurn.runs[0]?.id : undefined;
+  const parentRunId = contextTree?.cursor.activeRunId ?? null;
+  const contextCursorIdentity = contextTree
+    ? [
+        contextTree.workspaceId,
+        contextTree.cursor.activeRunId ?? "root",
+        contextTree.cursor.branchId ?? "no-branch",
+        contextTree.cursor.version,
+      ].join(":")
+    : null;
+  const contextCursorIdentityRef = useRef(contextCursorIdentity);
+  contextCursorIdentityRef.current = contextCursorIdentity;
+  const lineage = useMemo(
+    () => deriveLineage(detail?.turns ?? [], contextTree?.cursor.activeRunId),
+    [contextTree?.cursor.activeRunId, detail?.turns],
+  );
+  const activeContextNode = contextTree?.nodes.find(
+    (node) => node.runId === contextTree.cursor.activeRunId,
+  );
+  const contextCanContinue = parentRunId === null || Boolean(activeContextNode?.canContinue);
+  const activeContextBranch = contextTree?.branches.find(
+    (branch) => branch.id === contextTree.cursor.branchId,
+  );
+  const maintenanceAvailable = Boolean(
+    contextTree?.cursor.activeRunId
+    && activeContextBranch
+    && contextTree.nodes.filter((node) => node.isOnActivePath).length > 1
+    && selectedProfile
+    && draftVersion !== null,
+  );
 
   const clearError = useCallback(() => {
     setError(null);
@@ -303,26 +393,63 @@ export function FocusWorkspace({
     setRetryAction(reason instanceof DesktopBridgeError && reason.retryable && retry ? retry : null);
   }, []);
 
+  const applyContextTree = useCallback((
+    nextTree: ContextTreeProjection,
+    turns: TurnView[],
+    baseSelectedRuns: SelectedRuns = {},
+  ) => {
+    const nextSelectedRuns = {
+      ...deriveSelectedRuns(turns),
+      ...baseSelectedRuns,
+    };
+    nextTree.nodes
+      .filter((node) => node.isOnActivePath)
+      .forEach((node) => {
+        nextSelectedRuns[node.turnId] = node.runId;
+      });
+    setContextTree(nextTree);
+    setSelectedRuns(nextSelectedRuns);
+    const activeTurn = nextTree.cursor.activeRunId
+      ? turns.find((turn) => turn.runs.some((run) => run.id === nextTree.cursor.activeRunId))
+      : undefined;
+    setActiveTurnId(activeTurn?.id);
+  }, []);
+
   const openWorkspace = useCallback(async (workspaceId: string) => {
     clearError();
     try {
-      const next = (await bridge.openWorkspace(workspaceId)) as WorkspaceDetailView;
-      const departureTurn = initialRunId
-        ? next.turns.find((turn) => turn.runs.some((run) => run.id === initialRunId))
-        : undefined;
-      const nextSelectedRuns = { ...deriveSelectedRuns(next.turns), ...next.selectedRunIds };
-      if (departureTurn && initialRunId) nextSelectedRuns[departureTurn.id] = initialRunId;
+      const [next, loadedTree] = await Promise.all([
+        bridge.openWorkspace(workspaceId) as Promise<WorkspaceDetailView>,
+        bridge.getContextTree({ workspaceId }),
+      ]);
+      let nextTree = loadedTree;
+      if (
+        initialRunId
+        && nextTree.cursor.activeRunId !== initialRunId
+        && nextTree.nodes.some((node) => node.runId === initialRunId)
+      ) {
+        const departureNode = nextTree.nodes.find((node) => node.runId === initialRunId);
+        await bridge.setActiveContext({
+          workspaceId,
+          runId: initialRunId,
+          branchId: departureNode
+            ? resolveContextBranchId(nextTree, departureNode.branchIds)
+            : null,
+          expectedCursorVersion: nextTree.cursor.version,
+          expectedDraftVersion: nextTree.draftVersion,
+        });
+        nextTree = await bridge.getContextTree({ workspaceId });
+      }
       setDetail(next);
-      setSelectedRuns(nextSelectedRuns);
-      setActiveLeafId(departureTurn?.id);
-      setActiveTurnId(departureTurn?.id ?? next.turns.at(-1)?.id);
-      setPinnedSourceIds([]);
-      setExcludedSourceIds([]);
+      applyContextTree(nextTree, next.turns, next.selectedRunIds);
+      setDraftVersion(null);
+      setPreview(null);
       setSnapshot(null);
+      setMaintenanceOpen(false);
     } catch (reason) {
       reportError(reason, "无法打开本地工作区。");
     }
-  }, [bridge, clearError, initialRunId, reportError]);
+  }, [applyContextTree, bridge, clearError, initialRunId, reportError]);
 
   useEffect(() => {
     let active = true;
@@ -346,27 +473,48 @@ export function FocusWorkspace({
     return () => { active = false; };
   }, [bridge, initialWorkspaceId, openWorkspace, reportError]);
 
+  useEffect(() => {
+    snapshotRequestToken.current += 1;
+    setSnapshot(null);
+    setSnapshotLoading(false);
+  }, [contextCursorIdentity]);
+
   const inspect = useCallback(async (
     prompt: string,
     exactParentRunId: string | null | undefined = parentRunId,
     exactProviderProfileId: string | undefined = selectedProfile?.id,
+    exactDraftVersion: number | null = draftVersion,
+    requestedBranchId?: string | null,
   ) => {
     if (!detail || !exactProviderProfileId) return null;
-    const result = (await bridge.inspectContext({
+    const parentNode = exactParentRunId
+      ? contextTree?.nodes.find((node) => node.runId === exactParentRunId)
+      : undefined;
+    const branchId = requestedBranchId !== undefined
+      ? requestedBranchId
+      : parentNode && contextTree
+        ? resolveContextBranchId(contextTree, parentNode.branchIds)
+        : null;
+    const input = {
       workspaceId: detail.workspace.id,
       parentRunId: exactParentRunId ?? null,
       prompt,
       providerProfileId: exactProviderProfileId,
-    })) as ContextPreviewView;
+      branchId,
+    };
+    const result = (exactDraftVersion === null
+      ? await bridge.inspectContext(input)
+      : await bridge.previewContextTransition({
+          ...input,
+          draftVersion: exactDraftVersion,
+        })) as ContextPreviewView;
     return result;
-  // Overrides live in Rust, but keeping them as dependencies is intentional:
-  // their mutations must trigger a fresh preview after the command commits.
   }, [
     bridge,
+    contextTree,
     detail,
-    excludedSourceIds,
+    draftVersion,
     parentRunId,
-    pinnedSourceIds,
     selectedProfile?.id,
   ]);
 
@@ -378,13 +526,21 @@ export function FocusWorkspace({
     let active = true;
     const timer = window.setTimeout(() => {
       inspect(draft)
-        .then((result) => { if (active && result) setPreview(result); })
+        .then((result) => {
+          if (!active || !result) return;
+          setPreview(result);
+          setDraftVersion(result.draftVersion);
+        })
         .catch((reason: unknown) => {
           if (!active) return;
           const retryInspection = () => {
             clearError();
             void inspect(draft)
-              .then((result) => { if (result) setPreview(result); })
+              .then((result) => {
+                if (!result) return;
+                setPreview(result);
+                setDraftVersion(result.draftVersion);
+              })
               .catch((nextReason: unknown) => reportError(
                 nextReason,
                 "无法检查本轮 Context。",
@@ -399,7 +555,265 @@ export function FocusWorkspace({
         });
     }, 120);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [clearError, detail, draft, excludedSourceIds, inspect, parentRunId, pinnedSourceIds, reportError, selectedProfile]);
+  }, [clearError, detail, draft, inspect, parentRunId, reportError, selectedProfile]);
+
+  const refreshContextTree = useCallback(async () => {
+    if (!detail) return null;
+    const workspaceId = detail.workspace.id;
+    const [nextDetail, nextTree] = await Promise.all([
+      bridge.openWorkspace(workspaceId) as Promise<WorkspaceDetailView>,
+      bridge.getContextTree({ workspaceId }),
+    ]);
+    setDetail(nextDetail);
+    applyContextTree(nextTree, nextDetail.turns, nextDetail.selectedRunIds);
+    return nextTree;
+  }, [applyContextTree, bridge, detail]);
+
+  const selectActiveContext = async (
+    runId: string | null,
+    requestedBranchId?: string | null,
+    propagateFailure = false,
+  ) => {
+    if (!detail || !contextTree || contextTreeBusy) return;
+    const node = runId
+      ? contextTree.nodes.find((item) => item.runId === runId)
+      : undefined;
+    const branchId = requestedBranchId !== undefined
+      ? requestedBranchId
+      : node
+        ? resolveContextBranchId(contextTree, node.branchIds)
+        : null;
+    setContextTreeBusy(true);
+    clearError();
+    try {
+      await bridge.setActiveContext({
+        workspaceId: detail.workspace.id,
+        runId,
+        branchId,
+        expectedCursorVersion: contextTree.cursor.version,
+        expectedDraftVersion: contextTree.draftVersion,
+      });
+      await refreshContextTree();
+      setDraftVersion(null);
+      setPreview(null);
+      setSnapshot(null);
+    } catch (reason) {
+      if (isContextVersionConflict(reason)) {
+        try {
+          await refreshContextTree();
+          setDraftVersion(null);
+        } catch {
+          // Preserve the original structured conflict as the actionable error.
+        }
+      }
+      reportError(
+        reason,
+        "无法切换 Context 位置。",
+        {
+          label: "重试切换 Context",
+          execute: () => {
+            void selectActiveContext(runId);
+          },
+        },
+      );
+      if (propagateFailure) throw reason;
+    } finally {
+      setContextTreeBusy(false);
+    }
+  };
+
+  const renameContextBranch = async (
+    branchId: string,
+    name: string,
+    expectedBranchVersion: number,
+  ) => {
+    if (!detail || contextTreeBusy) return;
+    setContextTreeBusy(true);
+    clearError();
+    try {
+      await bridge.renameBranch({
+        workspaceId: detail.workspace.id,
+        branchId,
+        name,
+        expectedBranchVersion,
+      });
+      await refreshContextTree();
+    } catch (reason) {
+      if (isContextVersionConflict(reason)) {
+        try {
+          await refreshContextTree();
+        } catch {
+          // Preserve the original structured conflict as the actionable error.
+        }
+      }
+      reportError(reason, "分支名称未保存。");
+    } finally {
+      setContextTreeBusy(false);
+    }
+  };
+
+  const refreshPreviewAfterMaintenance = async () => {
+    const refreshed = await inspect(
+      draft,
+      contextTree?.cursor.activeRunId ?? null,
+      selectedProfile?.id,
+      draftVersion,
+    );
+    if (refreshed) {
+      setPreview(refreshed);
+      setDraftVersion(refreshed.draftVersion);
+    }
+  };
+
+  const checkpointOperationId = (
+    holder: typeof manualCheckpointOperation,
+    fingerprint: string,
+  ) => {
+    if (holder.current?.fingerprint === fingerprint) return holder.current.id;
+    const webviewE2eOperationId =
+      import.meta.env.VITE_THOUGHSFLOW_WEBVIEW_E2E === "1"
+        ? document.documentElement.dataset.thoughtsflowWebviewE2eOperationId
+        : undefined;
+    const id = nextCheckpointOperationId(webviewE2eOperationId);
+    holder.current = { fingerprint, id };
+    return id;
+  };
+
+  const createManualCheckpoint = async (proposal: ManualCheckpointProposal) => {
+    if (
+      !detail
+      || !contextTree?.cursor.activeRunId
+      || !contextTree.cursor.branchId
+      || !activeContextBranch
+      || maintenanceBusy
+    ) return;
+    setMaintenanceBusy(true);
+    clearError();
+    try {
+      const operationFingerprint = JSON.stringify({
+        workspaceId: detail.workspace.id,
+        branchId: contextTree.cursor.branchId,
+        cursorVersion: contextTree.cursor.version,
+        branchVersion: activeContextBranch.version,
+        proposal,
+      });
+      await bridge.createContextCheckpoint({
+        clientOperationId: checkpointOperationId(
+          manualCheckpointOperation,
+          operationFingerprint,
+        ),
+        workspaceId: detail.workspace.id,
+        branchId: contextTree.cursor.branchId,
+        kind: proposal.kind,
+        sourceRunIds: proposal.sourceRunIds,
+        firstKeptRunId: proposal.firstKeptRunId,
+        summary: proposal.summary,
+        expectedCursorVersion: contextTree.cursor.version,
+        expectedBranchVersion: activeContextBranch.version,
+      });
+      await refreshContextTree();
+      await refreshPreviewAfterMaintenance();
+      manualCheckpointOperation.current = null;
+      setMaintenanceOpen(false);
+      setNotice(
+        proposal.kind === "branch-summary"
+          ? "分支摘要检查点已保存并激活。"
+          : "Context 检查点已保存并激活。",
+      );
+    } catch (reason) {
+      if (isContextVersionConflict(reason)) {
+        try {
+          await refreshContextTree();
+          setDraftVersion(null);
+        } catch {
+          // Preserve the maintenance proposal and original structured conflict.
+        }
+      }
+      reportError(reason, "Context 检查点未保存。");
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  };
+
+  const summarizeAndSetActiveContext = async (
+    proposal: ProviderCheckpointProposal,
+  ) => {
+    if (
+      !detail
+      || !contextTree?.cursor.activeRunId
+      || !contextTree.cursor.branchId
+      || !activeContextBranch
+      || draftVersion === null
+      || maintenanceBusy
+    ) return;
+    setMaintenanceBusy(true);
+    clearError();
+    try {
+      const operationFingerprint = JSON.stringify({
+        workspaceId: detail.workspace.id,
+        branchId: contextTree.cursor.branchId,
+        cursorVersion: contextTree.cursor.version,
+        branchVersion: activeContextBranch.version,
+        draftVersion,
+        proposal,
+      });
+      await bridge.summarizeAndSetActiveContext({
+        clientOperationId: checkpointOperationId(
+          providerCheckpointOperation,
+          operationFingerprint,
+        ),
+        workspaceId: detail.workspace.id,
+        targetRunId: contextTree.cursor.activeRunId,
+        branchId: contextTree.cursor.branchId,
+        sourceRunIds: proposal.sourceRunIds,
+        firstKeptRunId: proposal.firstKeptRunId,
+        summaryPrompt: proposal.summaryPrompt,
+        providerProfileId: proposal.providerProfileId,
+        expectedCursorVersion: contextTree.cursor.version,
+        expectedBranchVersion: activeContextBranch.version,
+        expectedDraftVersion: draftVersion,
+      });
+      await refreshContextTree();
+      await refreshPreviewAfterMaintenance();
+      providerCheckpointOperation.current = null;
+      setMaintenanceOpen(false);
+      setNotice("摘要已生成，Context 已原子切换。");
+    } catch (reason) {
+      if (isTerminalContextMaintenanceError(reason)) {
+        providerCheckpointOperation.current = null;
+      }
+      if (isContextVersionConflict(reason)) {
+        try {
+          await refreshContextTree();
+          setDraftVersion(null);
+        } catch {
+          // Preserve the maintenance proposal and original structured conflict.
+        }
+      }
+      reportError(reason, "摘要失败；Context 位置与检查点均未改变。");
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  };
+
+  const cancelContextMaintenance = async () => {
+    if (!maintenanceBusy) {
+      manualCheckpointOperation.current = null;
+      providerCheckpointOperation.current = null;
+      setMaintenanceOpen(false);
+      return;
+    }
+    const operationId = providerCheckpointOperation.current?.id;
+    if (!operationId) return;
+    clearError();
+    try {
+      await bridge.cancelContextMaintenance(operationId);
+      providerCheckpointOperation.current = null;
+      setNotice("已请求取消摘要；检查点和当前 Context 不会移动。");
+    } catch (reason) {
+      reportError(reason, "摘要取消请求失败。");
+    }
+  };
 
   const updateRun = (runId: string, change: Partial<RunView>) => {
     setDetail((current) => current ? {
@@ -408,6 +822,19 @@ export function FocusWorkspace({
         ...turn,
         runs: turn.runs.map((run) => run.id === runId ? { ...run, ...change } : run),
       })),
+    } : current);
+    setContextTree((current) => current ? {
+      ...current,
+      nodes: current.nodes.map((node) => node.runId === runId
+        ? {
+            ...node,
+            ...(change.status ? {
+              status: change.status,
+              canContinue: change.status === "completed",
+            } : {}),
+            ...(change.output !== undefined ? { outputPreview: change.output.slice(0, 180) } : {}),
+          }
+        : node),
     } : current);
   };
 
@@ -443,6 +870,9 @@ export function FocusWorkspace({
       updateRun(runEvent.runId, { status: "completed", completedAt: new Date().toISOString(), usage: runEvent.usage });
       setNotice(null);
       setBusy(false);
+      void refreshContextTree().catch((reason: unknown) => {
+        reportError(reason, "Run 已完成，但无法刷新权威工作区状态。");
+      });
     } else if (runEvent.type === "run-failed") {
       updateRun(runEvent.runId, {
         status: "failed",
@@ -451,6 +881,9 @@ export function FocusWorkspace({
       });
       setNotice(null);
       setBusy(false);
+      void refreshContextTree().catch((reason: unknown) => {
+        reportError(reason, "Run 已失败，但无法刷新权威工作区状态。");
+      });
     } else if (runEvent.type === "run-cancelled") {
       updateRun(runEvent.runId, {
         status: "cancelled",
@@ -458,6 +891,9 @@ export function FocusWorkspace({
       });
       setNotice(null);
       setBusy(false);
+      void refreshContextTree().catch((reason: unknown) => {
+        reportError(reason, "Run 已取消，但无法刷新权威工作区状态。");
+      });
     } else if (runEvent.type === "persistence-failed") {
       updateRun(runEvent.runId, {
         status: "interrupted",
@@ -466,6 +902,9 @@ export function FocusWorkspace({
       });
       setNotice(null);
       setBusy(false);
+      void refreshContextTree().catch((reason: unknown) => {
+        reportError(reason, "Run 持久化失败，且无法刷新权威工作区状态。");
+      });
     }
   };
 
@@ -484,23 +923,47 @@ export function FocusWorkspace({
     };
   };
 
-  const startTurn = async (prompt: string, exactParentRunId?: string) => {
-    if (!detail || !selectedProfile || busy) return;
+  const startTurn = async (prompt: string, exactParentRunId?: string | null) => {
+    if (!detail || !selectedProfile || !contextTree || busy) return;
     clearError();
     setBusy(true);
     try {
-      const checked = await inspect(prompt, exactParentRunId);
+      const sourceNode = exactParentRunId
+        ? contextTree.nodes.find((node) => node.runId === exactParentRunId)
+        : undefined;
+      const sourceBranchId = sourceNode
+        ? resolveContextBranchId(contextTree, sourceNode.branchIds)
+        : null;
+      const sourceBranch = contextTree.branches.find(
+        (branch) => branch.id === sourceBranchId,
+      );
+      const checked = await inspect(
+        prompt,
+        exactParentRunId,
+        selectedProfile.id,
+        draftVersion,
+        sourceBranchId,
+      );
       if (!checked) throw new Error("无法生成发送前凭证。");
       setPreview(checked);
+      setDraftVersion(checked.draftVersion);
       if (checked.blocked) throw new Error(checked.warnings[0] || "Context 超过端点限制，发送已阻止。");
+      const continuingCurrentBranch =
+        sourceBranch?.headRunId === (exactParentRunId ?? null)
+          ? sourceBranch
+          : undefined;
       const streamEvents = bufferedRunEvents();
-      const started = (await bridge.createTurnAndStartRun({
+      const started = await bridge.createTurnAndStartRun({
         workspaceId: detail.workspace.id,
         parentRunId: exactParentRunId ?? null,
         prompt,
         providerProfileId: selectedProfile.id,
         previewHash: checked.hash,
-      }, streamEvents.consume)) as { turnId: string; runId: string };
+        branchId: sourceBranch?.id ?? null,
+        expectedCursorVersion: contextTree.cursor.version,
+        expectedBranchVersion: sourceBranch?.version ?? null,
+        expectedDraftVersion: checked.draftVersion,
+      }, streamEvents.consume);
       const optimisticRun: RunView = {
         id: started.runId,
         turnId: started.turnId,
@@ -524,8 +987,70 @@ export function FocusWorkspace({
         }],
       } : current);
       setSelectedRuns((current) => ({ ...current, [started.turnId]: started.runId }));
-      setActiveLeafId(started.turnId);
       setActiveTurnId(started.turnId);
+      setDraftVersion(started.draftVersion);
+      setContextTree((current) => {
+        if (!current) return current;
+        const parentPath = runPathTo(current.nodes, exactParentRunId ?? null);
+        return {
+          ...current,
+          draftVersion: started.draftVersion,
+          cursor: {
+            ...current.cursor,
+            activeRunId: started.runId,
+            branchId: started.branchId,
+            version: started.cursorVersion,
+            updatedAt: new Date().toISOString(),
+          },
+          nodes: [
+            ...current.nodes.map((node) => ({
+              ...node,
+              isActive: false,
+              isOnActivePath: parentPath.has(node.runId),
+            })),
+            {
+              runId: started.runId,
+              turnId: started.turnId,
+              parentRunId: exactParentRunId ?? null,
+              prompt,
+              title: prompt.trim().slice(0, 48),
+              outputPreview: "",
+              model: selectedProfile.model,
+              status: "connecting" as const,
+              createdAt: new Date().toISOString(),
+              canContinue: false,
+              isActive: true,
+              isOnActivePath: true,
+              branchIds: [started.branchId],
+              checkpointIds: [],
+            },
+          ],
+          edges: [
+            ...current.edges.map((edge) => ({
+              ...edge,
+              isOnActivePath: parentPath.has(edge.targetRunId),
+            })),
+            {
+              id: `edge-${started.runId}`,
+              sourceRunId: exactParentRunId ?? null,
+              targetRunId: started.runId,
+              isOnActivePath: true,
+            },
+          ],
+          branches: [
+            ...current.branches
+              .filter((branch) => branch.id !== started.branchId)
+              .map((branch) => ({ ...branch, isActive: false })),
+            {
+              id: started.branchId,
+              name: continuingCurrentBranch?.name ?? "新分支",
+              headRunId: started.runId,
+              version: started.branchVersion,
+              isActive: true,
+            },
+          ],
+        };
+      });
       setDraft("");
       setBranchDraft("");
       setBranchRunId(null);
@@ -533,6 +1058,15 @@ export function FocusWorkspace({
       streamEvents.release();
     } catch (reason) {
       setBusy(false);
+      if (isContextVersionConflict(reason)) {
+        try {
+          await refreshContextTree();
+          setDraftVersion(null);
+          setPreview(null);
+        } catch {
+          // Keep the original structured conflict as the actionable error.
+        }
+      }
       reportError(
         reason,
         "发送失败。",
@@ -543,7 +1077,7 @@ export function FocusWorkspace({
 
   const submitMessage = (event: FormEvent) => {
     event.preventDefault();
-    if (draft.trim()) void startTurn(draft.trim(), parentRunId);
+    if (draft.trim() && contextCanContinue) void startTurn(draft.trim(), parentRunId);
   };
 
   const submitBranch = (event: FormEvent) => {
@@ -557,29 +1091,42 @@ export function FocusWorkspace({
     retryCredentialId?: string,
     propagateFailure = false,
   ) => {
-    if (!detail || busy) return;
+    if (!detail || !contextTree || busy) return;
     const turn = detail.turns.find((item) => item.id === run.turnId);
     if (!turn) return;
     const retryProfile = profiles.find((profile) => profile.id === retryProviderProfileId);
     setBusy(true);
     clearError();
     try {
+      const retryNode = contextTree.nodes.find((node) => node.runId === run.id);
+      const retryBranchId = retryNode
+        ? resolveContextBranchId(contextTree, retryNode.branchIds)
+        : null;
+      const retryBranch = contextTree.branches.find(
+        (branch) => branch.id === retryBranchId,
+      );
       const checked = await inspect(
         turn.prompt,
         turn.parentRunId ?? null,
         retryProviderProfileId,
+        draftVersion,
+        retryBranchId,
       );
       if (!checked || checked.blocked) throw new Error(checked?.warnings[0] || "Context 无法发送。");
       if (checked.providerProfileId !== retryProviderProfileId) {
         throw new Error("Context 预览的 Provider 已变化，请重新确认后重试。");
       }
       const streamEvents = bufferedRunEvents();
-      const started = (await bridge.retryRun({
+      const started = await bridge.retryRun({
         runId: run.id,
         providerProfileId: retryProviderProfileId,
         previewHash: checked.hash,
         ...(retryCredentialId ? { credentialId: retryCredentialId } : {}),
-      }, streamEvents.consume)) as { runId: string };
+        branchId: retryBranch?.id ?? null,
+        expectedCursorVersion: contextTree.cursor.version,
+        expectedBranchVersion: retryBranch?.version ?? null,
+        expectedDraftVersion: checked.draftVersion,
+      }, streamEvents.consume);
       const nextRun: RunView = {
         ...run,
         id: started.runId,
@@ -598,9 +1145,81 @@ export function FocusWorkspace({
         turns: current.turns.map((item) => item.id === turn.id ? { ...item, runs: [...item.runs, nextRun] } : item),
       } : current);
       setSelectedRuns((current) => ({ ...current, [turn.id]: started.runId }));
+      setDraftVersion(started.draftVersion);
+      setContextTree((current) => {
+        if (!current) return current;
+        const parentPath = runPathTo(current.nodes, turn.parentRunId);
+        return {
+          ...current,
+          draftVersion: started.draftVersion,
+          cursor: {
+            ...current.cursor,
+            activeRunId: started.runId,
+            branchId: started.branchId,
+            version: started.cursorVersion,
+            updatedAt: new Date().toISOString(),
+          },
+          nodes: [
+            ...current.nodes.map((node) => ({
+              ...node,
+              isActive: false,
+              isOnActivePath: parentPath.has(node.runId),
+            })),
+            {
+              runId: started.runId,
+              turnId: turn.id,
+              parentRunId: turn.parentRunId,
+              prompt: turn.prompt,
+              title: turn.title?.trim() || turn.prompt.trim().slice(0, 48),
+              outputPreview: "",
+              model: retryProfile?.model ?? run.model,
+              status: "connecting" as const,
+              createdAt: new Date().toISOString(),
+              canContinue: false,
+              isActive: true,
+              isOnActivePath: true,
+              branchIds: [started.branchId],
+              checkpointIds: [],
+            },
+          ],
+          edges: [
+            ...current.edges.map((edge) => ({
+              ...edge,
+              isOnActivePath: parentPath.has(edge.targetRunId),
+            })),
+            {
+              id: `edge-${started.runId}`,
+              sourceRunId: turn.parentRunId,
+              targetRunId: started.runId,
+              isOnActivePath: true,
+            },
+          ],
+          branches: [
+            ...current.branches
+              .filter((branch) => branch.id !== started.branchId)
+              .map((branch) => ({ ...branch, isActive: false })),
+            {
+              id: started.branchId,
+              name: "重试分支",
+              headRunId: started.runId,
+              version: started.branchVersion,
+              isActive: true,
+            },
+          ],
+        };
+      });
       streamEvents.release();
     } catch (reason) {
       setBusy(false);
+      if (isContextVersionConflict(reason)) {
+        try {
+          await refreshContextTree();
+          setDraftVersion(null);
+          setPreview(null);
+        } catch {
+          // Keep the original structured conflict as the actionable error.
+        }
+      }
       reportError(
         reason,
         "重试失败。",
@@ -616,50 +1235,106 @@ export function FocusWorkspace({
   };
 
   const toggleOverride = async (item: ContextInspectorItem, kind: "included" | "pinned") => {
-    if (!detail) return;
-    const sourceId = item.key;
-    const nextPinned = kind === "pinned" ? (item.pinned ? pinnedSourceIds.filter((id) => id !== sourceId) : [...pinnedSourceIds, sourceId]) : pinnedSourceIds;
-    const nextExcluded = kind === "included" ? (item.included ? [...excludedSourceIds, sourceId] : excludedSourceIds.filter((id) => id !== sourceId)) : excludedSourceIds;
-    setPinnedSourceIds(nextPinned);
-    setExcludedSourceIds(nextExcluded);
+    if (!detail || !preview || item.mandatory) return;
+    const targetIdentity = sourceIdentity(item);
+    const sourceItems = new Map<string, ContextInspectorItem>();
+    [...preview.rawItems, ...preview.items].forEach((candidate) => {
+      sourceItems.set(sourceIdentity(candidate), candidate);
+    });
+    const nextItems = [...sourceItems.values()].map((candidate) => {
+      const isTarget = sourceIdentity(candidate) === targetIdentity;
+      return {
+        sourceRef: candidate.sourceRef,
+        contentBlockId: candidate.contentBlockId,
+        included: isTarget && kind === "included"
+          ? !candidate.included
+          : candidate.included,
+        pinned: isTarget && kind === "pinned"
+          ? !candidate.pinned
+          : candidate.pinned,
+      };
+    });
     try {
-      await bridge.updateContextOverrides({
+      const updated = await bridge.updateContextDraft({
         workspaceId: detail.workspace.id,
         parentRunId: parentRunId ?? null,
-        itemId: sourceId,
-        included: kind === "included" ? !item.included : item.included,
-        pinned: kind === "pinned" ? !item.pinned : item.pinned,
+        expectedDraftVersion: preview.draftVersion,
+        items: nextItems,
       });
+      setDraftVersion(updated.draftVersion);
+      setContextTree((current) => current ? {
+        ...current,
+        draftVersion: updated.draftVersion,
+      } : current);
+      const refreshed = await inspect(
+        draft,
+        parentRunId,
+        selectedProfile?.id,
+        updated.draftVersion,
+      );
+      if (refreshed) {
+        setPreview(refreshed);
+        setDraftVersion(refreshed.draftVersion);
+      }
     } catch (reason) {
-      setPinnedSourceIds(pinnedSourceIds);
-      setExcludedSourceIds(excludedSourceIds);
+      if (isContextVersionConflict(reason)) {
+        setDraftVersion(null);
+        try {
+          await refreshContextTree();
+        } catch {
+          // Keep the original conflict visible and leave the composer draft untouched.
+        }
+      }
       reportError(reason, "上下文调整未保存。");
     }
   };
 
   const loadSnapshot = async (tab: InspectorTab) => {
     if (tab !== "snapshot") return;
-    const selectedRun = [...lineage].reverse().flatMap((turn) => turn.runs).find((run) => selectedRuns[run.turnId] === run.id);
+    const selectedRun = detail?.turns
+      .flatMap((turn) => turn.runs)
+      .find((run) => run.id === contextTree?.cursor.activeRunId);
     if (!selectedRun) return;
+    const requestToken = snapshotRequestToken.current + 1;
+    snapshotRequestToken.current = requestToken;
+    const requestContextIdentity = contextCursorIdentityRef.current;
+    setSnapshot(null);
     setSnapshotLoading(true);
     try {
-      setSnapshot(normalizeSnapshot(await bridge.getRunSnapshot(selectedRun.id)));
+      const loadedSnapshot = await bridge.getRunSnapshot(selectedRun.id);
+      if (
+        snapshotRequestToken.current !== requestToken
+        || contextCursorIdentityRef.current !== requestContextIdentity
+        || loadedSnapshot.runId !== selectedRun.id
+      ) return;
+      setSnapshot(normalizeSnapshot(loadedSnapshot));
     } catch (reason) {
+      if (
+        snapshotRequestToken.current !== requestToken
+        || contextCursorIdentityRef.current !== requestContextIdentity
+      ) return;
       reportError(reason, "无法读取锁定快照。");
     } finally {
-      setSnapshotLoading(false);
+      if (
+        snapshotRequestToken.current === requestToken
+        && contextCursorIdentityRef.current === requestContextIdentity
+      ) {
+        setSnapshotLoading(false);
+      }
     }
   };
 
   const createWorkspace = async (event: FormEvent) => {
     event.preventDefault();
     const name = newWorkspaceTitle.trim();
-    if (!name) return;
+    const goal = newWorkspaceGoal.trim();
+    if (!name || !goal) return;
     try {
-      const created = (await bridge.createWorkspace({ name, goal: "" })) as WorkspaceView;
+      const created = (await bridge.createWorkspace({ name, goal })) as WorkspaceView;
       setWorkspaces((current) => [created, ...current]);
       setNewWorkspaceOpen(false);
       setNewWorkspaceTitle("");
+      setNewWorkspaceGoal("");
       await openWorkspace(created.id);
     } catch (reason) {
       reportError(reason, "创建工作区失败。");
@@ -693,7 +1368,14 @@ export function FocusWorkspace({
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && draft.trim() && !busy && !preview?.blocked) {
+    if (
+      (event.metaKey || event.ctrlKey)
+      && event.key === "Enter"
+      && draft.trim()
+      && !busy
+      && !preview?.blocked
+      && contextCanContinue
+    ) {
       event.preventDefault();
       void startTurn(draft.trim(), parentRunId);
     }
@@ -702,6 +1384,7 @@ export function FocusWorkspace({
   if (loading) return <div className="focus-workspace focus-workspace--state"><LoadingState /></div>;
 
   const contextItems = (preview?.items ?? []).map(toInspectorItem);
+  const rawContextItems = (preview?.rawItems ?? preview?.items ?? []).map(toInspectorItem);
   const inspectorRuns: InspectorRun[] = lineage.flatMap((turn) => turn.runs.map((run, index) => ({
     id: run.id,
     label: `${runLabel(index)} · ${run.status}`,
@@ -731,7 +1414,8 @@ export function FocusWorkspace({
         {newWorkspaceOpen && (
           <form className="focus-sidebar__new-form" onSubmit={createWorkspace} aria-label="创建工作区">
             <input autoFocus aria-label="工作区名称" value={newWorkspaceTitle} onChange={(event) => setNewWorkspaceTitle(event.target.value)} placeholder="工作区名称" />
-            <button type="submit" disabled={!newWorkspaceTitle.trim()} aria-label="确认创建"><ArrowUp size={14} /></button>
+            <input aria-label="工作区目标" value={newWorkspaceGoal} onChange={(event) => setNewWorkspaceGoal(event.target.value)} placeholder="需要达成的可验证目标" />
+            <button type="submit" disabled={!newWorkspaceTitle.trim() || !newWorkspaceGoal.trim()} aria-label="确认创建"><ArrowUp size={14} /></button>
           </form>
         )}
 
@@ -752,6 +1436,19 @@ export function FocusWorkspace({
             {workspaces.length === 0 && <p>还没有工作区。</p>}
           </div>
         </nav>
+
+        <button
+          aria-expanded={contextTreeOpen}
+          aria-label="打开 Context Tree"
+          className="focus-sidebar__tree-button"
+          disabled={!contextTree}
+          onClick={() => setContextTreeOpen(true)}
+          type="button"
+        >
+          <GitBranch aria-hidden="true" size={14} />
+          <span>Context Tree</span>
+          <small>{contextTree?.nodes.length ?? 0}</small>
+        </button>
 
         <nav className="focus-sidebar__section focus-sidebar__route" aria-label="当前路线">
           <span className="focus-sidebar__heading">当前路线 <small>{lineage.length} / {detail?.turns.length ?? 0}</small></span>
@@ -779,7 +1476,15 @@ export function FocusWorkspace({
           <nav className="focus-sidebar__section focus-sidebar__branches" aria-label="相邻分支">
             <span className="focus-sidebar__heading">相邻分支</span>
             {detail.adjacentBranches.map((pointer) => (
-              <button key={pointer.runId} type="button" onClick={() => onOpenRouteMap?.(detail.workspace.id, pointer.runId)}>
+              <button
+                key={pointer.runId}
+                type="button"
+                onClick={() => {
+                  void selectActiveContext(pointer.runId, undefined, true)
+                    .then(() => onOpenRouteMap?.(detail.workspace.id))
+                    .catch(() => undefined);
+                }}
+              >
                 <GitBranch size={12} /> {pointer.label}
               </button>
             ))}
@@ -792,6 +1497,39 @@ export function FocusWorkspace({
         </div>
       </aside>
 
+      {contextTreeOpen && contextTree ? (
+        <aside className="focus-context-tree-drawer" aria-label="Context Tree 抽屉">
+          <button
+            aria-label="关闭 Context Tree"
+            className="focus-context-tree-drawer__close"
+            onClick={() => setContextTreeOpen(false)}
+            type="button"
+          >
+            <X aria-hidden="true" size={15} />
+          </button>
+          <ContextTree
+            busy={contextTreeBusy}
+            onRenameBranch={renameContextBranch}
+            onSelect={selectActiveContext}
+            projection={contextTree}
+          />
+        </aside>
+      ) : null}
+
+      {maintenanceOpen && contextTree ? (
+        <div className="focus-context-maintenance">
+          <ContextMaintenancePanel
+            busy={maintenanceBusy}
+            estimatedTokens={preview?.estimatedTokens ?? 0}
+            nodes={contextTree.nodes}
+            onCancel={cancelContextMaintenance}
+            onCreateManual={createManualCheckpoint}
+            onSummarize={summarizeAndSetActiveContext}
+            profiles={profiles}
+          />
+        </div>
+      ) : null}
+
       <main className="focus-main">
         {detail ? (
           <>
@@ -802,8 +1540,16 @@ export function FocusWorkspace({
                 <p>{detail.workspace.goal || "从精确回答继续；旁支不会自动进入本轮 Context。"}</p>
               </div>
               <div className="focus-header__actions">
-                <Button icon={<Route size={14} />} onClick={() => onOpenRouteMap?.(detail.workspace.id, parentRunId)}>路线图</Button>
+                <Button icon={<Route size={14} />} onClick={() => onOpenRouteMap?.(detail.workspace.id)}>路线图</Button>
                 <Button icon={<Pin size={14} />} onClick={() => onOpenDecisions?.(detail.workspace.id)}>决策</Button>
+                <Button
+                  aria-label="准备 Context 压缩"
+                  disabled={!maintenanceAvailable}
+                  icon={<Sparkles size={14} />}
+                  onClick={() => setMaintenanceOpen(true)}
+                >
+                  压缩
+                </Button>
                 <Button icon={<PanelRight size={14} />} aria-label="打开上下文检查器" onClick={() => setInspectorOpen(true)}>
                   上下文 <span className="focus-header__count">{contextItems.filter((item) => item.included).length}</span>
                 </Button>
@@ -876,7 +1622,8 @@ export function FocusWorkspace({
                                 className={run.id === selectedRun.id ? "is-active" : ""}
                                 aria-pressed={run.id === selectedRun.id}
                                 aria-label={`${runLabel(runIndex)} · ${run.model}`}
-                                onClick={() => setSelectedRuns((current) => ({ ...current, [turn.id]: run.id }))}
+                                disabled={contextTreeBusy}
+                                onClick={() => void selectActiveContext(run.id)}
                               >
                                 <span className={`focus-run-switcher__dot is-${run.status}`} />
                                 <strong>{runLabel(runIndex)}</strong>
@@ -904,7 +1651,7 @@ export function FocusWorkspace({
                             type="button"
                             className={branchRunId === selectedRun.id ? "is-active" : ""}
                             aria-label="从此回答创建分支"
-                            disabled={isGenerating}
+                            disabled={isGenerating || selectedRun.status !== "completed"}
                             onClick={() => { setBranchRunId((current) => current === selectedRun.id ? null : selectedRun.id); setBranchDraft(""); }}
                           ><GitBranch size={13} /> 从此回答创建分支</button>
                           <button
@@ -947,6 +1694,7 @@ export function FocusWorkspace({
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={onComposerKeyDown}
                 placeholder="沿当前路线继续，或从上方任意回答创建旁支…"
+                disabled={!contextCanContinue}
               />
               <div className="focus-composer__toolbar">
                 <div>
@@ -955,10 +1703,15 @@ export function FocusWorkspace({
                   </select>
                   <ProviderDestination {...providerBoundary} compact />
                 </div>
-                <Button type="submit" tone="primary" disabled={!draft.trim() || busy || !!preview?.blocked || !selectedProfile} icon={busy ? <LoaderCircle className="tf-spin" size={15} /> : <Send size={15} />}>
+                <Button type="submit" tone="primary" disabled={!draft.trim() || busy || !!preview?.blocked || !selectedProfile || !contextCanContinue} icon={busy ? <LoaderCircle className="tf-spin" size={15} /> : <Send size={15} />}>
                   {busy ? "发送中" : "发送"}
                 </Button>
               </div>
+              {!contextCanContinue ? (
+                <p className="focus-composer__blocked" role="status">
+                  当前 Run 不可继续；请重试此回答，或在 Context Tree 中选择可继承的祖先。
+                </p>
+              ) : null}
               {preview?.blocked && <p className="focus-composer__blocked" role="alert">{preview.warnings[0] ?? "Context 超出模型限制，发送已阻止。"}</p>}
             </form>
           </>
@@ -972,6 +1725,9 @@ export function FocusWorkspace({
       <ContextInspector
         open={inspectorOpen && !!detail}
         items={contextItems}
+        rawItems={rawContextItems}
+        draftVersion={preview?.draftVersion ?? draftVersion ?? 0}
+        appliedCheckpoint={preview?.appliedCheckpoint ?? null}
         estimatedTokens={preview?.estimatedTokens ?? 0}
         limitTokens={preview?.limitTokens ?? 0}
         warnings={preview?.warnings ?? []}

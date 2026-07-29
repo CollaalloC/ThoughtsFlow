@@ -90,6 +90,10 @@ describe("RouteMap", () => {
 
     render(
       <RouteMap
+        selectedRunIds={{
+          "turn-root": "run-root-b",
+          "turn-child": "run-child",
+        }}
         projection={projection}
         onSelectRun={onSelectRun}
         onCreateBranch={onCreateBranch}
@@ -104,6 +108,18 @@ describe("RouteMap", () => {
     expect(screen.getByRole("article", { name: "旁支" })).toHaveAttribute(
       "data-lineage",
       "false",
+    );
+    expect(screen.getByRole("button", { name: "选择根因基线的回答 B" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "选择根因基线的回答 A" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "选择候选路线的回答 1" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     );
 
     await user.click(screen.getByRole("button", { name: "选择根因基线的回答 B" }));

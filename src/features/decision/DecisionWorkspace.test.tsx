@@ -57,6 +57,49 @@ const comparison: CompareRunsResult = {
         preview: "给出可审查的技术方案",
       },
     ],
+    leftCheckpointProvenance: [
+      {
+        checkpointId: "checkpoint-left",
+        maintenanceRunId: "maintenance-left",
+        kind: "compaction",
+        branchId: "branch-left",
+        branchVersion: 4,
+        anchorRunId: "run-left-anchor",
+        firstKeptRunId: "run-left-tail",
+        summaryContentBlockId: "block-left-summary",
+        sourceRunIds: ["run-left-root", "run-left-middle"],
+        sourceHash: "left-source-hash",
+        provider: {
+          profileId: "provider-left",
+          providerId: "openai",
+          templateRevision: 3,
+          providerName: "OpenAI",
+          dialect: "openai-compatible",
+          streamProtocol: "openai_sse",
+          authPlacement: "bearer_header",
+          authHeaderName: "authorization",
+          additionalHeaders: {},
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4.1",
+          parameters: { temperature: "0.2" },
+        },
+      },
+    ],
+    rightCheckpointProvenance: [
+      {
+        checkpointId: "checkpoint-right",
+        maintenanceRunId: "maintenance-right",
+        kind: "branch-summary",
+        branchId: "branch-right",
+        branchVersion: 7,
+        anchorRunId: "run-right-anchor",
+        firstKeptRunId: null,
+        summaryContentBlockId: "block-right-summary",
+        sourceRunIds: ["run-right-root"],
+        sourceHash: "right-source-hash",
+        provider: null,
+      },
+    ],
   },
 };
 
@@ -89,6 +132,36 @@ describe("DecisionWorkspace", () => {
     expect(within(contextDiff).getByText("迁移期间错误预算不得超过 0.1%")).toBeVisible();
     expect(within(contextDiff).getByText("必须在本周内完成")).toBeVisible();
     expect(within(contextDiff).getByText("给出可审查的技术方案")).toBeVisible();
+
+    const leftProvenance = within(contextDiff).getByRole("article", {
+      name: "路线 A 的 checkpoint 来源凭据",
+    });
+    expect(within(leftProvenance).getByText("checkpoint-left")).toBeVisible();
+    expect(within(leftProvenance).getByText("压缩检查点")).toBeVisible();
+    expect(within(leftProvenance).getByText("run-left-anchor")).toBeVisible();
+    expect(within(leftProvenance).getByText("run-left-root → run-left-middle")).toBeVisible();
+    expect(within(leftProvenance).getByText("left-source-hash")).toBeVisible();
+    expect(within(leftProvenance).getByText("run-left-tail")).toBeVisible();
+    expect(within(leftProvenance).getByText("maintenance-left")).toBeVisible();
+    expect(within(leftProvenance).getByText("branch-left · revision 4")).toBeVisible();
+    expect(within(leftProvenance).getByText("block-left-summary")).toBeVisible();
+    expect(within(leftProvenance).getByText("OpenAI · gpt-4.1")).toBeVisible();
+    expect(within(leftProvenance).queryByText("checkpoint-right")).not.toBeInTheDocument();
+
+    const rightProvenance = within(contextDiff).getByRole("article", {
+      name: "路线 B 的 checkpoint 来源凭据",
+    });
+    expect(within(rightProvenance).getByText("checkpoint-right")).toBeVisible();
+    expect(within(rightProvenance).getByText("分支摘要")).toBeVisible();
+    expect(within(rightProvenance).getByText("run-right-anchor")).toBeVisible();
+    expect(within(rightProvenance).getByText("run-right-root")).toBeVisible();
+    expect(within(rightProvenance).getByText("right-source-hash")).toBeVisible();
+    expect(within(rightProvenance).getByText("无保留边界")).toBeVisible();
+    expect(within(rightProvenance).getByText("maintenance-right")).toBeVisible();
+    expect(within(rightProvenance).getByText("branch-right · revision 7")).toBeVisible();
+    expect(within(rightProvenance).getByText("block-right-summary")).toBeVisible();
+    expect(within(rightProvenance).getByText("人工摘要")).toBeVisible();
+    expect(within(rightProvenance).queryByText("checkpoint-left")).not.toBeInTheDocument();
   });
 
   it("persists a decision status with its review reason", async () => {
