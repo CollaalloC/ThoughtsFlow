@@ -14,6 +14,9 @@ pub enum DomainError {
         kind: &'static str,
         id: String,
     },
+    InvalidContentBlockHash {
+        id: String,
+    },
     MissingTurnForRun {
         run_id: String,
         turn_id: String,
@@ -40,6 +43,23 @@ pub enum DomainError {
     CrossWorkspacePinnedSource {
         source_id: String,
         workspace_id: String,
+    },
+    CheckpointOutsideWorkspace {
+        checkpoint_id: String,
+        workspace_id: String,
+    },
+    InvalidCheckpointBoundary {
+        checkpoint_id: String,
+        first_kept_run_id: String,
+    },
+    InvalidCheckpointContentIdentity {
+        checkpoint_id: String,
+    },
+    InvalidCheckpointBranchEvidence {
+        checkpoint_id: String,
+    },
+    MissingCheckpointVisibilityEvidence {
+        checkpoint_id: String,
     },
     PreviewHashMismatch {
         expected: String,
@@ -73,6 +93,9 @@ impl Display for DomainError {
                 write!(formatter, "{status:?} run is immutable")
             }
             Self::DuplicateEntity { kind, id } => write!(formatter, "duplicate {kind} id: {id}"),
+            Self::InvalidContentBlockHash { id } => {
+                write!(formatter, "content block {id} has an invalid content hash")
+            }
             Self::MissingTurnForRun { run_id, turn_id } => {
                 write!(formatter, "run {run_id} references missing turn {turn_id}")
             }
@@ -112,6 +135,32 @@ impl Display for DomainError {
             } => write!(
                 formatter,
                 "pinned source {source_id} does not belong to workspace {workspace_id}"
+            ),
+            Self::CheckpointOutsideWorkspace {
+                checkpoint_id,
+                workspace_id,
+            } => write!(
+                formatter,
+                "checkpoint {checkpoint_id} does not belong to workspace {workspace_id}"
+            ),
+            Self::InvalidCheckpointBoundary {
+                checkpoint_id,
+                first_kept_run_id,
+            } => write!(
+                formatter,
+                "checkpoint {checkpoint_id} cannot keep run {first_kept_run_id} on this route"
+            ),
+            Self::InvalidCheckpointContentIdentity { checkpoint_id } => write!(
+                formatter,
+                "checkpoint {checkpoint_id} summary content identity is invalid"
+            ),
+            Self::InvalidCheckpointBranchEvidence { checkpoint_id } => write!(
+                formatter,
+                "checkpoint {checkpoint_id} has incomplete branch revision evidence"
+            ),
+            Self::MissingCheckpointVisibilityEvidence { checkpoint_id } => write!(
+                formatter,
+                "checkpoint {checkpoint_id} requires explicit branch visibility evidence"
             ),
             Self::PreviewHashMismatch { expected, actual } => write!(
                 formatter,

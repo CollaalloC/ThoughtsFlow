@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use sha2::{Digest, Sha256};
+
 use super::{
     AuthPlacement, ContentBlock, DomainError, MessageRole, ModelRun, ProviderDialect, RunStatus,
     StreamProtocol, Turn,
 };
 
-pub const CONTEXT_COMPILER_VERSION: &str = "3";
+pub const CONTEXT_COMPILER_VERSION: &str = "4";
 
 #[derive(Clone, Debug)]
 pub struct ConversationGraph {
@@ -39,6 +41,9 @@ impl ConversationGraph {
         let mut block_index = BTreeMap::new();
         for block in content_blocks {
             let id = block.id.clone();
+            if block.content_hash != sha256_hex(block.content.as_bytes()) {
+                return Err(DomainError::InvalidContentBlockHash { id });
+            }
             if block_index.insert(id.clone(), block).is_some() {
                 return Err(DomainError::DuplicateEntity {
                     kind: "content block",
@@ -104,19 +109,44 @@ impl ConversationGraph {
         self.content_blocks.get(id)
     }
 
+    pub fn turns(&self) -> impl ExactSizeIterator<Item = &Turn> {
+        self.turns.values()
+    }
+
+    pub fn runs(&self) -> impl ExactSizeIterator<Item = &ModelRun> {
+        self.runs.values()
+    }
+
+    pub fn content_blocks(&self) -> impl ExactSizeIterator<Item = &ContentBlock> {
+        self.content_blocks.values()
+    }
+
     fn validate_acyclic(&self) -> Result<(), DomainError> {
+        let mut resolved = BTreeSet::new();
         for turn in self.turns.values() {
-            let mut seen = BTreeSet::new();
+            if resolved.contains(turn.id.as_str()) {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut visiting = BTreeSet::new();
             let mut cursor = turn;
-            while let Some(parent_run_id) = cursor.parent_run_id.as_deref() {
-                if !seen.insert(cursor.id.as_str()) {
+            loop {
+                if resolved.contains(cursor.id.as_str()) {
+                    break;
+                }
+                if !visiting.insert(cursor.id.as_str()) {
                     return Err(DomainError::CyclicAncestry {
                         turn_id: cursor.id.clone(),
                     });
                 }
+                path.push(cursor.id.as_str());
+                let Some(parent_run_id) = cursor.parent_run_id.as_deref() else {
+                    break;
+                };
                 let parent_run = &self.runs[parent_run_id];
                 cursor = &self.turns[&parent_run.turn_id];
             }
+            resolved.extend(path);
         }
         Ok(())
     }
@@ -137,9 +167,16 @@ impl Default for ContextPolicy {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContextPin {
+    pub source_ref: ContextSourceRef,
+    pub content_block_id: String,
+    pub content_hash: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextOverrides {
-    pub pinned_source_ids: Vec<String>,
+    pub pinned_sources: Vec<ContextPin>,
     pub excluded_source_ids: Vec<String>,
 }
 
@@ -162,7 +199,50 @@ pub enum ContextSourceKind {
     TurnPrompt,
     ModelRun,
     Pinned,
+    CompactionSummary,
+    BranchSummary,
     CurrentPrompt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContextSourceRefKind {
+    WorkspaceSystem,
+    TurnPrompt,
+    ModelRun,
+    ContentBlock,
+    CurrentPrompt,
+    CheckpointSummary,
+    BranchSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContextSourceRef {
+    pub kind: ContextSourceRefKind,
+    pub id: Option<String>,
+}
+
+impl ContextSourceRef {
+    pub fn new(kind: ContextSourceRefKind, id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            id: Some(id.into()),
+        }
+    }
+
+    pub fn stable_id(&self) -> String {
+        let prefix = match self.kind {
+            ContextSourceRefKind::WorkspaceSystem => "workspace-system",
+            ContextSourceRefKind::TurnPrompt => "turn-prompt",
+            ContextSourceRefKind::ModelRun => "model-run",
+            ContextSourceRefKind::ContentBlock => "content-block",
+            ContextSourceRefKind::CurrentPrompt => "current-prompt",
+            ContextSourceRefKind::CheckpointSummary => "checkpoint-summary",
+            ContextSourceRefKind::BranchSummary => "branch-summary",
+        };
+        self.id
+            .as_deref()
+            .map_or_else(|| prefix.to_owned(), |id| format!("{prefix}:{id}"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +250,8 @@ pub enum InclusionReason {
     SystemPolicy,
     ExactAncestorPath,
     ExplicitPin,
+    LatestCompaction,
+    BranchSummary,
     CurrentPrompt,
 }
 
@@ -182,12 +264,17 @@ pub struct CanonicalMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunContextItem {
     pub position: usize,
+    /// Legacy untyped source identifier retained for old receipts. New callers
+    /// should use `source_ref`, which cannot be confused with content identity.
     pub source_id: Option<String>,
+    pub source_ref: ContextSourceRef,
     pub source_kind: ContextSourceKind,
     pub role: MessageRole,
     pub content: String,
+    pub content_block_id: String,
     pub content_hash: String,
     pub inclusion_reason: InclusionReason,
+    pub mandatory: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +283,9 @@ pub struct ContextManifest {
     pub items: Vec<RunContextItem>,
     pub estimated_chars: usize,
     pub canonical_hash: String,
+    pub warnings: Vec<ContextWarning>,
+    pub checkpoint_provenance: Option<ContextCheckpointProvenance>,
+    pub branch_summary_provenance: Vec<ContextCheckpointProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +302,10 @@ pub enum ContextWarning {
 pub struct ContextPreview {
     pub messages: Vec<CanonicalMessage>,
     pub manifest: ContextManifest,
+    /// The uncompressed exact root-to-run route. Pins and checkpoint summaries
+    /// are projection inputs and therefore do not appear in this raw history.
+    pub raw_items: Vec<RunContextItem>,
+    pub applied_checkpoint: Option<ContextCheckpointProvenance>,
     pub estimated_chars: usize,
     pub warnings: Vec<ContextWarning>,
     pub preview_hash: String,
@@ -282,6 +376,134 @@ impl ProviderSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContextCheckpointKind {
+    Compaction,
+    BranchSummary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextMaintenanceStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Conflicted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextMaintenanceRun {
+    pub id: String,
+    pub workspace_id: String,
+    pub kind: ContextCheckpointKind,
+    pub status: ContextMaintenanceStatus,
+    pub branch_pointer_id: Option<String>,
+    pub branch_revision: Option<u64>,
+    pub anchor_run_id: String,
+    pub first_kept_run_id: Option<String>,
+    pub source_run_ids: Vec<String>,
+    pub source_hash: String,
+    pub provider: Option<ProviderSnapshot>,
+    pub request_json: String,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextCheckpoint {
+    pub id: String,
+    pub workspace_id: String,
+    pub maintenance_run_id: String,
+    pub kind: ContextCheckpointKind,
+    pub branch_pointer_id: Option<String>,
+    pub branch_revision: Option<u64>,
+    /// Candidate location on the exact Model Run path. Applying it additionally
+    /// requires explicit branch visibility evidence in `ContextCompileInput`.
+    pub anchor_run_id: String,
+    /// First exact Model Run retained after a compaction summary.
+    pub first_kept_run_id: Option<String>,
+    pub summary: String,
+    pub summary_content_block_id: String,
+    pub source_run_ids: Vec<String>,
+    pub source_hash: String,
+    pub provider: Option<ProviderSnapshot>,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextCheckpointProvenance {
+    pub checkpoint_id: String,
+    pub maintenance_run_id: String,
+    pub kind: ContextCheckpointKind,
+    pub branch_pointer_id: Option<String>,
+    pub branch_revision: Option<u64>,
+    pub anchor_run_id: String,
+    pub first_kept_run_id: Option<String>,
+    pub summary_content_block_id: String,
+    pub source_run_ids: Vec<String>,
+    pub source_hash: String,
+}
+
+impl ContextCheckpoint {
+    pub fn provenance(&self) -> ContextCheckpointProvenance {
+        ContextCheckpointProvenance {
+            checkpoint_id: self.id.clone(),
+            maintenance_run_id: self.maintenance_run_id.clone(),
+            kind: self.kind,
+            branch_pointer_id: self.branch_pointer_id.clone(),
+            branch_revision: self.branch_revision,
+            anchor_run_id: self.anchor_run_id.clone(),
+            first_kept_run_id: self.first_kept_run_id.clone(),
+            summary_content_block_id: self.summary_content_block_id.clone(),
+            source_run_ids: self.source_run_ids.clone(),
+            source_hash: self.source_hash.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextCompileInput {
+    pub request: ContextCompileRequest,
+    pub checkpoints: Vec<ContextCheckpoint>,
+    /// Checkpoints proven visible from the selected branch revision.
+    ///
+    /// `None` is valid for legacy, branch-neutral checkpoints, but branch-scoped
+    /// checkpoints fail closed until the caller supplies visibility evidence.
+    /// `Some(Vec::new())` explicitly means that the selected branch inherits no
+    /// branch-scoped checkpoints.
+    pub eligible_checkpoint_ids: Option<Vec<String>>,
+}
+
+impl ContextCompileInput {
+    pub fn new(request: ContextCompileRequest) -> Self {
+        Self {
+            request,
+            checkpoints: Vec::new(),
+            eligible_checkpoint_ids: None,
+        }
+    }
+
+    pub fn with_checkpoints(mut self, checkpoints: Vec<ContextCheckpoint>) -> Self {
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    pub fn with_eligible_checkpoint_ids(mut self, eligible_checkpoint_ids: Vec<String>) -> Self {
+        self.eligible_checkpoint_ids = Some(eligible_checkpoint_ids);
+        self
+    }
+}
+
+impl From<ContextCompileRequest> for ContextCompileInput {
+    fn from(request: ContextCompileRequest) -> Self {
+        Self::new(request)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextSnapshot {
     pub id: String,
@@ -307,100 +529,259 @@ impl ContextCompiler {
         Self { policy }
     }
 
-    pub fn inspect(
+    pub fn inspect<I>(
         &self,
         graph: &ConversationGraph,
-        request: ContextCompileRequest,
-    ) -> Result<ContextPreview, DomainError> {
+        input: I,
+    ) -> Result<ContextPreview, DomainError>
+    where
+        I: Into<ContextCompileInput>,
+    {
+        let ContextCompileInput {
+            request,
+            checkpoints,
+            eligible_checkpoint_ids,
+        } = input.into();
         if let Some(provider) = request.provider.as_ref() {
             provider.require_resolved_metadata()?;
         }
+        let lineage = self.exact_lineage(
+            graph,
+            &request.workspace_id,
+            request.parent_run_id.as_deref(),
+        )?;
         let excluded: BTreeSet<_> = request
             .overrides
             .excluded_source_ids
             .iter()
             .map(String::as_str)
             .collect();
-        let mut items = Vec::new();
+
+        let mut raw_items = Vec::with_capacity(lineage.len().saturating_mul(2).saturating_add(2));
         let system_source_id = format!("workspace:{}:system", request.workspace_id);
-        if !request.system_prompt.is_empty() && !excluded.contains(system_source_id.as_str()) {
-            push_item(
+        push_item(
+            &mut raw_items,
+            (
+                Some(system_source_id.clone()),
+                ContextSourceRef::new(
+                    ContextSourceRefKind::WorkspaceSystem,
+                    request.workspace_id.clone(),
+                ),
+            ),
+            ContextSourceKind::System,
+            MessageRole::System,
+            request.system_prompt.clone(),
+            InclusionReason::SystemPolicy,
+            true,
+        );
+        for (turn, run) in &lineage {
+            push_lineage_pair(&mut raw_items, turn, run);
+        }
+        push_item(
+            &mut raw_items,
+            (
+                None,
+                ContextSourceRef::new(
+                    ContextSourceRefKind::CurrentPrompt,
+                    request.workspace_id.clone(),
+                ),
+            ),
+            ContextSourceKind::CurrentPrompt,
+            MessageRole::User,
+            request.current_prompt.clone(),
+            InclusionReason::CurrentPrompt,
+            true,
+        );
+
+        let lineage_positions = lineage
+            .iter()
+            .enumerate()
+            .map(|(position, (_, run))| (run.id.as_str(), position))
+            .collect::<BTreeMap<_, _>>();
+        let eligible_checkpoint_ids = eligible_checkpoint_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(String::as_str).collect::<BTreeSet<_>>());
+        for checkpoint in &checkpoints {
+            if checkpoint.branch_pointer_id.is_some() != checkpoint.branch_revision.is_some() {
+                return Err(DomainError::InvalidCheckpointBranchEvidence {
+                    checkpoint_id: checkpoint.id.clone(),
+                });
+            }
+            if checkpoint.kind == ContextCheckpointKind::BranchSummary
+                && let Some(first_kept_run_id) = checkpoint.first_kept_run_id.as_ref()
+            {
+                return Err(DomainError::InvalidCheckpointBoundary {
+                    checkpoint_id: checkpoint.id.clone(),
+                    first_kept_run_id: first_kept_run_id.clone(),
+                });
+            }
+            if checkpoint.workspace_id != request.workspace_id {
+                return Err(DomainError::CheckpointOutsideWorkspace {
+                    checkpoint_id: checkpoint.id.clone(),
+                    workspace_id: request.workspace_id.clone(),
+                });
+            }
+            if checkpoint.branch_pointer_id.is_some() && eligible_checkpoint_ids.is_none() {
+                return Err(DomainError::MissingCheckpointVisibilityEvidence {
+                    checkpoint_id: checkpoint.id.clone(),
+                });
+            }
+        }
+        let latest_compaction = checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint_is_visible(checkpoint, eligible_checkpoint_ids.as_ref())
+            })
+            .filter(|checkpoint| !checkpoint_is_excluded(&excluded, checkpoint))
+            .filter(|checkpoint| checkpoint.kind == ContextCheckpointKind::Compaction)
+            .filter_map(|checkpoint| {
+                lineage_positions
+                    .get(checkpoint.anchor_run_id.as_str())
+                    .copied()
+                    .map(|position| (position, checkpoint))
+            })
+            .max_by(|(left_position, left), (right_position, right)| {
+                (*left_position, left.created_at, left.id.as_str()).cmp(&(
+                    *right_position,
+                    right.created_at,
+                    right.id.as_str(),
+                ))
+            });
+        let mut effective_start = 0;
+        let mut compaction_order = None;
+        let mut applied_checkpoint = None;
+        let mut items = Vec::with_capacity(raw_items.len().saturating_add(checkpoints.len()));
+        push_existing_item(&mut items, &raw_items[0]);
+        if let Some((anchor_position, checkpoint)) = latest_compaction {
+            effective_start = match checkpoint.first_kept_run_id.as_deref() {
+                Some(run_id) => {
+                    let kept_position =
+                        lineage_positions.get(run_id).copied().ok_or_else(|| {
+                            DomainError::InvalidCheckpointBoundary {
+                                checkpoint_id: checkpoint.id.clone(),
+                                first_kept_run_id: run_id.into(),
+                            }
+                        })?;
+                    if kept_position > anchor_position {
+                        return Err(DomainError::InvalidCheckpointBoundary {
+                            checkpoint_id: checkpoint.id.clone(),
+                            first_kept_run_id: run_id.into(),
+                        });
+                    }
+                    kept_position
+                }
+                None => anchor_position.saturating_add(1),
+            };
+            push_checkpoint_item(
                 &mut items,
-                Some(system_source_id),
-                ContextSourceKind::System,
-                MessageRole::System,
-                request.system_prompt,
-                InclusionReason::SystemPolicy,
-            );
+                checkpoint,
+                ContextSourceRefKind::CheckpointSummary,
+                ContextSourceKind::CompactionSummary,
+                InclusionReason::LatestCompaction,
+            )?;
+            compaction_order = Some((
+                anchor_position,
+                checkpoint.created_at,
+                checkpoint.id.clone(),
+            ));
+            applied_checkpoint = Some(checkpoint.provenance());
         }
 
-        for (turn, run) in self.exact_lineage(
-            graph,
-            &request.workspace_id,
-            request.parent_run_id.as_deref(),
-        )? {
-            if !excluded.contains(turn.id.as_str()) {
-                push_item(
-                    &mut items,
-                    Some(turn.id.clone()),
-                    ContextSourceKind::TurnPrompt,
-                    MessageRole::User,
-                    turn.prompt_markdown.clone(),
-                    InclusionReason::ExactAncestorPath,
-                );
+        let mut branch_summaries = checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint_is_visible(checkpoint, eligible_checkpoint_ids.as_ref())
+            })
+            .filter(|checkpoint| !checkpoint_is_excluded(&excluded, checkpoint))
+            .filter(|checkpoint| checkpoint.kind == ContextCheckpointKind::BranchSummary)
+            .filter_map(|checkpoint| {
+                lineage_positions
+                    .get(checkpoint.anchor_run_id.as_str())
+                    .copied()
+                    .map(|position| (position, checkpoint))
+            })
+            .filter(|(position, checkpoint)| {
+                compaction_order.as_ref().is_none_or(|order| {
+                    (*position, checkpoint.created_at, checkpoint.id.as_str())
+                        > (order.0, order.1, order.2.as_str())
+                })
+            })
+            .collect::<Vec<_>>();
+        branch_summaries.sort_by(|(left_position, left), (right_position, right)| {
+            (*left_position, left.created_at, left.id.as_str()).cmp(&(
+                *right_position,
+                right.created_at,
+                right.id.as_str(),
+            ))
+        });
+        let branch_summary_provenance = branch_summaries
+            .iter()
+            .map(|(_, checkpoint)| checkpoint.provenance())
+            .collect::<Vec<_>>();
+
+        for (lineage_position, _) in lineage.iter().enumerate().skip(effective_start) {
+            let raw_position = 1 + lineage_position * 2;
+            let turn_item = &raw_items[raw_position];
+            if !source_is_excluded(
+                &excluded,
+                turn_item.source_id.as_deref(),
+                &turn_item.source_ref,
+            ) {
+                push_existing_item(&mut items, turn_item);
             }
-            if !excluded.contains(run.id.as_str()) {
-                push_item(
+            let run_item = &raw_items[raw_position + 1];
+            if !source_is_excluded(
+                &excluded,
+                run_item.source_id.as_deref(),
+                &run_item.source_ref,
+            ) {
+                push_existing_item(&mut items, run_item);
+            }
+            for (_, checkpoint) in branch_summaries
+                .iter()
+                .filter(|(position, _)| *position == lineage_position)
+            {
+                push_checkpoint_item(
                     &mut items,
-                    Some(run.id.clone()),
-                    ContextSourceKind::ModelRun,
-                    MessageRole::Assistant,
-                    run.output_markdown().to_owned(),
-                    InclusionReason::ExactAncestorPath,
-                );
+                    checkpoint,
+                    ContextSourceRefKind::BranchSummary,
+                    ContextSourceKind::BranchSummary,
+                    InclusionReason::BranchSummary,
+                )?;
             }
         }
 
         let mut warnings = Vec::new();
         let mut seen_pins = BTreeSet::new();
-        for source_id in &request.overrides.pinned_source_ids {
-            if !seen_pins.insert(source_id.as_str()) {
-                warnings.push(ContextWarning::DuplicatePinnedSource(source_id.clone()));
+        for pin in &request.overrides.pinned_sources {
+            let source_id = pin.source_ref.stable_id();
+            if !seen_pins.insert(pin.clone()) {
+                warnings.push(ContextWarning::DuplicatePinnedSource(source_id));
                 continue;
             }
-            if excluded.contains(source_id.as_str()) {
-                warnings.push(ContextWarning::ExcludedPinnedSource(source_id.clone()));
+            if source_is_excluded(&excluded, pin.source_ref.id.as_deref(), &pin.source_ref) {
+                warnings.push(ContextWarning::ExcludedPinnedSource(source_id));
                 continue;
             }
-            let block =
-                graph
-                    .content_block(source_id)
-                    .ok_or_else(|| DomainError::MissingPinnedSource {
-                        source_id: source_id.clone(),
-                    })?;
-            if block.workspace_id != request.workspace_id {
-                return Err(DomainError::CrossWorkspacePinnedSource {
-                    source_id: source_id.clone(),
-                    workspace_id: request.workspace_id.clone(),
-                });
+            if let Some(existing) = items.iter_mut().find(|item| pin_matches_item(pin, item)) {
+                existing.inclusion_reason = InclusionReason::ExplicitPin;
+                continue;
             }
-            push_item(
-                &mut items,
-                Some(block.id.clone()),
-                ContextSourceKind::Pinned,
-                block.role,
-                block.content.clone(),
-                InclusionReason::ExplicitPin,
-            );
+            if let Some(raw_item) = raw_items.iter().find(|item| pin_matches_item(pin, item)) {
+                let mut raw_item = raw_item.clone();
+                raw_item.inclusion_reason = InclusionReason::ExplicitPin;
+                push_existing_item(&mut items, &raw_item);
+                continue;
+            }
+            let pinned_item = resolve_pinned_item(graph, &checkpoints, &request.workspace_id, pin)?;
+            push_existing_item(&mut items, &pinned_item);
         }
 
-        push_item(
+        push_existing_item(
             &mut items,
-            None,
-            ContextSourceKind::CurrentPrompt,
-            MessageRole::User,
-            request.current_prompt,
-            InclusionReason::CurrentPrompt,
+            raw_items
+                .last()
+                .expect("raw context always includes the current prompt"),
         );
 
         let estimated_chars = items.iter().map(|item| item.content.chars().count()).sum();
@@ -414,6 +795,8 @@ impl ContextCompiler {
             &self.policy.compiler_version,
             &items,
             request.provider.as_ref(),
+            applied_checkpoint.as_ref(),
+            &branch_summary_provenance,
         )?;
         let messages = items
             .iter()
@@ -427,23 +810,31 @@ impl ContextCompiler {
             items,
             estimated_chars,
             canonical_hash: hash.clone(),
+            warnings: warnings.clone(),
+            checkpoint_provenance: applied_checkpoint.clone(),
+            branch_summary_provenance,
         };
         Ok(ContextPreview {
             messages,
             manifest,
+            raw_items,
+            applied_checkpoint,
             estimated_chars,
             warnings,
             preview_hash: hash,
         })
     }
 
-    pub fn compile(
+    pub fn compile<I>(
         &self,
         graph: &ConversationGraph,
-        request: ContextCompileRequest,
+        input: I,
         expected_preview_hash: &str,
-    ) -> Result<CompiledContext, DomainError> {
-        let preview = self.inspect(graph, request)?;
+    ) -> Result<CompiledContext, DomainError>
+    where
+        I: Into<ContextCompileInput>,
+    {
+        let preview = self.inspect(graph, input)?;
         if preview.preview_hash != expected_preview_hash {
             return Err(DomainError::PreviewHashMismatch {
                 expected: expected_preview_hash.into(),
@@ -494,31 +885,336 @@ impl ContextCompiler {
     }
 }
 
+fn checkpoint_is_visible(
+    checkpoint: &ContextCheckpoint,
+    eligible_checkpoint_ids: Option<&BTreeSet<&str>>,
+) -> bool {
+    checkpoint.branch_pointer_id.is_none()
+        || eligible_checkpoint_ids.is_some_and(|ids| ids.contains(checkpoint.id.as_str()))
+}
+
+fn checkpoint_is_excluded(
+    excluded_source_ids: &BTreeSet<&str>,
+    checkpoint: &ContextCheckpoint,
+) -> bool {
+    let source_ref_kind = match checkpoint.kind {
+        ContextCheckpointKind::Compaction => ContextSourceRefKind::CheckpointSummary,
+        ContextCheckpointKind::BranchSummary => ContextSourceRefKind::BranchSummary,
+    };
+    let source_ref = ContextSourceRef::new(source_ref_kind, checkpoint.id.clone());
+    source_is_excluded(
+        excluded_source_ids,
+        Some(checkpoint.id.as_str()),
+        &source_ref,
+    )
+}
+
+fn push_lineage_pair(items: &mut Vec<RunContextItem>, turn: &Turn, run: &ModelRun) {
+    push_item(
+        items,
+        (
+            Some(turn.id.clone()),
+            ContextSourceRef::new(ContextSourceRefKind::TurnPrompt, turn.id.clone()),
+        ),
+        ContextSourceKind::TurnPrompt,
+        MessageRole::User,
+        turn.prompt_markdown.clone(),
+        InclusionReason::ExactAncestorPath,
+        false,
+    );
+    push_item(
+        items,
+        (
+            Some(run.id.clone()),
+            ContextSourceRef::new(ContextSourceRefKind::ModelRun, run.id.clone()),
+        ),
+        ContextSourceKind::ModelRun,
+        MessageRole::Assistant,
+        run.output_markdown().to_owned(),
+        InclusionReason::ExactAncestorPath,
+        false,
+    );
+}
+
+fn push_content_block_item(items: &mut Vec<RunContextItem>, block: &ContentBlock) {
+    items.push(RunContextItem {
+        position: items.len(),
+        source_id: Some(block.id.clone()),
+        source_ref: ContextSourceRef::new(ContextSourceRefKind::ContentBlock, block.id.clone()),
+        source_kind: ContextSourceKind::Pinned,
+        role: block.role,
+        content: block.content.clone(),
+        content_block_id: block.id.clone(),
+        content_hash: block.content_hash.clone(),
+        inclusion_reason: InclusionReason::ExplicitPin,
+        mandatory: false,
+    });
+}
+
+fn push_checkpoint_item(
+    items: &mut Vec<RunContextItem>,
+    checkpoint: &ContextCheckpoint,
+    source_ref_kind: ContextSourceRefKind,
+    source_kind: ContextSourceKind,
+    inclusion_reason: InclusionReason,
+) -> Result<(), DomainError> {
+    checkpoint_summary_content_hash(checkpoint)?;
+    push_item(
+        items,
+        (
+            Some(checkpoint.id.clone()),
+            ContextSourceRef::new(source_ref_kind, checkpoint.id.clone()),
+        ),
+        source_kind,
+        MessageRole::System,
+        checkpoint.summary.clone(),
+        inclusion_reason,
+        false,
+    );
+    Ok(())
+}
+
+fn push_checkpoint_content_block_item(
+    items: &mut Vec<RunContextItem>,
+    checkpoint: &ContextCheckpoint,
+) -> Result<(), DomainError> {
+    let content_hash = checkpoint_summary_content_hash(checkpoint)?;
+    items.push(RunContextItem {
+        position: items.len(),
+        source_id: Some(checkpoint.summary_content_block_id.clone()),
+        source_ref: ContextSourceRef::new(
+            ContextSourceRefKind::ContentBlock,
+            checkpoint.summary_content_block_id.clone(),
+        ),
+        source_kind: ContextSourceKind::Pinned,
+        role: MessageRole::System,
+        content: checkpoint.summary.clone(),
+        content_block_id: checkpoint.summary_content_block_id.clone(),
+        content_hash,
+        inclusion_reason: InclusionReason::ExplicitPin,
+        mandatory: false,
+    });
+    Ok(())
+}
+
+fn checkpoint_summary_content_hash(checkpoint: &ContextCheckpoint) -> Result<String, DomainError> {
+    let content_hash = sha256_hex(checkpoint.summary.as_bytes());
+    let expected_content_block_id =
+        format!("block-{}-{content_hash}", role_name(MessageRole::System));
+    if checkpoint.summary_content_block_id != expected_content_block_id {
+        return Err(DomainError::InvalidCheckpointContentIdentity {
+            checkpoint_id: checkpoint.id.clone(),
+        });
+    }
+    Ok(content_hash)
+}
+
 fn push_item(
     items: &mut Vec<RunContextItem>,
-    source_id: Option<String>,
+    source: (Option<String>, ContextSourceRef),
     source_kind: ContextSourceKind,
     role: MessageRole,
     content: String,
     inclusion_reason: InclusionReason,
+    mandatory: bool,
 ) {
+    let (source_id, source_ref) = source;
+    let content_hash = sha256_hex(content.as_bytes());
     items.push(RunContextItem {
         position: items.len(),
         source_id,
+        source_ref,
         source_kind,
         role,
-        content_hash: sha256_hex(content.as_bytes()),
+        content_block_id: format!("block-{}-{content_hash}", role_name(role)),
+        content_hash,
         content,
         inclusion_reason,
+        mandatory,
     });
+}
+
+fn push_existing_item(items: &mut Vec<RunContextItem>, item: &RunContextItem) {
+    let mut item = item.clone();
+    item.position = items.len();
+    items.push(item);
+}
+
+fn pin_matches_item(pin: &ContextPin, item: &RunContextItem) -> bool {
+    item.source_ref == pin.source_ref
+        && item.content_block_id == pin.content_block_id
+        && item.content_hash == pin.content_hash
+}
+
+fn resolve_pinned_item(
+    graph: &ConversationGraph,
+    checkpoints: &[ContextCheckpoint],
+    workspace_id: &str,
+    pin: &ContextPin,
+) -> Result<RunContextItem, DomainError> {
+    let source_id = pin.source_ref.stable_id();
+    let id = pin
+        .source_ref
+        .id
+        .as_deref()
+        .ok_or_else(|| DomainError::MissingPinnedSource {
+            source_id: source_id.clone(),
+        })?;
+    let mut candidates = Vec::with_capacity(1);
+    match pin.source_ref.kind {
+        ContextSourceRefKind::TurnPrompt => {
+            let turn = graph
+                .turn(id)
+                .ok_or_else(|| DomainError::MissingPinnedSource {
+                    source_id: source_id.clone(),
+                })?;
+            if turn.workspace_id != workspace_id {
+                return Err(DomainError::CrossWorkspacePinnedSource {
+                    source_id,
+                    workspace_id: workspace_id.into(),
+                });
+            }
+            push_item(
+                &mut candidates,
+                (
+                    Some(turn.id.clone()),
+                    ContextSourceRef::new(ContextSourceRefKind::TurnPrompt, turn.id.clone()),
+                ),
+                ContextSourceKind::TurnPrompt,
+                MessageRole::User,
+                turn.prompt_markdown.clone(),
+                InclusionReason::ExplicitPin,
+                false,
+            );
+        }
+        ContextSourceRefKind::ModelRun => {
+            let run = graph
+                .run(id)
+                .ok_or_else(|| DomainError::MissingPinnedSource {
+                    source_id: source_id.clone(),
+                })?;
+            let turn =
+                graph
+                    .turn(&run.turn_id)
+                    .ok_or_else(|| DomainError::MissingPinnedSource {
+                        source_id: source_id.clone(),
+                    })?;
+            if turn.workspace_id != workspace_id {
+                return Err(DomainError::CrossWorkspacePinnedSource {
+                    source_id,
+                    workspace_id: workspace_id.into(),
+                });
+            }
+            push_item(
+                &mut candidates,
+                (
+                    Some(run.id.clone()),
+                    ContextSourceRef::new(ContextSourceRefKind::ModelRun, run.id.clone()),
+                ),
+                ContextSourceKind::ModelRun,
+                MessageRole::Assistant,
+                run.output_markdown().to_owned(),
+                InclusionReason::ExplicitPin,
+                false,
+            );
+        }
+        ContextSourceRefKind::ContentBlock => {
+            if let Some(block) = graph.content_block(id) {
+                if block.workspace_id != workspace_id {
+                    return Err(DomainError::CrossWorkspacePinnedSource {
+                        source_id,
+                        workspace_id: workspace_id.into(),
+                    });
+                }
+                push_content_block_item(&mut candidates, block);
+            } else {
+                let checkpoint = checkpoints
+                    .iter()
+                    .find(|checkpoint| checkpoint.summary_content_block_id == id)
+                    .ok_or_else(|| DomainError::MissingPinnedSource {
+                        source_id: source_id.clone(),
+                    })?;
+                if checkpoint.workspace_id != workspace_id {
+                    return Err(DomainError::CrossWorkspacePinnedSource {
+                        source_id,
+                        workspace_id: workspace_id.into(),
+                    });
+                }
+                push_checkpoint_content_block_item(&mut candidates, checkpoint)?;
+            }
+        }
+        ContextSourceRefKind::CheckpointSummary | ContextSourceRefKind::BranchSummary => {
+            let expected_kind = match pin.source_ref.kind {
+                ContextSourceRefKind::CheckpointSummary => ContextCheckpointKind::Compaction,
+                ContextSourceRefKind::BranchSummary => ContextCheckpointKind::BranchSummary,
+                _ => unreachable!("matched checkpoint source kinds"),
+            };
+            let checkpoint = checkpoints
+                .iter()
+                .find(|checkpoint| checkpoint.id == id && checkpoint.kind == expected_kind)
+                .ok_or_else(|| DomainError::MissingPinnedSource {
+                    source_id: source_id.clone(),
+                })?;
+            if checkpoint.workspace_id != workspace_id {
+                return Err(DomainError::CrossWorkspacePinnedSource {
+                    source_id,
+                    workspace_id: workspace_id.into(),
+                });
+            }
+            let (source_kind, reason) = match expected_kind {
+                ContextCheckpointKind::Compaction => (
+                    ContextSourceKind::CompactionSummary,
+                    InclusionReason::LatestCompaction,
+                ),
+                ContextCheckpointKind::BranchSummary => (
+                    ContextSourceKind::BranchSummary,
+                    InclusionReason::BranchSummary,
+                ),
+            };
+            push_checkpoint_item(
+                &mut candidates,
+                checkpoint,
+                pin.source_ref.kind,
+                source_kind,
+                reason,
+            )?;
+        }
+        ContextSourceRefKind::WorkspaceSystem | ContextSourceRefKind::CurrentPrompt => {
+            return Err(DomainError::MissingPinnedSource { source_id });
+        }
+    }
+    let mut candidate = candidates
+        .pop()
+        .expect("a resolved pin always materializes exactly one candidate");
+    if !pin_matches_item(pin, &candidate) {
+        return Err(DomainError::MissingPinnedSource { source_id });
+    }
+    candidate.inclusion_reason = InclusionReason::ExplicitPin;
+    Ok(candidate)
+}
+
+fn source_is_excluded(
+    excluded: &BTreeSet<&str>,
+    legacy_source_id: Option<&str>,
+    source_ref: &ContextSourceRef,
+) -> bool {
+    if excluded.is_empty() {
+        return false;
+    }
+    legacy_source_id.is_some_and(|id| excluded.contains(id))
+        || excluded.contains(source_ref.stable_id().as_str())
 }
 
 fn hash_manifest(
     compiler_version: &str,
     items: &[RunContextItem],
     provider: Option<&ProviderSnapshot>,
+    checkpoint_provenance: Option<&ContextCheckpointProvenance>,
+    branch_summary_provenance: &[ContextCheckpointProvenance],
 ) -> Result<String, DomainError> {
-    let mut canonical = Vec::new();
+    let content_bytes = items.iter().map(|item| item.content.len()).sum::<usize>();
+    let mut canonical =
+        Vec::with_capacity(content_bytes.saturating_add(items.len().saturating_mul(320)));
     append_named_field(
         &mut canonical,
         "manifest.compiler_version",
@@ -566,10 +1262,10 @@ fn hash_manifest(
             "provider.auth_header_name",
             provider.auth_header_name.as_deref(),
         );
-        append_named_field(
+        append_named_usize_field(
             &mut canonical,
             "provider.additional_headers.count",
-            &provider.additional_headers.len().to_string(),
+            provider.additional_headers.len(),
         );
         for (name, value) in &provider.additional_headers {
             append_named_field(&mut canonical, "provider.additional_header.name", name);
@@ -577,44 +1273,46 @@ fn hash_manifest(
         }
         append_named_field(&mut canonical, "provider.base_url", &provider.base_url);
         append_named_field(&mut canonical, "provider.model", &provider.model);
-        append_named_field(
+        append_named_usize_field(
             &mut canonical,
             "provider.parameters.count",
-            &provider.parameters.len().to_string(),
+            provider.parameters.len(),
         );
         for (key, value) in &provider.parameters {
             append_named_field(&mut canonical, "provider.parameter.name", key);
             append_named_field(&mut canonical, "provider.parameter.value", value);
         }
     }
+    append_checkpoint_provenance(&mut canonical, "manifest.compaction", checkpoint_provenance);
+    append_named_usize_field(
+        &mut canonical,
+        "manifest.branch_summaries.count",
+        branch_summary_provenance.len(),
+    );
+    for provenance in branch_summary_provenance {
+        append_checkpoint_provenance(&mut canonical, "manifest.branch_summary", Some(provenance));
+    }
+    append_named_usize_field(&mut canonical, "manifest.items.count", items.len());
     append_named_field(
         &mut canonical,
-        "manifest.items.count",
-        &items.len().to_string(),
+        "manifest.items.schema",
+        "position,source_kind,source_id,source_ref_kind,source_ref_id,role,content_block_id,content_hash,content,inclusion_reason,mandatory",
     );
     for item in items {
-        append_named_field(
-            &mut canonical,
-            "manifest.item.position",
-            &item.position.to_string(),
-        );
-        append_named_field(
-            &mut canonical,
-            "manifest.item.source_kind",
-            source_kind_name(item.source_kind),
-        );
-        append_optional_named_field(
-            &mut canonical,
-            "manifest.item.source_id",
-            item.source_id.as_deref(),
-        );
-        append_named_field(&mut canonical, "manifest.item.role", role_name(item.role));
-        append_named_field(&mut canonical, "manifest.item.content", &item.content);
-        append_named_field(
-            &mut canonical,
-            "manifest.item.inclusion_reason",
-            reason_name(item.inclusion_reason),
-        );
+        // The schema fixes field order, while every value remains length-framed.
+        // Repeating the same long field names for each item adds no identity
+        // information and dominates deep context hashing in debug builds.
+        append_usize_field(&mut canonical, item.position);
+        append_field(&mut canonical, source_kind_name(item.source_kind));
+        append_optional_field(&mut canonical, item.source_id.as_deref());
+        append_field(&mut canonical, source_ref_kind_name(item.source_ref.kind));
+        append_optional_field(&mut canonical, item.source_ref.id.as_deref());
+        append_field(&mut canonical, role_name(item.role));
+        append_field(&mut canonical, &item.content_block_id);
+        append_field(&mut canonical, &item.content_hash);
+        append_field(&mut canonical, &item.content);
+        append_field(&mut canonical, reason_name(item.inclusion_reason));
+        append_field(&mut canonical, if item.mandatory { "1" } else { "0" });
     }
     Ok(sha256_hex(&canonical))
 }
@@ -647,10 +1345,40 @@ fn auth_placement_name(placement: AuthPlacement) -> &'static str {
 }
 
 fn append_field(target: &mut Vec<u8>, value: &str) {
-    target.extend_from_slice(value.len().to_string().as_bytes());
+    append_usize_digits(target, value.len());
     target.push(b':');
     target.extend_from_slice(value.as_bytes());
     target.push(b';');
+}
+
+fn append_usize_field(target: &mut Vec<u8>, value: usize) {
+    append_usize_digits(target, decimal_len(value));
+    target.push(b':');
+    append_usize_digits(target, value);
+    target.push(b';');
+}
+
+fn append_usize_digits(target: &mut Vec<u8>, mut value: usize) {
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    target.extend_from_slice(&digits[cursor..]);
+}
+
+fn decimal_len(mut value: usize) -> usize {
+    let mut len = 1;
+    while value >= 10 {
+        value /= 10;
+        len += 1;
+    }
+    len
 }
 
 fn append_named_field(target: &mut Vec<u8>, name: &str, value: &str) {
@@ -658,14 +1386,104 @@ fn append_named_field(target: &mut Vec<u8>, name: &str, value: &str) {
     append_field(target, value);
 }
 
+fn append_named_usize_field(target: &mut Vec<u8>, name: &str, value: usize) {
+    append_field(target, name);
+    append_usize_field(target, value);
+}
+
+fn append_optional_field(target: &mut Vec<u8>, value: Option<&str>) {
+    append_field(target, if value.is_some() { "1" } else { "0" });
+    if let Some(value) = value {
+        append_field(target, value);
+    }
+}
+
 fn append_optional_named_field(target: &mut Vec<u8>, name: &str, value: Option<&str>) {
-    append_named_field(
-        target,
-        &format!("{name}.present"),
-        if value.is_some() { "1" } else { "0" },
-    );
+    append_usize_digits(target, name.len() + ".present".len());
+    target.push(b':');
+    target.extend_from_slice(name.as_bytes());
+    target.extend_from_slice(b".present;");
+    append_field(target, if value.is_some() { "1" } else { "0" });
     if let Some(value) = value {
         append_named_field(target, name, value);
+    }
+}
+
+fn append_checkpoint_provenance(
+    target: &mut Vec<u8>,
+    prefix: &str,
+    provenance: Option<&ContextCheckpointProvenance>,
+) {
+    append_named_field(
+        target,
+        &format!("{prefix}.present"),
+        if provenance.is_some() { "1" } else { "0" },
+    );
+    let Some(provenance) = provenance else {
+        return;
+    };
+    append_named_field(
+        target,
+        &format!("{prefix}.checkpoint_id"),
+        &provenance.checkpoint_id,
+    );
+    append_named_field(
+        target,
+        &format!("{prefix}.maintenance_run_id"),
+        &provenance.maintenance_run_id,
+    );
+    append_named_field(
+        target,
+        &format!("{prefix}.kind"),
+        checkpoint_kind_name(provenance.kind),
+    );
+    append_optional_named_field(
+        target,
+        &format!("{prefix}.branch_pointer_id"),
+        provenance.branch_pointer_id.as_deref(),
+    );
+    append_optional_named_field(
+        target,
+        &format!("{prefix}.branch_revision"),
+        provenance
+            .branch_revision
+            .map(|revision| revision.to_string())
+            .as_deref(),
+    );
+    append_named_field(
+        target,
+        &format!("{prefix}.anchor_run_id"),
+        &provenance.anchor_run_id,
+    );
+    append_optional_named_field(
+        target,
+        &format!("{prefix}.first_kept_run_id"),
+        provenance.first_kept_run_id.as_deref(),
+    );
+    append_named_field(
+        target,
+        &format!("{prefix}.summary_content_block_id"),
+        &provenance.summary_content_block_id,
+    );
+    append_named_usize_field(
+        target,
+        &format!("{prefix}.source_run_ids.count"),
+        provenance.source_run_ids.len(),
+    );
+    for run_id in &provenance.source_run_ids {
+        append_named_field(target, &format!("{prefix}.source_run_id"), run_id);
+    }
+    append_named_field(
+        target,
+        &format!("{prefix}.source_hash"),
+        &provenance.source_hash,
+    );
+}
+
+fn checkpoint_kind_name(kind: ContextCheckpointKind) -> &'static str {
+    match kind {
+        ContextCheckpointKind::Compaction => "compaction",
+        ContextCheckpointKind::BranchSummary => "branch_summary",
     }
 }
 
@@ -675,7 +1493,21 @@ fn source_kind_name(kind: ContextSourceKind) -> &'static str {
         ContextSourceKind::TurnPrompt => "turn_prompt",
         ContextSourceKind::ModelRun => "model_run",
         ContextSourceKind::Pinned => "pinned",
+        ContextSourceKind::CompactionSummary => "compaction_summary",
+        ContextSourceKind::BranchSummary => "branch_summary",
         ContextSourceKind::CurrentPrompt => "current_prompt",
+    }
+}
+
+fn source_ref_kind_name(kind: ContextSourceRefKind) -> &'static str {
+    match kind {
+        ContextSourceRefKind::WorkspaceSystem => "workspace_system",
+        ContextSourceRefKind::TurnPrompt => "turn_prompt",
+        ContextSourceRefKind::ModelRun => "model_run",
+        ContextSourceRefKind::ContentBlock => "content_block",
+        ContextSourceRefKind::CurrentPrompt => "current_prompt",
+        ContextSourceRefKind::CheckpointSummary => "checkpoint_summary",
+        ContextSourceRefKind::BranchSummary => "branch_summary",
     }
 }
 
@@ -692,87 +1524,14 @@ fn reason_name(reason: InclusionReason) -> &'static str {
         InclusionReason::SystemPolicy => "system_policy",
         InclusionReason::ExactAncestorPath => "exact_ancestor_path",
         InclusionReason::ExplicitPin => "explicit_pin",
+        InclusionReason::LatestCompaction => "latest_compaction",
+        InclusionReason::BranchSummary => "branch_summary",
         InclusionReason::CurrentPrompt => "current_prompt",
     }
 }
 
 pub fn sha256_hex(input: &[u8]) -> String {
-    const INITIAL: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let bit_len = (input.len() as u64).wrapping_mul(8);
-    let mut padded = input.to_vec();
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    let mut state = INITIAL;
-    for chunk in padded.chunks_exact(64) {
-        let mut schedule = [0u32; 64];
-        for (index, word) in chunk.chunks_exact(4).enumerate() {
-            schedule[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
-        }
-        for index in 16..64 {
-            let s0 = schedule[index - 15].rotate_right(7)
-                ^ schedule[index - 15].rotate_right(18)
-                ^ (schedule[index - 15] >> 3);
-            let s1 = schedule[index - 2].rotate_right(17)
-                ^ schedule[index - 2].rotate_right(19)
-                ^ (schedule[index - 2] >> 10);
-            schedule[index] = schedule[index - 16]
-                .wrapping_add(s0)
-                .wrapping_add(schedule[index - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
-        for index in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ ((!e) & g);
-            let temp1 = h
-                .wrapping_add(s1)
-                .wrapping_add(choose)
-                .wrapping_add(K[index])
-                .wrapping_add(schedule[index]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-        state[5] = state[5].wrapping_add(f);
-        state[6] = state[6].wrapping_add(g);
-        state[7] = state[7].wrapping_add(h);
-    }
-
-    state.iter().map(|word| format!("{word:08x}")).collect()
+    format!("{:x}", Sha256::digest(input))
 }
 
 impl ContextSnapshot {
