@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "types": [
+      "node",
+      "mocha",
+      "@wdio/globals/types",
+      "@wdio/native-types"
+    ]
+  },
+  "include": [
+    "wdio.webview.conf.ts",
+    "tests/webview/**/*.ts",
+    "tests/fixtures/provider-server.ts"
+  ]
+}

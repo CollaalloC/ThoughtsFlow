@@ -46,6 +46,22 @@ _Avoid_: Answer, retry result
 The immutable ordered record of content and provider metadata actually used for one Model Run.
 _Avoid_: Preview, context settings
 
+**Context Cursor**:
+The persisted, versioned selection of one active Model Run and an optional exact Branch Pointer; it projects a route but never rewrites topology.
+_Avoid_: Current message, selected Turn, route state
+
+**Context Draft**:
+The persisted, versioned pin/exclude overrides for the next send on one exact parent Run. A successful send consumes it; a path switch atomically rebases it.
+_Avoid_: Receipt, composer text, global context settings
+
+**Context Checkpoint**:
+Immutable evidence for a user-confirmed compaction or branch summary, including exact source Runs, source hash, boundary, result, and Provider snapshot when a Provider generated it.
+_Avoid_: Run stream checkpoint, hidden truncation, mutable summary
+
+**Branch Pointer**:
+A named, versioned reference to one branch head. Continuing its current head advances it; continuing or retrying history creates a new pointer.
+_Avoid_: Route, parent link, UI tab
+
 **Route**:
 A lineage of Turns connected through exact Model Runs.
 _Avoid_: Thread, canvas path

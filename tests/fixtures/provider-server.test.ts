@@ -167,6 +167,45 @@ describe("ProviderFixture", () => {
     assert.match(await ollamaResponse.text(), new RegExp(`Fixture 回答 #2：${prompt}`));
   });
 
+  test("captures the exact outgoing JSON payload while redacting credentials", async () => {
+    const body = {
+      model: "fixture-model",
+      stream: true,
+      messages: [
+        { role: "system", content: "不可变检查点摘要" },
+        { role: "user", content: "发送给 Provider 的精确尾部" },
+      ],
+    };
+    const response = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        accept: "text/event-stream",
+        authorization: "Bearer fixture-secret-must-not-be-captured",
+        "content-type": "application/json",
+        "x-api-key": "fixture-secret-must-not-be-captured",
+      },
+      body: JSON.stringify(body),
+    });
+    await response.text();
+
+    assert.deepEqual(provider.capturedRequests().at(-1), {
+      method: "POST",
+      pathname: "/v1/chat/completions",
+      search: "",
+      headers: {
+        accept: "text/event-stream",
+        authorization: "[redacted]",
+        "content-type": "application/json",
+        "x-api-key": "[redacted]",
+      },
+      body,
+    });
+    assert.doesNotMatch(
+      JSON.stringify(provider.capturedRequests()),
+      /fixture-secret-must-not-be-captured/,
+    );
+  });
+
   test("stops active hanging streams and can restart without leaked fixture state", async () => {
     const response = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
       method: "POST",

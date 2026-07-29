@@ -1,6 +1,47 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 
+/**
+ * An inspectable copy of a request that reached the fixture. Credentials are
+ * deliberately represented only by their presence, never by their value.
+ */
+export type ProviderRequestSnapshot = {
+  method: string;
+  pathname: string;
+  search: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+};
+
+const retainedHeaderNames = new Set([
+  "accept",
+  "content-type",
+  "anthropic-version",
+]);
+const redactedHeaderNames = new Set([
+  "authorization",
+  "proxy-authorization",
+  "x-api-key",
+  "x-goog-api-key",
+]);
+
+function capturedHeaders(request: IncomingMessage): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(request.headers).flatMap(([name, value]) => {
+      const normalized = name.toLowerCase();
+      if (redactedHeaderNames.has(normalized)) return [[normalized, "[redacted]"]];
+      if (!retainedHeaderNames.has(normalized)) return [];
+      return [[normalized, Array.isArray(value) ? value.join(",") : (value ?? "")]];
+    }),
+  );
+}
+
+function copyBody(body: Record<string, unknown>): Record<string, unknown> {
+  // JSON bodies are the only protocol accepted by this fixture. A serialized
+  // copy keeps later test mutation from altering the evidence it asserts on.
+  return JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+}
+
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -556,7 +597,30 @@ export class ProviderFixture {
   private sockets = new Set<Socket>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private promptCounts = new Map<string, number>();
+  private capturedRequestLog: ProviderRequestSnapshot[] = [];
   baseUrl = "";
+
+  capturedRequests(): ProviderRequestSnapshot[] {
+    return this.capturedRequestLog.map((request) => ({
+      ...request,
+      headers: { ...request.headers },
+      body: copyBody(request.body),
+    }));
+  }
+
+  private recordRequest(
+    request: IncomingMessage,
+    requestUrl: URL,
+    body: Record<string, unknown>,
+  ) {
+    this.capturedRequestLog.push({
+      method: request.method ?? "POST",
+      pathname: requestUrl.pathname,
+      search: requestUrl.search,
+      headers: capturedHeaders(request),
+      body: copyBody(body),
+    });
+  }
 
   private schedule(callback: () => void, delay: number) {
     const timer = setTimeout(() => {
@@ -595,6 +659,7 @@ export class ProviderFixture {
             return;
           }
           const body = await readJson(request);
+          this.recordRequest(request, requestUrl, body);
           if (!hasValidAnthropicBody(body)) {
             writeHttpError(response, 400, "Invalid Anthropic Messages request", "invalid_request");
             return;
@@ -625,6 +690,7 @@ export class ProviderFixture {
             return;
           }
           const body = await readJson(request);
+          this.recordRequest(request, requestUrl, body);
           if (!hasValidGoogleBody(body)) {
             writeHttpError(response, 400, "Invalid Google GenerateContent request", "invalid_request");
             return;
@@ -651,6 +717,7 @@ export class ProviderFixture {
         }
 
         const body = await readJson(request);
+        this.recordRequest(request, requestUrl, body);
         const prompt = lastPrompt(body);
         const count = (this.promptCounts.get(prompt) ?? 0) + 1;
         this.promptCounts.set(prompt, count);

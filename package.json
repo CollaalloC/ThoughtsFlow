@@ -13,6 +13,15 @@
     "test:run": "vitest run",
     "test:fixtures": "node --test tests/fixtures/provider-server.test.ts",
     "test:e2e": "playwright test",
+    "test:native": "node scripts/run-native-test.mjs",
+    "test:webview:build": "VITE_THOUGHSFLOW_WEBVIEW_E2E=1 CARGO_TARGET_DIR=target/webview-e2e tauri build --debug --no-bundle --features webview-e2e --config src-tauri/tauri.webview.conf.json",
+    "test:webview:typecheck": "tsc -p tsconfig.webview.json --noEmit",
+    "test:webview:smoke": "wdio run wdio.webview.conf.ts",
+    "test:webview:restart:run": "node tests/webview/run-restart-journey.ts",
+    "test:webview:live-proxy:run": "TF_WEBVIEW_LIVE_PROXY=1 wdio run wdio.webview.conf.ts --spec tests/webview/live-proxy.spec.ts",
+    "test:webview": "npm run test:webview:typecheck && npm run test:webview:build && npm run test:webview:smoke && npm run test:webview:restart:run",
+    "test:webview:restart": "npm run test:webview:typecheck && npm run test:webview:build && npm run test:webview:restart:run",
+    "test:webview:live-proxy": "npm run test:webview:typecheck && npm run test:webview:build && npm run test:webview:live-proxy:run",
     "check": "npm run test:run && npm run test:fixtures && npm run build"
   },
   "dependencies": {
@@ -34,9 +43,21 @@
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
+    "@wdio/cli": "9.27.1",
+    "@wdio/globals": "9.27.1",
+    "@wdio/local-runner": "9.27.1",
+    "@wdio/mocha-framework": "9.27.1",
+    "@wdio/native-types": "2.4.0",
+    "@wdio/spec-reporter": "9.27.1",
+    "@wdio/tauri-service": "1.2.0",
     "jsdom": "^29.1.1",
     "typescript": "7.0.2",
     "vite": "8.1.5",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "@wdio/tauri-service": {
+      "@wdio/native-utils": "2.5.0"
+    }
   }
 }

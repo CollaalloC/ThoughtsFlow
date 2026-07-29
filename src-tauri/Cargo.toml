@@ -10,6 +10,9 @@ rust-version = "1.85"
 name = "thoughsflow_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+webview-e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -23,6 +26,7 @@ serde_json = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "uuid", "chrono", "json"] }
 tauri = { version = "2", features = [] }
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -32,6 +36,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 codegen-units = 1

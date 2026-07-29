@@ -14,7 +14,7 @@ function uniqueName(testInfo: TestInfo, label: string) {
   return `${label}-${testInfo.project.name}-${stamp}`;
 }
 
-test.describe("ThoughsFlow eight core journeys", () => {
+test.describe("ThoughsFlow Context Tree core journeys", () => {
   test.skip(
     !nativeHarnessEnabled,
     "Requires THOUGHSFLOW_E2E_NATIVE=1 and THOUGHSFLOW_E2E_BASE_URL for a Tauri WebDriver harness.",
@@ -38,7 +38,9 @@ test.describe("ThoughsFlow eight core journeys", () => {
     await expect(settings).toBeVisible();
     await settings.getByRole("button", { name: "新建 Provider" }).click();
     await settings.getByLabel("名称", { exact: true }).fill(providerName);
-    await settings.getByLabel("协议", { exact: true }).selectOption("openai-compatible");
+    await settings
+      .getByLabel("Provider 模板", { exact: true })
+      .selectOption("openai-compatible");
     await settings.getByLabel("Base URL", { exact: true }).fill(`${provider.baseUrl}/v1`);
     await settings.getByLabel("模型", { exact: true }).fill("fixture-model");
     await settings.getByRole("button", { name: "保存 Provider" }).click();
@@ -52,6 +54,7 @@ test.describe("ThoughsFlow eight core journeys", () => {
     await page.getByRole("button", { name: "添加工作区" }).click();
     const form = page.getByRole("form", { name: "创建工作区" });
     await form.getByLabel("工作区名称").fill(workspaceName);
+    await form.getByLabel("工作区目标").fill("验证 Context Tree 的精确路径与恢复语义");
     await form.getByRole("button", { name: "确认创建" }).click();
     await expect(page.getByRole("heading", { name: workspaceName, exact: true })).toBeVisible();
     await page.getByLabel("Provider").selectOption({ label: `${providerName} · fixture-model` });
@@ -188,6 +191,12 @@ test.describe("ThoughsFlow eight core journeys", () => {
     await expect(page.getByText(fixtureAnswer(cancelPrompt), { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "停止生成" }).click();
 
+    await page.getByRole("button", { name: "打开 Context Tree" }).click();
+    const virtualRoot = page.getByRole("treeitem", { name: /^工作区起点/ });
+    await virtualRoot.click();
+    await expect(virtualRoot).toHaveAttribute("aria-current", "true");
+    await page.getByRole("button", { name: "关闭 Context Tree" }).click();
+
     await page.getByLabel("消息").fill(disconnectPrompt);
     await page.getByRole("button", { name: "发送", exact: true }).click();
     await expect(page.getByText(fixtureAnswer(disconnectPrompt), { exact: true })).toBeVisible();
@@ -267,5 +276,54 @@ test.describe("ThoughsFlow eight core journeys", () => {
 
     await page.getByRole("button", { name: "导出 Decision Packet" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Decision Packet 已导出" })).toBeVisible();
+  });
+
+  test("09 sends the effective checkpoint Context and exposes its exact source evidence", async ({ page }, testInfo) => {
+    await prepareScenario(page, testInfo, "E2E-检查点来源与真实Payload");
+    const sourcePrompt = "来源范围：不可变事实基线";
+    const tailPrompt = "保留尾部：继续审查";
+    const nextPrompt = "检查 Provider 实际收到的压缩 Context";
+    const summary = "检查点摘要：事实基线已经确认，保留尾部继续审查。";
+
+    await sendAndComplete(page, sourcePrompt);
+    await sendAndComplete(page, tailPrompt);
+
+    await page.getByRole("button", { name: "准备 Context 压缩" }).click();
+    const maintenance = page.getByRole("complementary", { name: "Context 压缩预览" });
+    await expect(maintenance.getByText("1 个来源 Run")).toBeVisible();
+    await maintenance.getByRole("textbox", { name: "人工摘要" }).fill(summary);
+    await maintenance.getByRole("button", { name: "保存人工压缩检查点" }).click();
+    await expect(page.getByText("Context 检查点已保存并激活。")).toBeVisible();
+
+    await page.getByRole("button", { name: "打开上下文检查器" }).click();
+    const inspector = page.getByRole("complementary", { name: "Context Inspector" });
+    const checkpoint = inspector.getByRole("region", { name: "已应用 Context 检查点" });
+    await expect(checkpoint).toContainText("1 个来源 Run");
+    const sourceHash = await checkpoint
+      .locator("dl > div")
+      .filter({ hasText: "来源 Hash" })
+      .locator("dd")
+      .textContent();
+    expect(sourceHash ?? "").toMatch(/^[a-f0-9]{64}$/);
+
+    await page.getByRole("button", { name: "关闭上下文检查器" }).click();
+    await sendAndComplete(page, nextPrompt);
+
+    const lastRequest = provider
+      .capturedRequests()
+      .filter((request) => request.pathname === "/v1/chat/completions")
+      .at(-1);
+    expect(lastRequest).toBeDefined();
+    const messages = Array.isArray(lastRequest?.body.messages)
+      ? lastRequest.body.messages
+      : [];
+    const actualContent = messages
+      .filter((message): message is Record<string, unknown> => Boolean(message) && typeof message === "object")
+      .map((message) => message.content)
+      .filter((content): content is string => typeof content === "string");
+    expect(actualContent).toContain(summary);
+    expect(actualContent).toContain(tailPrompt);
+    expect(actualContent).toContain(nextPrompt);
+    expect(actualContent).not.toContain(sourcePrompt);
   });
 });

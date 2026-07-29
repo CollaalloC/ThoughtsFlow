@@ -13,7 +13,10 @@ ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。�
 - 每个已保存 Provider Profile 可在本次应用会话中维护多个命名 API Key，并显式选择当前首选凭据；
 - 对结构化且可重试的配额/限流失败提供显式凭据切换与重试入口，失败或部分输出的旧 Run 保持不变；
 - 同一 Turn 多个不可覆盖的 Run、精确回答分支与兄弟分支 Context 隔离；
+- 以精确 `ModelRun` 为节点的持久化 Context Tree：活动 Run、可选分支指针和版本在重启后恢复，历史节点继续或重试会显式 fork；
 - 发送前 Context 检查、pin/exclude、超限阻断和 preview hash 复核；
+- pin/exclude 作为持久化的“下一次发送”草稿保存，切换 Context 时与活动游标用双 CAS 原子重基，发送事务成功后才消费；
+- 用户确认来源范围与保留边界后，保存不可变 compaction/branch-summary checkpoint；失败、取消和版本冲突不会激活 checkpoint 或移动游标；
 - 发送后不可变 Context Snapshot/Receipt，包含有序内容、来源、Provider、Model、Base URL、参数与 canonical hash；
 - 取消、失败、批量 checkpoint，以及启动时把未终结 Run 恢复为 `interrupted` 并保留部分输出；
 - 真实会话树投影的轻量路线图、回答与 Context Diff、采纳/否决/待验证标记；
@@ -71,6 +74,8 @@ macOS 的默认位置通常是：
 
 “数据保存在本机”只描述 SQLite 和导出文件的位置。每轮发送前，Composer 与 Inspector 会另行显示本轮 Context 将发往的 Provider、Model 和 Host；调用远程 Provider 时，相应 Context 会离开本机。
 
+Context Tree 的原始历史路径始终可检查。人工 checkpoint 的摘要文本只在本机保存；选择 Provider 生成摘要时，压缩预览中列出的来源范围和摘要请求会发送到所选 Provider。应用不会静默摘要、自动压缩或在失败后自动重试。
+
 Run、Manifest 与 Snapshot 在 Provider I/O 前由同一数据库事务落盘。流式输出约每 400ms 或累计 4KB 做 checkpoint；应用启动时，数据库中的 `connecting` 或 `streaming` Run 会变为 `interrupted`，已有部分输出不会丢失。首版没有数据库透明加密，也不承诺删除后物理不可恢复。
 
 只有同时带有 `retryable: true` 且机器码精确为 `quota_exhausted` 或 `rate_limited` 的失败，界面才提供凭据恢复入口；不会根据错误文案、普通 5xx、断流或网络故障猜测并切换凭据。用户显式选择另一个命名凭据后，Rust 会在同一个 Provider Profile 串行命令中用该精确凭据创建新的 `ModelRun`；只有创建成功才把它设为当前首选，创建失败会保持原首选不变。重试继续使用失败 Run 绑定的精确 Provider Profile；原失败 Run、部分输出和 Context Receipt 保持不可变。不同 API Key 可能仍共享同一个 Project、Organization 或其他配额作用域，因此人工切换不保证恢复可用额度。
@@ -83,22 +88,26 @@ Decision Packet 只能由 Rust 文件适配器在上述 `exports` 目录创建�
 npm run check
 npm run test:fixtures
 npm run test:e2e
+npm run test:native
+npm run test:webview
 
 cd src-tauri
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
 
-Playwright 的桌面旅程需要一个可驱动 Tauri WebView 的外部 harness；默认执行会明确跳过这些原生旅程，而不会把浏览器 mock 当成桌面验证：
+`npm run test:webview` 会构建独立标识符、独立数据目录且仅测试构建启用 WebDriver 的 macOS 应用，然后在真实 WKWebView 中执行冒烟和三进程重启旅程。旅程覆盖活动叶切换与重开、运行中断恢复、摘要失败/取消、checkpoint 提交后 IPC 响应前崩溃，以及同一 operation ID 的幂等重放。测试专用驱动、审计捕获和故障注入均受 `webview-e2e` feature 限制，不进入普通 production build。
+
+本机 OpenAI-compatible 端点可以用固定、无项目数据的提示做显式 opt-in 探针：
 
 ```bash
-THOUGHSFLOW_E2E_NATIVE=1 \
-THOUGHSFLOW_E2E_BASE_URL=<tauri-webdriver-url> \
-npm run test:e2e
+npm run test:webview:live-proxy
 ```
 
-固定 1,000 Turn 的路线图组件基准在 `tests/performance/route-projection.test.tsx`。最新实测与平台边界记录在 `CORE_QA_RESULTS.md`。
+该命令会真实联系配置在测试中的本机端点，必须由操作者明确运行；测试只发送代码中固定的 `TF_APP_OK` 提示，不发送仓库或工作区内容。
+
+`npm run test:e2e` 保留 Playwright 旅程发现；没有外部 Tauri URL 时会明确跳过，不作为原生通过证据。`npm run test:native` 则以 Tauri 内置 MockRuntime 走真实 IPC、AppState 与文件 SQLite，适合确定性检查，但同样不替代上面的真实 WKWebView 旅程。固定 1,000 Turn 的路线图、1,000 Run Context Tree 组件基准，以及后端 1,000 Turn/2,000 Run 和深度 1,000 重建基准分别位于 `tests/performance/` 与 `src-tauri/tests/native_context_tree.rs`。最新实测与平台边界记录在 `CORE_QA_RESULTS.md`。
 
 ## 架构边界
 
@@ -111,9 +120,11 @@ React UI
   -> SQLite / Provider / filesystem adapters
 ```
 
-组件不直接调用 SQL、Provider、API Key 或任意文件系统；所有 IPC 通过 `src/platform/desktop-bridge.ts`。唯一业务拓扑是 `Turn.parent_run_id`，路线图位置只属于 `ViewState`，不能改变 Context 编译结果。
+组件不直接调用 SQL、Provider、API Key 或任意文件系统；所有 IPC 通过 `src/platform/desktop-bridge.ts`。唯一业务拓扑是 `Turn.parent_run_id`；持久 `ContextCursor` 只选择其中一条精确 root→Run 路径，路线图位置只属于 `ViewState`，不能改变 Context 编译结果。旧 Receipt 从不按当前树或当前 Provider 设置重算。
 
 应用服务只依赖 `RepositoryPort`、运行热路径专用的 `RunPersistencePort`、`ProviderGateway`、`ProviderConnectionTester`、只读 `ProviderModelCatalog` 与 `DecisionPacketWriter`；SQLite、Reqwest 和本地文件系统实现由 Tauri 组合根注入。Tauri 结构化命令错误在 DesktopBridge 统一转换为 `DesktopBridgeError`，保留 `code`、`retryable` 和 `details`。
+
+Context Tree 的设计参考固定在 oh-my-pi commit [`d16c6168`](https://github.com/can1357/oh-my-pi/commit/d16c6168c86f40fc44f25118c2fd06fe160fcb93)：复用活动叶/树投影与非破坏式压缩重建的设计思想，没有复制其实质代码，也没有移植通用 SessionEntry 日志、自动压缩、workspace 克隆或 Snapcompact。
 
 ## 当前限制
 
@@ -121,7 +132,7 @@ React UI
 - Google 的 `thoughtSignature` 会被识别为不透明协议元数据且不会误显示为 reasoning，但当前不持久化或回送；纯文本多轮通常仍可调用，复杂推理质量可能受影响，工具调用所要求的签名连续性也不在本轮范围内；
 - 没有登录、云同步、多人协作、移动端、Agent/MCP、工具执行、RAG、附件或完整知识库；
 - Context token 数为保守估算，不是 Provider tokenizer 的精确计数；超限会阻止发送，不做静默截断或摘要；
-- Context pin/exclude 是“下一次发送”的会话态调整；已锁定 Receipt 永远不变；
+- Context pin/exclude 是持久化的“下一次发送”草稿；成功发送后消费，失败不消费，切换路径时原子清空并重基；已锁定 Receipt 永远不变；
 - 会话凭据当前没有 OS Credential Store、OAuth 或远程 Secret broker；退出应用后必须重新提供；
 - 命名凭据只支持人工激活与显式重试，不做静默自动轮换；共享 Project/Organization 配额时，更换 Key 可能无效；
 - 当前只在本仓库的 macOS 环境做原生构建/冒烟，不声称 Windows 或 Linux 已实机验证。
