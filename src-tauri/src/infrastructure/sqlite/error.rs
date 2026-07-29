@@ -6,8 +6,17 @@ pub type RepositoryResult<T> = Result<T, RepositoryError>;
 pub enum RepositoryError {
     Database(sqlx::Error),
     Migration(sqlx::migrate::MigrateError),
-    NotFound { entity: &'static str, id: String },
+    NotFound {
+        entity: &'static str,
+        id: String,
+    },
     Conflict(String),
+    VersionConflict {
+        resource: &'static str,
+        id: String,
+        expected: i64,
+        actual: i64,
+    },
     InvalidInput(String),
     InvalidStoredValue(String),
 }
@@ -19,6 +28,15 @@ impl fmt::Display for RepositoryError {
             Self::Migration(error) => write!(formatter, "database migration error: {error}"),
             Self::NotFound { entity, id } => write!(formatter, "{entity} `{id}` was not found"),
             Self::Conflict(message) => write!(formatter, "repository conflict: {message}"),
+            Self::VersionConflict {
+                resource,
+                id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{resource} version conflict for `{id}`: expected {expected}, actual {actual}"
+            ),
             Self::InvalidInput(message) => write!(formatter, "invalid repository input: {message}"),
             Self::InvalidStoredValue(message) => {
                 write!(
