@@ -2,7 +2,7 @@
 
 更新时间：2026-09-26。
 
-ThoughtsFlow 的目标平台是 Windows、Linux 和 macOS。当前已准备三平台编译、单元测试和桌面 WebView 测试配置；Windows/Linux 的真实运行结论必须等待对应系统的 CI 与运行验证。当前仓库未配置 Git remote，本次没有推送或远端 CI 运行记录。
+ThoughtsFlow 的目标平台是 Windows、Linux 和 macOS。当前已准备三平台编译、单元测试和桌面 WebView 测试配置；Windows/Linux 的真实运行结论必须等待对应系统的 CI 与运行验证。当前公开源码、CI 与安装包在 CollaalloC/ThoughtsFlow 仓库维护，具体版本结果见发布页。
 
 ## 平台边界
 
@@ -21,7 +21,7 @@ ThoughtsFlow 的核心推演功能通过自己的 Provider 运行。Agent 协作
 
 ## 开发环境
 
-安装 Node 24、Rust stable 和对应平台的系统依赖后执行：
+安装 Node 24、Rust 1.97.1 和对应平台的系统依赖后执行：
 
 ```text
 npm ci
@@ -50,6 +50,8 @@ npm run tauri:dev
 
 原生旅程保留严格的平台真实性检查：macOS 为 `webkit / macos`，Linux 为 `WebKitGTK / linux`，Windows 为 `msedge / windows`。映射依据所安装测试插件的会话响应实现；没有用“任意浏览器均可”替换断言。
 
+Windows MSVC 的 Rust 原生 IPC 集成测试另有 `src-tauri/tests/windows-app.manifest`，由 `build.rs` 通过 `cargo:rustc-link-arg-tests` 嵌入测试可执行文件。Tauri 的资源构建只为应用 binary 链接默认 manifest；集成测试调用 MockRuntime 时仍会链接菜单库的 `TaskDialogIndirect`，缺少 Common Controls v6 声明会导致 Windows 在测试入口之前报 `0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND`。此修复沿用 [Tauri 自身测试的 manifest 方案](https://github.com/tauri-apps/tauri/blob/tauri-v2.11.5/crates/tauri/build.rs)，仅作用于 Windows MSVC 测试目标，不跳过测试，也不替换系统 DLL；发布应用保留 Tauri 原来的 manifest。构建脚本读取 `CARGO_CFG_TARGET_OS` / `CARGO_CFG_TARGET_ENV`，支持区分宿主与交叉编译目标。
+
 两套 workflow 均不调用真实模型、不注入模型凭据。真实 Agent 测试仍要求同时设置 `TF_AGENT_LIVE=1` 与非空 `TF_AGENT_LIVE_REPO_ID`，保留数据库和回执以检查不确定执行结果。真实代理测试也只由显式的 `test:webview:live-proxy` 命令启动，不进入常规或手动 fixture CI。
 
 Actions 使用 2026-09-26 通过官方 API 核验的提交 SHA，而非浮动主版本：
@@ -58,11 +60,11 @@ Actions 使用 2026-09-26 通过官方 API 核验的提交 SHA，而非浮动主
 | --- | --- | --- |
 | actions/checkout | [v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
 | actions/setup-node | [v7.0.0](https://github.com/actions/setup-node/releases/tag/v7.0.0) | `820762786026740c76f36085b0efc47a31fe5020` |
-| dtolnay/rust-toolchain | [master 提交](https://github.com/dtolnay/rust-toolchain/commit/02cb101ec7c40f2c49e1d9714d64511d8e1b74de)，显式选择 Rust stable | `02cb101ec7c40f2c49e1d9714d64511d8e1b74de` |
+| dtolnay/rust-toolchain | [master 提交](https://github.com/dtolnay/rust-toolchain/commit/02cb101ec7c40f2c49e1d9714d64511d8e1b74de)，显式选择 Rust 1.97.1 | `02cb101ec7c40f2c49e1d9714d64511d8e1b74de` |
 
-Node 按 24 主版本更新，Rust 按 stable 更新；依赖树由 `package-lock.json` 与 `src-tauri/Cargo.lock` 固定。工具链更新造成的差异应通过三平台 CI 发现。
+Node 使用 24 主版本，Rust 由 `rust-toolchain.toml` 固定为 1.97.1，并与随包分发的标准库声明对应；依赖树由 `package-lock.json` 与 `src-tauri/Cargo.lock` 固定。更新 Rust 时应同步检查工具链许可证材料与三平台 CI。
 
-## 本轮已验证与未验证
+## 发布流水线接入前的本机验证记录
 
 本机 macOS / Node v24.20.0 下已通过：
 
@@ -71,4 +73,4 @@ Node 按 24 主版本更新，Rust 按 stable 更新；依赖树由 `package-loc
 - 新 runner 执行 `tauri --version` 返回 `tauri-cli 2.11.4`。
 - 两份 workflow 的 YAML 解析、三平台矩阵和手动触发字段检查。
 
-以上脚本验证没有调用真实 Agent。Windows/Linux 的原生构建和 WebView 旅程、远端 CI、安装包与真实 Orca/OMP 执行均不能由这些本机测试推断。后续接入 Git remote 并运行 workflow 后，应把运行链接、平台、commit、结果写入验证记录，再提升平台支持状态。
+以上早期脚本验证没有调用真实 Agent，也不代表 Windows/Linux 已通过验收。公开仓库现为 [CollaalloC/ThoughtsFlow](https://github.com/CollaalloC/ThoughtsFlow)。各版本实际通过的 CI、构建 commit、可下载安装包与限制以 [Releases](https://github.com/CollaalloC/ThoughtsFlow/releases) 为准；安装流程见 [RELEASING.md](RELEASING.md)。构建成功、MockRuntime IPC、原生 WebView fixture 和真实 Orca/OMP 任务是不同的验证层次，不相互替代。
