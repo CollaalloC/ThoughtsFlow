@@ -2,6 +2,7 @@ name: Desktop CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
