@@ -19,7 +19,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
@@ -584,13 +584,19 @@ export function FocusWorkspace({
     session,
   ]);
 
-  useEffect(() => {
+  // Invalidate the previous preview at commit, before a due timer can inspect an
+  // obsolete draft/provider and supersede the newly persisted draft's read.
+  useLayoutEffect(() => {
     if (!detail || !selectedProfile) {
       setPreview(null);
       return;
     }
     let active = true;
+    // Capture ownership before the debounce: a mutation may invalidate this
+    // render before React commits the next cursor or draft.
+    const canStartPreview = session.read(detail.workspace.id, "preview");
     const timer = window.setTimeout(() => {
+      if (!active || !canStartPreview()) return;
       inspect(draft)
         .then((result) => {
           if (!active || !ownsWorkspace() || !result) return;
@@ -624,7 +630,7 @@ export function FocusWorkspace({
         });
     }, 120);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [clearError, detail, draft, inspect, ownsWorkspace, parentRunId, reportError, selectedProfile]);
+  }, [clearError, detail, draft, inspect, ownsWorkspace, parentRunId, reportError, selectedProfile, session]);
 
   const refreshContextTree = useCallback(async () => {
     if (!detail) return null;

@@ -622,9 +622,17 @@ describe("FocusWorkspace", () => {
     await screen.findByRole("heading", { name: workspace.name });
     fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "慢速校验仍需发送" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalledTimes(1));
+    // Schedule a current preview after send invalidates the earlier debounce.
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "下一条草稿" } });
     await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalledTimes(2));
     await act(async () => { checked.resolve(preview); await checked.promise; });
     await waitFor(() => expect(bridge.createTurnAndStartRun).toHaveBeenCalledTimes(1));
+    expect(bridge.createTurnAndStartRun).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "慢速校验仍需发送" }),
+      expect.any(Function),
+    );
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("下一条草稿");
     expect(screen.queryByText("无法生成发送前凭证。")).not.toBeInTheDocument();
   });
 
@@ -1413,9 +1421,10 @@ describe("FocusWorkspace", () => {
     expect(screen.getByRole("button", { name: "排除 回答 A" })).toBeDisabled();
   });
 
-  it("atomically rebases a persisted draft when moving to root and sends with the authoritative version", async () => {
+  it.each(["scheduled", "in-flight"] as const)("atomically rebases a persisted draft while an earlier preview is %s and sends from root with the authoritative version", async (oldPreviewState) => {
     const bridge = bridgeFixture();
     const persistedDraftPreview = deferred<ContextPreview>();
+    const outdatedDraftPreview = deferred<ContextPreview>();
     const rebasedTree: ContextTreeProjection = {
       ...contextTree,
       draftVersion: 2,
@@ -1453,11 +1462,15 @@ describe("FocusWorkspace", () => {
     vi.mocked(bridge.inspectContext)
       .mockResolvedValueOnce(preview)
       .mockResolvedValue({ ...preview, draftVersion: 2 });
-    vi.mocked(bridge.previewContextTransition).mockImplementation(async (input) => (
-      input.parentRunId === "run-a" && input.draftVersion === 1
-        ? persistedDraftPreview.promise
-        : { ...preview, draftVersion: input.draftVersion }
-    ));
+    vi.mocked(bridge.previewContextTransition).mockImplementation(async (input) => {
+      if (input.parentRunId === "run-a") {
+        if (input.draftVersion === 0 && oldPreviewState === "in-flight") {
+          return outdatedDraftPreview.promise;
+        }
+        if (input.draftVersion === 1) return persistedDraftPreview.promise;
+      }
+      return { ...preview, draftVersion: input.draftVersion };
+    });
     vi.mocked(bridge.createTurnAndStartRun).mockResolvedValue({
       ...runHandle("run-from-root", "turn-from-root"),
       draftVersion: 3,
@@ -1467,7 +1480,13 @@ describe("FocusWorkspace", () => {
 
     await screen.findByRole("heading", { name: workspace.name });
     fireEvent.click(screen.getByRole("button", { name: "打开上下文检查器" }));
-    fireEvent.click(await screen.findByRole("button", { name: "排除 回答 A" }));
+    const exclude = await screen.findByRole("button", { name: "排除 回答 A" });
+    if (oldPreviewState === "in-flight") {
+      await waitFor(() => expect(bridge.previewContextTransition).toHaveBeenCalledWith(
+        expect.objectContaining({ parentRunId: "run-a", draftVersion: 0 }),
+      ));
+    }
+    fireEvent.click(exclude);
     await waitFor(() =>
       expect(bridge.previewContextTransition).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1492,6 +1511,10 @@ describe("FocusWorkspace", () => {
       });
     });
     expect(await screen.findByRole("button", { name: "重新纳入 回答 A" })).toBeEnabled();
+    if (oldPreviewState === "in-flight") {
+      await act(async () => { outdatedDraftPreview.resolve(preview); });
+      expect(screen.getByRole("button", { name: "重新纳入 回答 A" })).toBeEnabled();
+    }
 
     fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
     fireEvent.click(screen.getByRole("treeitem", { name: /工作区起点/ }));
