@@ -24,8 +24,6 @@ import {
 
 describe("ThoughsFlow real process restart journey — session 2", () => {
   it("recovers interrupted output, rejects unsafe maintenance, then crashes after commit", async () => {
-    expect(String(browser.capabilities.browserName).toLowerCase()).toBe("webkit");
-    expect(String(browser.capabilities.platformName).toLowerCase()).toContain("mac");
 
     const journeyId = requiredEnvironment("TF_WEBVIEW_JOURNEY_ID");
     const fixtureRoot = requiredEnvironment("TF_WEBVIEW_FIXTURE_BASE_URL");

@@ -5,9 +5,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ProviderFixture } from "../fixtures/provider-server.ts";
+import { planDesktopCommand } from "../../scripts/desktop-toolchain.ts";
 
 const projectRoot = resolve(import.meta.dirname, "../..");
-const wdioBinary = resolve(projectRoot, "node_modules/.bin/wdio");
 const configPath = resolve(projectRoot, "wdio.webview.conf.ts");
 const journeyId = `${Date.now()}-${process.pid}`;
 const fixture = new ProviderFixture();
@@ -41,24 +41,21 @@ async function runSession(
   expectedAppAbort = false,
 ) {
   await new Promise<void>((resolveRun, rejectRun) => {
-    const child = spawn(
-      wdioBinary,
-      ["run", configPath, "--spec", resolve(projectRoot, spec)],
-      {
-        cwd: projectRoot,
-        env: {
-          ...process.env,
-          TF_WEBVIEW_FIXTURE_BASE_URL: fixture.baseUrl,
-          TF_WEBVIEW_JOURNEY_ID: journeyId,
-          TF_WEBVIEW_CRASH_OPERATION_ID: crashOperationId,
-          TF_WEBVIEW_CRASH_CAPTURE_PATH: crashCapturePath,
-          TF_WEBVIEW_CRASH_BASELINE_PATH: crashBaselinePath,
-          THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR: appDataDir,
-          ...extraEnvironment,
-        },
-        stdio: "inherit",
+    const plan = planDesktopCommand("wdio", {
+      root: projectRoot,
+      args: ["run", configPath, "--spec", resolve(projectRoot, spec)],
+      env: {
+        ...process.env,
+        TF_WEBVIEW_FIXTURE_BASE_URL: fixture.baseUrl,
+        TF_WEBVIEW_JOURNEY_ID: journeyId,
+        TF_WEBVIEW_CRASH_OPERATION_ID: crashOperationId,
+        TF_WEBVIEW_CRASH_CAPTURE_PATH: crashCapturePath,
+        TF_WEBVIEW_CRASH_BASELINE_PATH: crashBaselinePath,
+        THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR: appDataDir,
+        ...extraEnvironment,
       },
-    );
+    });
+    const child = spawn(plan.command, plan.args, plan.options);
     if (child.pid) launcherPids.push(child.pid);
     child.once("error", rejectRun);
     child.once("exit", (code, signal) => {
@@ -209,7 +206,7 @@ try {
         launcherPids,
         sessionExitCodes,
         providerRequests: requests.length,
-        result: "three-process WKWebView crash-window journey passed",
+        result: "three-process desktop WebView crash-window journey passed",
       },
       null,
       2,

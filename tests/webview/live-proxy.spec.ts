@@ -23,8 +23,6 @@ describe("ThoughsFlow opt-in live OpenAI-compatible proxy probe", () => {
         "Live proxy probe is opt-in; run npm run test:webview:live-proxy",
       );
     }
-    expect(String(browser.capabilities.browserName).toLowerCase()).toBe("webkit");
-    expect(String(browser.capabilities.platformName).toLowerCase()).toContain("mac");
 
     const suffix = `${Date.now()}-${process.pid}`;
     const providerName = `Live Local Proxy ${suffix}`;

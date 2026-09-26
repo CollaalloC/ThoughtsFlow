@@ -1,0 +1,50 @@
+name: Desktop WebView fixtures (manual)
+
+# Opt-in GUI coverage is separate from normal compilation/unit checks.
+# These journeys use local HTTP/Orca fixtures and do not call paid models.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-webview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixtures:
+    name: Embedded WebView (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+      - name: Install Linux desktop and virtual display dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth dbus-x11
+      - run: npm ci
+      - run: npm run test:webview:typecheck
+      - run: npm run test:webview:build
+      - name: Exercise local fixtures on Linux virtual display
+        if: runner.os == 'Linux'
+        env:
+          GDK_BACKEND: x11
+        run: dbus-run-session -- xvfb-run -a npm run test:webview:fixtures:run
+      - name: Exercise local fixtures on native desktop
+        if: runner.os != 'Linux'
+        run: npm run test:webview:fixtures:run

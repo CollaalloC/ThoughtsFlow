@@ -34,8 +34,6 @@ type ReplayResult = {
 
 describe("ThoughsFlow real process restart journey — session 3", () => {
   it("replays the exact committed operation without a second Provider call", async () => {
-    expect(String(browser.capabilities.browserName).toLowerCase()).toBe("webkit");
-    expect(String(browser.capabilities.platformName).toLowerCase()).toContain("mac");
 
     const journeyId = requiredEnvironment("TF_WEBVIEW_JOURNEY_ID");
     const fixtureRoot = requiredEnvironment("TF_WEBVIEW_FIXTURE_BASE_URL");

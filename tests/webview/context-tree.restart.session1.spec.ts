@@ -17,8 +17,6 @@ import {
 
 describe("ThoughsFlow real process restart journey — session 1", () => {
   it("persists a partial streaming Run before the native app process exits", async () => {
-    expect(String(browser.capabilities.browserName).toLowerCase()).toBe("webkit");
-    expect(String(browser.capabilities.platformName).toLowerCase()).toContain("mac");
 
     const journeyId = requiredEnvironment("TF_WEBVIEW_JOURNEY_ID");
     const fixtureRoot = requiredEnvironment("TF_WEBVIEW_FIXTURE_BASE_URL");

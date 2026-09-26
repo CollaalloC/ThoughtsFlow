@@ -1,6 +1,7 @@
 import { $, $$, browser, expect } from "@wdio/globals";
 import type { ChainablePromiseElement } from "webdriverio";
 import { ProviderFixture } from "../fixtures/provider-server";
+import { assertNativePlatform } from "./support";
 
 function xpathLiteral(value: string) {
   if (!value.includes('"')) return `"${value}"`;
@@ -104,7 +105,7 @@ async function selectOptionByText(
   );
 }
 
-describe("ThoughsFlow real macOS WebView", () => {
+describe("ThoughsFlow native desktop WebView", () => {
   const provider = new ProviderFixture();
 
   before(async () => {
@@ -116,8 +117,7 @@ describe("ThoughsFlow real macOS WebView", () => {
   });
 
   it("selects an exact Model Run and keeps the cursor through a WKWebView reload", async () => {
-    expect(String(browser.capabilities.browserName).toLowerCase()).toBe("webkit");
-    expect(String(browser.capabilities.platformName).toLowerCase()).toContain("mac");
+    assertNativePlatform();
     // Pin the single embedded window so the service does not probe the optional
     // advanced WDIO plugin before every ordinary WebDriver command.
     await browser.tauri.switchWindow("main");

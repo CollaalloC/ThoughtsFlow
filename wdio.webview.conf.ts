@@ -1,12 +1,11 @@
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { desktopBinaryPath } from "./scripts/desktop-toolchain.ts";
 import "@wdio/native-types";
 import type { TauriCapabilities } from "@wdio/tauri-service";
 
-const appBinaryPath = resolve(
-  "src-tauri/target/webview-e2e/debug/thoughsflow",
-);
+const appBinaryPath = desktopBinaryPath();
 const suppliedDataDir =
   process.env.THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR?.trim();
 const appDataDir =
@@ -37,6 +36,7 @@ export const config: WebdriverIO.Config = {
         embeddedPort: 4_445,
         env: {
           THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR: appDataDir,
+          THOUGHSFLOW_NODE_BIN: process.execPath,
           ...Object.fromEntries(
             ["THOUGHSFLOW_ORCA_BIN", "THOUGHSFLOW_OMP_BIN", "TF_AGENT_FIXTURE_STATE"]
               .flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []),

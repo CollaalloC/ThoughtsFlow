@@ -1,4 +1,4 @@
-import { $, $$, browser } from "@wdio/globals";
+import { $, $$, browser, expect } from "@wdio/globals";
 import "@wdio/native-types";
 import type { ChainablePromiseElement } from "webdriverio";
 
@@ -20,8 +20,22 @@ export function xpathLiteral(value: string) {
 }
 
 export async function pinMainWindow() {
+  assertNativePlatform();
   await browser.tauri.switchWindow("main");
   await (await $('[aria-label="工作面"]')).waitForDisplayed();
+}
+
+/** Match the embedded driver's real WebView engine and Rust host OS, not a generic browser. */
+export function assertNativePlatform() {
+  const platforms: Record<string, { browser: string; os: string }> = {
+    darwin: { browser: "webkit", os: "macos" },
+    win32: { browser: "msedge", os: "windows" },
+    linux: { browser: "webkitgtk", os: "linux" },
+  };
+  const expected = platforms[process.platform];
+  if (!expected) throw new Error(`Unsupported native test host: ${process.platform}`);
+  expect(String(browser.capabilities.browserName).toLowerCase()).toBe(expected.browser);
+  expect(String(browser.capabilities.platformName).toLowerCase()).toBe(expected.os);
 }
 
 export async function button(name: string) {
