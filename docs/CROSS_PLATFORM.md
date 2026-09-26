@@ -48,6 +48,8 @@ npm run tauri:dev
 
 `.github/workflows/desktop-webview.yml` 仅手动触发，同样使用三平台矩阵。它构建带 `webview-e2e` 功能的独立测试应用，运行本地 Provider smoke、模拟 Orca 双 Agent 旅程和三进程崩溃恢复旅程。Linux 使用 D-Bus session 和 Xvfb；Windows/macOS 使用 runner 的原生桌面环境。测试驱动采用现有 embedded provider，上游说明支持三平台，但本项目的各平台旅程仍需实际跑通。[WDIO 平台说明](https://github.com/webdriverio/desktop-mobile/blob/main/packages/tauri-service/docs/platform-support.md)
 
+原生旅程保留严格的平台真实性检查：macOS 为 `webkit / macos`，Linux 为 `WebKitGTK / linux`，Windows 为 `msedge / windows`。映射依据所安装测试插件的会话响应实现；没有用“任意浏览器均可”替换断言。
+
 两套 workflow 均不调用真实模型、不注入模型凭据。真实 Agent 测试仍要求同时设置 `TF_AGENT_LIVE=1` 与非空 `TF_AGENT_LIVE_REPO_ID`，保留数据库和回执以检查不确定执行结果。真实代理测试也只由显式的 `test:webview:live-proxy` 命令启动，不进入常规或手动 fixture CI。
 
 Actions 使用 2026-09-26 通过官方 API 核验的提交 SHA，而非浮动主版本：

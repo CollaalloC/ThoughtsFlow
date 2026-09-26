@@ -9,7 +9,7 @@ ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。�
 - 创建、打开、重命名和归档本地工作区；
 - 工作区目标与模型 `system prompt` 分开保存；未设置目标时的界面提示不会进入模型 Context；
 - Generic OpenAI-compatible Chat Completions（SSE）、Ollama `/api/chat`（NDJSON）、Anthropic Messages（SSE）与 Google Gemini `streamGenerateContent`（SSE）真实流式请求；
-- Provider 模型发现：OpenAI-compatible、OpenRouter 与 OpenAI 使用模型列表 API，Ollama 使用 `/api/tags`，Google 使用 `/v1beta/models`，Anthropic 使用 Rust 内置的审核列表；
+- Provider 模型发现：OpenAI-compatible 与支持目录的厂商使用模型列表 API，Ollama 使用 `/api/tags`，Google 使用 `/v1beta/models`，Anthropic 使用有界分页 `/v1/models`；不支持目录的模板明确手填模型 ID；
 - 每个已保存 Provider Profile 可在本次应用会话中维护多个命名 API Key，并显式选择当前首选凭据；
 - 对结构化且可重试的配额/限流失败提供显式凭据切换与重试入口，失败或部分输出的旧 Run 保持不变；
 - 同一 Turn 多个不可覆盖的 Run、精确回答分支与兄弟分支 Context 隔离；
@@ -24,7 +24,7 @@ ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。�
 
 ## 开发运行
 
-需要 Node.js 20.19+、Rust stable，以及当前平台的 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)。
+需要 Node.js 24、Rust stable，以及当前平台的 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)。Node 版本由 `.node-version` 和 package engines 对齐；桌面构建与测试通过无 shell 的 Node 启动器执行。
 
 ```bash
 npm install
@@ -47,9 +47,11 @@ npm run tauri -- build
 - `Google Gemini`：使用 `/v1beta/models/{model}:streamGenerateContent?alt=sse` 与 `x-goog-api-key`，模型 ID 可来自发现结果或手动输入；
 - `Azure OpenAI`：模板仍只展示目标协议与认证要求，当前没有可运行的部署/版本化端点适配器。
 
-Rust Core 内置并唯一维护 7 个权威模板：OpenAI、Generic OpenAI-compatible、Ollama、Anthropic、Google、Azure OpenAI 和 OpenRouter；前端不能改写其协议或认证位置。选择模板会填入默认 Base URL，用户仍可覆盖为代理或自托管端点。新的 Context Receipt 会锁定模板 ID/revision、实际协议、非敏感认证位置、静态头与最终生效参数；API Key 不进入 Receipt。迁移前生成的历史 Receipt 保留其原有参数，新增模板元数据明确显示为 `legacy/unknown`，不会用当前模板反向推断或伪造历史事实。
+Rust Core 内置并唯一维护 18 个权威模板。除 OpenAI、Generic OpenAI-compatible、Ollama、Anthropic、Google、Azure OpenAI 和 OpenRouter 外，新增 OMP Gateway、DeepSeek、xAI、Mistral、Groq、Together、Moonshot、Qwen 北京/新加坡、Z.AI 和 SiliconFlow。前端不能改写其协议或认证位置；Azure 仍未开放运行。选择模板会填入默认 Base URL，用户仍可覆盖为代理或自托管端点。新的 Context Receipt 会锁定模板 ID/revision、实际协议、非敏感认证位置、静态头与最终生效参数；API Key 不进入 Receipt。历史 Receipt 不会用当前模板反向重算。连接条件与逐厂商依据见 [MODEL_CONNECTIONS.md](docs/MODEL_CONNECTIONS.md)。
 
-“发现模型”既可使用已保存 Profile，也可在保存前检查当前 draft。前者由 Rust 从 SQLite 与会话凭据存储解析权威目标；后者只把模板 ID、Base URL 和可选的本次会话凭据交给 Rust，由内置模板决定认证头、路径和响应格式。远程目录只向界面显示的 Host 发送模型元数据 GET，Anthropic 的内置审核列表不会联网；两者都不携带工作区 Context。原始目录响应和发现结果不写入 SQLite；只有用户选中模型并显式保存 Profile 后，模型 ID 才会持久化。Azure OpenAI 没有可移植的模型目录，当前会明确提示不支持发现。
+“发现模型”既可使用已保存 Profile，也可在保存前检查当前 draft。前者由 Rust 从 SQLite 与会话凭据存储解析权威目标；后者只把模板 ID、Base URL 和可选的本次会话凭据交给 Rust，由内置模板决定认证头、路径和响应格式。目录只向界面显示的 Host 发送模型元数据 GET，不携带工作区 Context。Anthropic 使用有总量、分页和超时限制的实时 `/v1/models` 查询。原始目录响应和发现结果不写入 SQLite；只有显式保存后模型 ID 才持久化。Qwen、Z.AI 当前手填模型 ID，目录发现及目录式连接测试保持关闭。大目录在前端最多渲染 100 个匹配项，可输入模型 ID 或名称查找其余候选。
+
+OMP Gateway 是独立模型连接方式，需要已有的 OMP Auth Broker 和网关 token，不会自动继承本机 OMP 登录或 `models.yml`。模型 ID 保留 `provider/model-id`；Receipt 只证明 ThoughsFlow 发给网关的内容，不冒充网关转换后的最终厂商 payload。Agent 任务仍由 Orca 管理，当前不提供上游尚未支持的 OMP worker 模型覆盖参数。
 
 已保存的 Provider Profile 可以维护多个带标签的会话 API Key。API Key 在提交前会短暂停留于 WebView 密码输入状态；交接后，Secret 只存在于当前 Rust 进程内存，WebView 只能读取凭据的标签、顺序和当前首选状态。退出应用会清除全部会话凭据；Secret 不写入 SQLite、前端持久状态、日志、Receipt 或导出文件。凭据顺序用于人工管理，不触发静默自动轮换：切换当前首选凭据和再次运行都必须由用户明确操作；存在备用项时也不能直接删除当前首选，必须先显式激活替代项。
 
@@ -96,7 +98,9 @@ Agent 使用本机 OMP 设置，不复用 ThoughsFlow 的 Provider 会话凭据�
 
 关联和每次操作的回执保存在现有 SQLite。任务状态与执行器存活分别显示；命令接受不代表任务完成。连接中断或操作结果未知时，不会自动重发或启动替代执行器。重新连接只恢复原协作身份；未知派发仍需根据回执和 Orca 实际状态核查。当前版本提供人工任务拆分、并行执行和人工审查，自动依赖调度与结果采纳到 Decision Packet 属于后续阶段。
 
-CLI 不在默认路径时，可在启动应用的进程环境中设置绝对路径 `THOUGHSFLOW_ORCA_BIN`、`THOUGHSFLOW_OMP_BIN`。WebView 不提供任意命令执行入口。Agent 功能仅连接本机 Orca；缺少运行环境不会影响普通对话功能。
+CLI 不在默认路径时，可在启动应用的进程环境中设置绝对路径 `THOUGHSFLOW_ORCA_BIN`、`THOUGHSFLOW_OMP_BIN`。发现顺序为显式配置、PATH、平台候选目录；Windows 使用安装目录内 `resources/bin/orca.exe`，Linux 使用 `orca-ide`。不执行 `.cmd/.bat`；显式配置的 `.js/.mjs` 通过固定 Node 启动，可另设 `THOUGHSFLOW_NODE_BIN`。WebView 不提供任意命令执行入口。Agent 功能仅连接本机 Orca；缺少运行环境不会影响普通对话功能。
+
+三平台构建与 GUI fixture CI 已配置，当前 Windows/Linux 尚无实际 runner 通过记录。架构、验证分层及系统依赖见 [CROSS_PLATFORM.md](docs/CROSS_PLATFORM.md)；上游版本与能力跟踪见 [docs/upstream](docs/upstream/README.md)，性能证据见 [PERFORMANCE_20260926.md](docs/PERFORMANCE_20260926.md)。
 
 ## 验证
 
