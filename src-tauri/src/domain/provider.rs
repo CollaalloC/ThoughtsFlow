@@ -31,18 +31,10 @@ pub struct ProtocolProfile {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StaticProviderModel {
-    pub id: &'static str,
-    pub display_name: &'static str,
-    pub context_window: Option<u64>,
-    pub supports_tools: Option<bool>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderModelCatalogStrategy {
     RemoteOpenAi,
     RemoteOllama,
-    Static(&'static [StaticProviderModel]),
+    RemoteAnthropic,
     RemoteGoogle,
     Unsupported,
 }
@@ -63,67 +55,50 @@ const ANTHROPIC_HEADERS: &[StaticHeader] = &[StaticHeader {
     name: "anthropic-version",
     value: "2023-06-01",
 }];
-// Source: Anthropic Models overview; reviewed 2026-07-23.
-const ANTHROPIC_MODELS: &[StaticProviderModel] = &[
-    StaticProviderModel {
-        id: "claude-fable-5",
-        display_name: "Claude Fable 5",
-        context_window: Some(1_000_000),
-        supports_tools: Some(true),
-    },
-    StaticProviderModel {
-        id: "claude-opus-4-8",
-        display_name: "Claude Opus 4.8",
-        context_window: Some(1_000_000),
-        supports_tools: Some(true),
-    },
-    StaticProviderModel {
-        id: "claude-sonnet-5",
-        display_name: "Claude Sonnet 5",
-        context_window: Some(1_000_000),
-        supports_tools: Some(true),
-    },
-    StaticProviderModel {
-        id: "claude-haiku-4-5-20251001",
-        display_name: "Claude Haiku 4.5",
-        context_window: Some(200_000),
-        supports_tools: Some(true),
-    },
-];
+// Endpoint/protocol sources and account prerequisites: docs/MODEL_CONNECTIONS.md.
+const fn openai_template(
+    provider_id: &'static str,
+    display_name: &'static str,
+    default_base_url: &'static str,
+) -> ProviderTemplate {
+    ProviderTemplate {
+        provider_id,
+        revision: 1,
+        display_name,
+        default_base_url,
+        protocol: ProtocolProfile {
+            stream_protocol: StreamProtocol::OpenAiSse,
+            auth_placement: AuthPlacement::BearerHeader,
+            auth_header_name: Some("Authorization"),
+            models_endpoint: Some("/models"),
+            requires_additional_headers: false,
+            additional_headers: NO_ADDITIONAL_HEADERS,
+        },
+        model_catalog: ProviderModelCatalogStrategy::RemoteOpenAi,
+        runtime_available: true,
+    }
+}
 
-const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
-    ProviderTemplate {
-        provider_id: "openai",
-        revision: 1,
-        display_name: "OpenAI",
-        default_base_url: "https://api.openai.com/v1",
-        protocol: ProtocolProfile {
-            stream_protocol: StreamProtocol::OpenAiSse,
-            auth_placement: AuthPlacement::BearerHeader,
-            auth_header_name: Some("Authorization"),
-            models_endpoint: Some("/models"),
-            requires_additional_headers: false,
-            additional_headers: NO_ADDITIONAL_HEADERS,
-        },
-        model_catalog: ProviderModelCatalogStrategy::RemoteOpenAi,
-        runtime_available: true,
-    },
-    ProviderTemplate {
-        provider_id: "openai-compatible",
-        revision: 1,
-        display_name: "Generic OpenAI-compatible",
-        default_base_url: "http://127.0.0.1:8000/v1",
-        protocol: ProtocolProfile {
-            stream_protocol: StreamProtocol::OpenAiSse,
-            auth_placement: AuthPlacement::BearerHeader,
-            auth_header_name: Some("Authorization"),
-            models_endpoint: Some("/models"),
-            requires_additional_headers: false,
-            additional_headers: NO_ADDITIONAL_HEADERS,
-        },
-        model_catalog: ProviderModelCatalogStrategy::RemoteOpenAi,
-        runtime_available: true,
-    },
+// Some compatible chat APIs use a separate, vendor-specific catalog. Keep
+// manual model selection available without guessing a /models endpoint.
+const fn manual_openai_template(
+    provider_id: &'static str,
+    display_name: &'static str,
+    default_base_url: &'static str,
+) -> ProviderTemplate {
+    let mut template = openai_template(provider_id, display_name, default_base_url);
+    template.protocol.models_endpoint = None;
+    template.model_catalog = ProviderModelCatalogStrategy::Unsupported;
+    template
+}
+
+const PROVIDER_TEMPLATES: &[ProviderTemplate] = &[
+    openai_template("openai", "OpenAI", "https://api.openai.com/v1"),
+    openai_template(
+        "openai-compatible",
+        "Generic OpenAI-compatible",
+        "http://127.0.0.1:8000/v1",
+    ),
     ProviderTemplate {
         provider_id: "ollama",
         revision: 2,
@@ -147,7 +122,7 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
     },
     ProviderTemplate {
         provider_id: "anthropic",
-        revision: 2,
+        revision: 3,
         display_name: "Anthropic",
         default_base_url: "https://api.anthropic.com",
         protocol: ProtocolProfile {
@@ -158,7 +133,7 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
             requires_additional_headers: true,
             additional_headers: ANTHROPIC_HEADERS,
         },
-        model_catalog: ProviderModelCatalogStrategy::Static(ANTHROPIC_MODELS),
+        model_catalog: ProviderModelCatalogStrategy::RemoteAnthropic,
         runtime_available: true,
     },
     ProviderTemplate {
@@ -193,26 +168,42 @@ const PROVIDER_TEMPLATES: [ProviderTemplate; 7] = [
         model_catalog: ProviderModelCatalogStrategy::Unsupported,
         runtime_available: false,
     },
-    ProviderTemplate {
-        provider_id: "openrouter",
-        revision: 1,
-        display_name: "OpenRouter",
-        default_base_url: "https://openrouter.ai/api/v1",
-        protocol: ProtocolProfile {
-            stream_protocol: StreamProtocol::OpenAiSse,
-            auth_placement: AuthPlacement::BearerHeader,
-            auth_header_name: Some("Authorization"),
-            models_endpoint: Some("/models"),
-            requires_additional_headers: false,
-            additional_headers: NO_ADDITIONAL_HEADERS,
-        },
-        model_catalog: ProviderModelCatalogStrategy::RemoteOpenAi,
-        runtime_available: true,
-    },
+    openai_template("openrouter", "OpenRouter", "https://openrouter.ai/api/v1"),
+    openai_template(
+        "omp-gateway",
+        "OMP Gateway (Auth Broker)",
+        "http://127.0.0.1:4000/v1",
+    ),
+    openai_template("deepseek", "DeepSeek", "https://api.deepseek.com/v1"),
+    openai_template("xai", "xAI", "https://api.x.ai/v1"),
+    openai_template("mistral", "Mistral", "https://api.mistral.ai/v1"),
+    openai_template("groq", "Groq", "https://api.groq.com/openai/v1"),
+    openai_template("together", "Together AI", "https://api.together.ai/v1"),
+    openai_template(
+        "moonshot",
+        "Moonshot / Kimi (China)",
+        "https://api.moonshot.cn/v1",
+    ),
+    manual_openai_template(
+        "qwen-beijing",
+        "Qwen / DashScope (Beijing)",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    ),
+    manual_openai_template(
+        "qwen-singapore",
+        "Qwen / DashScope (Singapore)",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    ),
+    manual_openai_template("zai", "Z.AI (API)", "https://api.z.ai/api/paas/v4"),
+    openai_template(
+        "siliconflow",
+        "SiliconFlow (China)",
+        "https://api.siliconflow.cn/v1",
+    ),
 ];
 
 pub fn provider_templates() -> &'static [ProviderTemplate] {
-    &PROVIDER_TEMPLATES
+    PROVIDER_TEMPLATES
 }
 
 pub fn provider_template(provider_id: &str) -> Option<&'static ProviderTemplate> {
@@ -226,30 +217,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anthropic_catalog_is_static_and_contains_only_reviewed_model_metadata() {
-        let template = provider_template("anthropic").expect("Anthropic template");
-        let ProviderModelCatalogStrategy::Static(models) = template.model_catalog else {
-            panic!("Anthropic model discovery must remain a Rust-owned static catalog");
-        };
-
+    fn anthropic_catalog_uses_authenticated_discovery_instead_of_stale_model_ids() {
+        let template = provider_template("anthropic").unwrap();
         assert_eq!(
-            models.iter().map(|model| model.id).collect::<Vec<_>>(),
-            [
-                "claude-fable-5",
-                "claude-opus-4-8",
-                "claude-sonnet-5",
-                "claude-haiku-4-5-20251001",
-            ]
+            template.model_catalog,
+            ProviderModelCatalogStrategy::RemoteAnthropic
         );
-        assert!(
-            models
-                .iter()
-                .all(|model| model.supports_tools == Some(true))
-        );
-        assert_eq!(
-            models.last().and_then(|model| model.context_window),
-            Some(200_000)
-        );
+        assert_eq!(template.revision, 3);
+        assert_eq!(template.protocol.auth_header_name, Some("x-api-key"));
+        assert_eq!(template.protocol.models_endpoint, Some("/v1/models"));
     }
 
     #[test]

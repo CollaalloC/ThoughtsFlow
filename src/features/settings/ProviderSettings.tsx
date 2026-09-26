@@ -114,6 +114,7 @@ export function ProviderSettings({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [models, setModels] = useState<ProviderModelInfo[]>([]);
+  const [modelFilter, setModelFilter] = useState("");
   const [modelDiscoveryPhase, setModelDiscoveryPhase] =
     useState<ModelDiscoveryPhase>("idle");
   const [modelDiscoveryError, setModelDiscoveryError] = useState<{
@@ -126,6 +127,7 @@ export function ProviderSettings({
   const clearModelDiscovery = () => {
     modelDiscoveryRequest.current += 1;
     setModels([]);
+    setModelFilter("");
     setModelDiscoveryPhase("idle");
     setModelDiscoveryError(null);
   };
@@ -177,6 +179,14 @@ export function ProviderSettings({
     () => models.find((model) => model.id === draft.defaultModel),
     [draft.defaultModel, models],
   );
+  const catalogAvailable = Boolean(selectedTemplate?.protocol.modelsEndpoint);
+  const matchingModels = useMemo(() => {
+    const query = modelFilter.trim().toLowerCase();
+    return query ? models.filter((model) =>
+      `${model.id} ${model.displayName}`.toLowerCase().includes(query),
+    ) : models;
+  }, [modelFilter, models]);
+  const visibleModels = matchingModels.slice(0, 100);
 
   const connectionTestNeedsSave = useMemo(() => {
     if (!draft.id) return true;
@@ -299,6 +309,10 @@ export function ProviderSettings({
   const testConnection = async () => {
     setError(null);
     setStatus(null);
+    if (!catalogAvailable) {
+      setError("此模板没有可用于连接测试的模型目录；请手动填写模型 ID 后保存。");
+      return;
+    }
     const endpointError = validateEndpoint(draft.baseUrl);
     if (endpointError) {
       setError(endpointError);
@@ -517,6 +531,13 @@ export function ProviderSettings({
               </span>
             </div>
           )}
+          {selectedTemplate?.providerId === "omp-gateway" && (
+            <p className="provider-settings__field-note provider-settings__wide" role="note">
+              连接已配置 Auth Broker 的 OMP Gateway，凭据填写网关访问令牌。
+              网关不会自动继承本机 OMP 的登录或模型配置。Context Receipt 记录发送给网关的内容，
+              网关转换后的厂商请求由网关管理；Agent 任务继续使用 Orca 中的 OMP 配置。
+            </p>
+          )}
           <label className="provider-settings__wide">
             <span>Base URL</span>
             <input
@@ -539,14 +560,15 @@ export function ProviderSettings({
                 aria-label="模型"
                 aria-describedby="provider-model-discovery-boundary"
                 value={draft.defaultModel}
-                onChange={(event) =>
-                  setDraft({ ...draft, defaultModel: event.target.value })
-                }
+                onChange={(event) => {
+                  setModelFilter(event.target.value);
+                  setDraft({ ...draft, defaultModel: event.target.value });
+                }}
                 placeholder="发现后选择，或手动输入模型 ID"
                 autoComplete="off"
               />
               <datalist id="provider-model-options">
-                {models.map((model) => (
+                {visibleModels.map((model) => (
                   <option key={model.id} value={model.id}>
                     {modelOptionLabel(model)}
                   </option>
@@ -560,6 +582,7 @@ export function ProviderSettings({
                   || saving
                   || testing
                   || !selectedTemplate
+                  || !catalogAvailable
                   || !draft.baseUrl.trim()
                 }
                 onClick={discoverModels}
@@ -574,9 +597,17 @@ export function ProviderSettings({
               id="provider-model-discovery-boundary"
               className="provider-settings__field-note"
             >
-              “发现模型”只读取模型目录元数据，不发送工作区 Context。远程目录仅向 {parsedHost}
-              发起 GET；内置审核列表不会联网。
+              {catalogAvailable
+                ? `“发现模型”只读取模型目录元数据，不发送工作区 Context。目录请求仅向 ${parsedHost} 发起 GET。`
+                : selectedTemplate && !selectedTemplate.runtimeAvailable
+                  ? "此模板的请求协议尚未开放运行，请选择已支持的模板。"
+                  : "此模板使用手动模型 ID，暂不提供目录发现或目录式连接测试；保存配置后可在对话中调用模型。"}
             </small>
+            {matchingModels.length > visibleModels.length && (
+              <small className="provider-settings__field-note">
+                当前显示前 {visibleModels.length} 个匹配项；输入模型 ID 或名称可缩小范围。
+              </small>
+            )}
             {selectedDiscoveredModel && (
               <small className="provider-settings__model-metadata">
                 目录元数据：{selectedDiscoveredModel.displayName.trim() || selectedDiscoveredModel.id}
@@ -671,7 +702,7 @@ export function ProviderSettings({
               type="button"
               tone="quiet"
               icon={testing ? <LoaderCircle className="tf-spin" size={15} /> : <PlugZap size={15} />}
-              disabled={testing || saving || connectionTestNeedsSave}
+              disabled={testing || saving || connectionTestNeedsSave || !catalogAvailable}
               onClick={testConnection}
             >
               {testing ? "测试中" : !draft.id ? "请先保存 Provider" : connectionTestNeedsSave ? "请先保存更改" : "测试连接"}

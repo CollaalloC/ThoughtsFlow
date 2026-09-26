@@ -2954,12 +2954,6 @@ fn provider_target(snapshot: &domain::ProviderSnapshot) -> AppResult<ProviderTar
 }
 
 #[derive(Debug)]
-enum ProviderModelCatalogPlan {
-    Static(&'static [domain::StaticProviderModel]),
-    Remote(ProviderModelQuery),
-}
-
-#[derive(Debug)]
 enum ProviderModelSource {
     SavedProfile(String),
     Draft(ProviderModelDraftInput),
@@ -2993,10 +2987,7 @@ fn provider_model_source(input: ListProviderModelsInput) -> AppResult<ProviderMo
 /// Resolves model discovery exclusively from the Rust-owned Provider Template.
 /// This intentionally does not call `runnable_template`: Anthropic and Google
 /// can expose model metadata before their streaming dialect is enabled.
-fn provider_model_catalog_plan(
-    provider_id: &str,
-    base_url: &str,
-) -> AppResult<ProviderModelCatalogPlan> {
+fn provider_model_query(provider_id: &str, base_url: &str) -> AppResult<ProviderModelQuery> {
     let template = domain::provider_template(provider_id).ok_or_else(|| {
         AppError::validation(
             "unknown_provider_template",
@@ -3004,8 +2995,8 @@ fn provider_model_catalog_plan(
         )
     })?;
     let catalog = match template.model_catalog {
-        domain::ProviderModelCatalogStrategy::Static(models) => {
-            return Ok(ProviderModelCatalogPlan::Static(models));
+        domain::ProviderModelCatalogStrategy::RemoteAnthropic => {
+            ProviderModelCatalogKind::Anthropic
         }
         domain::ProviderModelCatalogStrategy::RemoteOpenAi => ProviderModelCatalogKind::OpenAi,
         domain::ProviderModelCatalogStrategy::RemoteOllama => ProviderModelCatalogKind::Ollama,
@@ -3014,7 +3005,7 @@ fn provider_model_catalog_plan(
             return Err(AppError::validation(
                 "provider_model_discovery_unsupported",
                 format!(
-                    "{} does not expose a portable model catalog",
+                    "{} automatic model discovery is not implemented; enter a model ID manually",
                     template.display_name
                 ),
             ));
@@ -3045,7 +3036,7 @@ fn provider_model_catalog_plan(
         ProviderModelCatalogKind::Anthropic => ProviderDialect::AnthropicMessages,
         ProviderModelCatalogKind::Google => ProviderDialect::GoogleGenerativeAi,
     };
-    Ok(ProviderModelCatalogPlan::Remote(ProviderModelQuery {
+    Ok(ProviderModelQuery {
         target: ProviderTarget {
             dialect,
             base_url: base_url.into(),
@@ -3058,22 +3049,13 @@ fn provider_model_catalog_plan(
                 .collect(),
         },
         catalog,
-    }))
+    })
 }
 
 fn model_info_view(model: DiscoveredModel) -> ModelInfoView {
     ModelInfoView {
         id: model.id,
         display_name: model.display_name,
-        context_window: model.context_window,
-        supports_tools: model.supports_tools,
-    }
-}
-
-fn static_model_info_view(model: &domain::StaticProviderModel) -> ModelInfoView {
-    ModelInfoView {
-        id: model.id.into(),
-        display_name: model.display_name.into(),
         context_window: model.context_window,
         supports_tools: model.supports_tools,
     }
@@ -3732,17 +3714,12 @@ impl DefaultApplicationBackend {
             ProviderModelSource::Draft(draft) => (draft.provider_id, draft.base_url),
         };
 
-        match provider_model_catalog_plan(&provider_id, &base_url)? {
-            ProviderModelCatalogPlan::Static(models) => {
-                Ok(models.iter().map(static_model_info_view).collect())
-            }
-            ProviderModelCatalogPlan::Remote(query) => self
-                .model_catalog
-                .list_models(query, credential)
-                .await
-                .map_err(provider_port_error)
-                .map(|models| models.into_iter().map(model_info_view).collect()),
-        }
+        let query = provider_model_query(&provider_id, &base_url)?;
+        self.model_catalog
+            .list_models(query, credential)
+            .await
+            .map_err(provider_port_error)
+            .map(|models| models.into_iter().map(model_info_view).collect())
     }
 
     async fn open_workspace_impl(&self, workspace_id: &str) -> AppResult<WorkspaceDetail> {
@@ -4602,6 +4579,9 @@ impl DefaultApplicationBackend {
                     .map(|secret| SessionCredential::new(secret.to_owned()))
             })
             .transpose()?;
+        // Connection testing is a metadata-only catalog probe. A compatible
+        // chat protocol does not imply that the provider has a /models API.
+        provider_model_query(&profile.provider_id, &profile.base_url)?;
         let resolved_provider = domain_provider_snapshot(&profile)?;
         let target = provider_target(&resolved_provider)?;
         let response = self
@@ -6194,7 +6174,7 @@ mod tests {
             snapshot.stream_protocol,
             Some(domain::StreamProtocol::AnthropicSse)
         );
-        assert_eq!(snapshot.template_revision, Some(2));
+        assert_eq!(snapshot.template_revision, Some(3));
     }
 
     #[test]
@@ -6231,25 +6211,29 @@ mod tests {
 
     #[test]
     fn model_catalog_resolution_keeps_discovery_and_runtime_protocols_typed() {
-        let ProviderModelCatalogPlan::Static(anthropic) =
-            provider_model_catalog_plan("anthropic", "https://api.anthropic.com")
-                .expect("Anthropic has a reviewed static model catalog")
-        else {
-            panic!("Anthropic discovery must not make an outbound request");
-        };
-        assert_eq!(anthropic[0].id, "claude-fable-5");
+        let anthropic = provider_model_query("anthropic", "https://api.anthropic.com")
+            .expect("Anthropic models are discovered from the authenticated API");
+        assert_eq!(anthropic.catalog, ProviderModelCatalogKind::Anthropic);
+        assert_eq!(
+            anthropic.target.credential_placement,
+            CredentialPlacement::Header("x-api-key".into())
+        );
+        assert_eq!(
+            anthropic
+                .target
+                .additional_headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some("2023-06-01")
+        );
         assert_eq!(
             runnable_template("anthropic").unwrap().1,
             domain::ProviderDialect::Anthropic
         );
 
-        let ProviderModelCatalogPlan::Remote(google) = provider_model_catalog_plan(
-            "google",
-            "https://generativelanguage.googleapis.com/v1beta",
-        )
-        .expect("Google model metadata is remotely discoverable") else {
-            panic!("Google must use its typed remote catalog");
-        };
+        let google =
+            provider_model_query("google", "https://generativelanguage.googleapis.com/v1beta")
+                .expect("Google model metadata is remotely discoverable");
         assert_eq!(google.catalog, ProviderModelCatalogKind::Google);
         assert_eq!(
             google.target.credential_placement,
@@ -6265,19 +6249,40 @@ mod tests {
     #[test]
     fn model_catalog_resolution_rejects_unknown_and_azure_templates_explicitly() {
         assert_eq!(
-            provider_model_catalog_plan("missing", "https://models.example.com")
+            provider_model_query("missing", "https://models.example.com")
                 .expect_err("unknown templates have no authoritative catalog")
                 .code,
             "unknown_provider_template"
         );
         assert_eq!(
-            provider_model_catalog_plan(
+            provider_model_query(
                 "azure-openai",
                 "https://resource.openai.azure.com/openai/v1",
             )
             .expect_err("Azure deployments do not expose a portable model catalog")
             .code,
             "provider_model_discovery_unsupported"
+        );
+    }
+
+    #[test]
+    fn manual_catalog_templates_allow_chat_but_reject_metadata_probes() {
+        for provider_id in ["qwen-beijing", "qwen-singapore", "zai"] {
+            let (template, dialect) = runnable_template(provider_id).unwrap();
+            assert_eq!(dialect, domain::ProviderDialect::OpenAiCompatible);
+            assert_eq!(template.protocol.models_endpoint, None);
+            assert_eq!(
+                provider_model_query(provider_id, template.default_base_url)
+                    .unwrap_err()
+                    .code,
+                "provider_model_discovery_unsupported"
+            );
+        }
+        let gateway = provider_model_query("omp-gateway", "http://127.0.0.1:4000/v1").unwrap();
+        assert_eq!(gateway.catalog, ProviderModelCatalogKind::OpenAi);
+        assert_eq!(
+            gateway.target.credential_placement,
+            CredentialPlacement::BearerHeader
         );
     }
 

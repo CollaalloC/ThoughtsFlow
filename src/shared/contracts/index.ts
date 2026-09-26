@@ -194,7 +194,7 @@ export interface ProtocolProfile {
   streamProtocol: ProviderStreamProtocol;
   authPlacement: ProviderAuthPlacement;
   authHeaderName?: string;
-  modelsEndpoint?: string;
+  modelsEndpoint?: string | null;
   requiresAdditionalHeaders: boolean;
   additionalHeaders: Record<string, string>;
 }

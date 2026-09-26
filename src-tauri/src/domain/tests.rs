@@ -1635,6 +1635,17 @@ fn provider_template_catalog_exposes_protocol_and_auth_without_secrets() {
             "openai",
             "openai-compatible",
             "openrouter",
+            "omp-gateway",
+            "deepseek",
+            "xai",
+            "mistral",
+            "groq",
+            "together",
+            "moonshot",
+            "qwen-beijing",
+            "qwen-singapore",
+            "zai",
+            "siliconflow",
         ])
     );
     for template in templates {
@@ -1671,7 +1682,7 @@ fn provider_template_catalog_exposes_protocol_and_auth_without_secrets() {
             value: "2023-06-01",
         }]
     );
-    assert_eq!(anthropic.revision, 2);
+    assert_eq!(anthropic.revision, 3);
     assert!(anthropic.runtime_available);
 
     let google = provider_template("google").expect("Google template");

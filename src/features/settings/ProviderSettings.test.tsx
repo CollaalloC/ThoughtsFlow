@@ -72,6 +72,39 @@ function createProviderSettingsBridge(overrides: Partial<DesktopBridge> = {}): D
 }
 
 describe("ProviderSettings", () => {
+  it("explains gateway credentials and bounds a large discovered catalog while keeping every model searchable", async () => {
+    const gateway = { ...openAiTemplate, providerId: "omp-gateway", displayName: "OMP Gateway", defaultBaseUrl: "http://127.0.0.1:4000/v1" };
+    const models: ProviderModelInfo[] = Array.from({ length: 500 }, (_, index) => ({
+      id: `vendor/model-${index}`, displayName: `Model ${index}`, contextWindow: null, supportsTools: null,
+    }));
+    const bridge = createProviderSettingsBridge({
+      listProviderTemplates: vi.fn().mockResolvedValue([gateway]),
+      listProviderModels: vi.fn().mockResolvedValue(models),
+    });
+    const view = render(<ProviderSettings bridge={bridge} />);
+    await waitFor(() => expect(screen.getByLabelText("Provider 模板")).toHaveValue("omp-gateway"));
+    expect(screen.getByText(/不会自动继承本机 OMP/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
+    await screen.findByText(/已发现 500 个模型/);
+    expect(view.container.querySelectorAll("datalist option")).toHaveLength(100);
+    fireEvent.change(screen.getByLabelText("模型", { selector: "input" }), { target: { value: "vendor/model-499" } });
+    expect(view.container.querySelectorAll("datalist option")).toHaveLength(1);
+    expect(view.container.querySelector("datalist option")).toHaveAttribute("value", "vendor/model-499");
+    expect(bridge.listProviderModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers manual model IDs without probing a vendor that has no supported catalog endpoint", async () => {
+    const manual = { ...openAiTemplate, providerId: "qwen-beijing", displayName: "Qwen Beijing", protocol: { ...openAiTemplate.protocol, modelsEndpoint: undefined } };
+    const bridge = createProviderSettingsBridge({ listProviderTemplates: vi.fn().mockResolvedValue([manual]) });
+    render(<ProviderSettings bridge={bridge} />);
+    await waitFor(() => expect(screen.getByLabelText("Provider 模板")).toHaveValue("qwen-beijing"));
+    expect(screen.getByRole("button", { name: "发现模型" })).toBeDisabled();
+    expect(screen.getByText(/此模板使用手动模型 ID/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("模型", { selector: "input" }), { target: { value: "qwen-plus" } });
+    expect(screen.getByLabelText("模型", { selector: "input" })).toHaveValue("qwen-plus");
+    expect(bridge.listProviderModels).not.toHaveBeenCalled();
+  });
+
   it("selects a Rust-owned template, fills its protocol defaults, and keeps Base URL overridable", async () => {
     const bridge = createProviderSettingsBridge({
       listProviderTemplates: vi.fn().mockResolvedValue([
@@ -485,8 +518,7 @@ describe("ProviderSettings", () => {
     );
     expect(document.querySelector('img[src="x"]')).toBeNull();
     expect(screen.getByText(/只读取模型目录元数据，不发送工作区 Context/)).toBeVisible();
-    expect(screen.getByText(/远程目录仅向 llm\.example\.com.*发起 GET/)).toBeVisible();
-    expect(screen.getByText(/内置审核列表不会联网/)).toBeVisible();
+    expect(screen.getByText(/目录请求仅向 llm\.example\.com.*发起 GET/)).toBeVisible();
 
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "safe-model" } });
     expect(screen.getByLabelText("模型")).toHaveValue("safe-model");
@@ -497,10 +529,10 @@ describe("ProviderSettings", () => {
     expect(screen.queryByText("session-only-secret")).not.toBeInTheDocument();
   });
 
-  it("explains that an audited static model catalog does not issue a remote GET", async () => {
+  it("explains that Anthropic discovery requests only the configured host without workspace context", async () => {
     const anthropicTemplate: ProviderTemplate = {
       providerId: "anthropic",
-      revision: 2,
+      revision: 3,
       displayName: "Anthropic",
       defaultBaseUrl: "https://api.anthropic.com",
       protocol: {
@@ -517,8 +549,8 @@ describe("ProviderSettings", () => {
       listProviderTemplates: vi.fn().mockResolvedValue([anthropicTemplate]),
       listProviderModels: vi.fn().mockResolvedValue([
         {
-          id: "claude-static",
-          displayName: "Claude static catalog entry",
+          id: "claude-fixture",
+          displayName: "Claude catalog entry",
           contextWindow: null,
           supportsTools: true,
         },
@@ -531,8 +563,8 @@ describe("ProviderSettings", () => {
     });
 
     expect(screen.getByText(/只读取模型目录元数据，不发送工作区 Context/)).toBeVisible();
-    expect(screen.getByText(/远程目录仅向 api\.anthropic\.com.*发起 GET/)).toBeVisible();
-    expect(screen.getByText(/内置审核列表不会联网/)).toBeVisible();
+    expect(screen.getByText(/目录请求仅向 api\.anthropic\.com.*发起 GET/)).toBeVisible();
+    expect(screen.queryByText(/内置审核列表不会联网/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
     expect(await screen.findByText(/已发现 1 个模型/)).toBeVisible();
   });

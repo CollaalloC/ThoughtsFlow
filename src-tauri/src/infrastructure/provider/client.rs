@@ -27,6 +27,7 @@ const CONNECTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_MODEL_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DISCOVERED_MODELS: usize = 5_000;
+const MAX_MODEL_CATALOG_PAGES: usize = 10;
 const MAX_MODEL_ID_CHARS: usize = 512;
 const MAX_MODEL_DISPLAY_NAME_CHARS: usize = 1_024;
 const CREDENTIAL_REDACTION_MARKER: &str = "[REDACTED]";
@@ -460,56 +461,92 @@ impl ProviderModelCatalog for ReqwestProviderGateway {
         credential: Option<SessionCredential>,
     ) -> ProviderModelsFuture<'a> {
         Box::pin(async move {
-            let endpoint = provider_models_url(&query.target.base_url, query.catalog)
-                .map_err(|error| redact_provider_error(error, credential.as_ref()))?;
-            let mut request = self
-                .client
-                .get(endpoint)
-                .header(ACCEPT, "application/json")
-                .timeout(self.model_catalog_timeout);
-            request = apply_additional_headers(request, &query.target.additional_headers)?;
-            request = apply_credential(
-                request,
-                &query.target.credential_placement,
-                credential.as_ref(),
-            )?;
-
-            let response = request.send().await.map_err(|error| {
-                redact_provider_error(
-                    ProviderError::Transport(error.to_string()),
-                    credential.as_ref(),
-                )
-            })?;
-
-            if !response.status().is_success() {
-                let status = response.status().as_u16();
-                let content_type = response
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned);
-                let no_cancellation = CancellationToken::new();
-                let body = collect_error_body(response, &no_cancellation)
-                    .await
-                    .map_err(|error| redact_provider_error(error, credential.as_ref()))?
-                    .unwrap_or_default();
-                return Err(redact_provider_error(
-                    decode_redacted_http_error(
-                        query.target.dialect,
-                        status,
-                        content_type.as_deref(),
-                        &body,
+            // One deadline and body/entry budget cover the whole paginated
+            // operation. Never follow a provider-supplied URL with credentials.
+            tokio::time::timeout(self.model_catalog_timeout, async {
+                let endpoint = provider_models_url(&query.target.base_url, query.catalog)
+                    .map_err(|error| redact_provider_error(error, credential.as_ref()))?;
+                let mut cursor: Option<String> = None;
+                let mut cursors = BTreeSet::new();
+                let mut remaining_bytes = MAX_MODEL_CATALOG_BODY_BYTES;
+                let mut total_entries = 0;
+                let mut models = Vec::new();
+                for _ in 0..MAX_MODEL_CATALOG_PAGES {
+                    let mut request = self
+                        .client
+                        .get(endpoint.clone())
+                        .header(ACCEPT, "application/json");
+                    if query.catalog == ProviderModelCatalogKind::Anthropic {
+                        request = request.query(&[("limit", "1000")]);
+                        if let Some(cursor) = &cursor {
+                            request = request.query(&[("after_id", cursor)]);
+                        }
+                    }
+                    request = apply_additional_headers(request, &query.target.additional_headers)?;
+                    request = apply_credential(
+                        request,
+                        &query.target.credential_placement,
                         credential.as_ref(),
-                    ),
-                    credential.as_ref(),
-                ));
-            }
-
-            let body = collect_bounded_response_body(response, MAX_MODEL_CATALOG_BODY_BYTES)
-                .await
-                .map_err(|error| redact_provider_error(error, credential.as_ref()))?;
-            parse_model_catalog(query.catalog, &body, credential.as_ref())
-                .map_err(|error| redact_provider_error(error, credential.as_ref()))
+                    )?;
+                    let response = request
+                        .send()
+                        .await
+                        .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let content_type = response
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let body = collect_error_body(response, &CancellationToken::new())
+                            .await?
+                            .unwrap_or_default();
+                        return Err(decode_redacted_http_error(
+                            query.target.dialect,
+                            status,
+                            content_type.as_deref(),
+                            &body,
+                            credential.as_ref(),
+                        ));
+                    }
+                    let body = collect_bounded_response_body(response, remaining_bytes).await?;
+                    remaining_bytes -= body.len();
+                    let document: Value = serde_json::from_slice(&body).map_err(|error| {
+                        ProviderError::InvalidResponse(format!(
+                            "model catalog is not valid JSON: {error}"
+                        ))
+                    })?;
+                    let entries = catalog_entries(query.catalog, &document)?;
+                    total_entries += entries.len();
+                    if total_entries > MAX_DISCOVERED_MODELS {
+                        return Err(ProviderError::InvalidResponse(format!(
+                            "model catalog contains more than {MAX_DISCOVERED_MODELS} entries"
+                        )));
+                    }
+                    models.extend(parse_model_entries(
+                        query.catalog,
+                        entries,
+                        credential.as_ref(),
+                    ));
+                    cursor = anthropic_next_cursor(query.catalog, &document)?;
+                    let Some(next_cursor) = &cursor else {
+                        sort_and_deduplicate_models(&mut models);
+                        return Ok(models);
+                    };
+                    if !cursors.insert(next_cursor.clone()) {
+                        return Err(ProviderError::InvalidResponse(
+                            "model catalog repeated its pagination cursor".into(),
+                        ));
+                    }
+                }
+                Err(ProviderError::InvalidResponse(format!(
+                    "model catalog exceeds the {MAX_MODEL_CATALOG_PAGES}-page limit"
+                )))
+            })
+            .await
+            .map_err(|_| ProviderError::Transport("model catalog request timed out".into()))?
+            .map_err(|error| redact_provider_error(error, credential.as_ref()))
         })
     }
 }
@@ -541,6 +578,7 @@ async fn collect_bounded_response_body(
     Ok(body)
 }
 
+#[cfg(test)]
 fn parse_model_catalog(
     catalog: ProviderModelCatalogKind,
     body: &[u8],
@@ -549,8 +587,17 @@ fn parse_model_catalog(
     let document: Value = serde_json::from_slice(body).map_err(|error| {
         ProviderError::InvalidResponse(format!("model catalog is not valid JSON: {error}"))
     })?;
+    let mut models = parse_model_entries(catalog, catalog_entries(catalog, &document)?, credential);
+    sort_and_deduplicate_models(&mut models);
+    Ok(models)
+}
+
+fn catalog_entries(
+    catalog: ProviderModelCatalogKind,
+    document: &Value,
+) -> Result<&[Value], ProviderError> {
     let root = document.as_object().ok_or_else(|| {
-        ProviderError::InvalidResponse("model catalog root must be an object".to_owned())
+        ProviderError::InvalidResponse("model catalog root must be an object".into())
     })?;
     let collection_name = match catalog {
         ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Anthropic => "data",
@@ -569,14 +616,54 @@ fn parse_model_catalog(
             "model catalog contains more than {MAX_DISCOVERED_MODELS} entries"
         )));
     }
+    Ok(entries)
+}
 
+fn anthropic_next_cursor(
+    catalog: ProviderModelCatalogKind,
+    document: &Value,
+) -> Result<Option<String>, ProviderError> {
+    if catalog != ProviderModelCatalogKind::Anthropic {
+        return Ok(None);
+    }
+    match document.get("has_more") {
+        None | Some(Value::Bool(false)) => return Ok(None),
+        Some(Value::Bool(true)) => {}
+        Some(_) => {
+            return Err(ProviderError::InvalidResponse(
+                "model catalog has_more must be a boolean".into(),
+            ));
+        }
+    }
+    let cursor = document
+        .get("last_id")
+        .and_then(Value::as_str)
+        .filter(|cursor| {
+            !cursor.is_empty()
+                && cursor.chars().count() <= MAX_MODEL_ID_CHARS
+                && !contains_unsafe_text_control(cursor)
+        })
+        .ok_or_else(|| {
+            ProviderError::InvalidResponse("model catalog has_more requires a valid last_id".into())
+        })?;
+    Ok(Some(cursor.to_owned()))
+}
+
+fn parse_model_entries(
+    catalog: ProviderModelCatalogKind,
+    entries: &[Value],
+    credential: Option<&SessionCredential>,
+) -> Vec<DiscoveredModel> {
     let secret = credential
         .filter(|credential| !credential.is_empty())
         .map(SessionCredential::expose_secret);
-    let mut models = entries
+    entries
         .iter()
         .filter_map(|entry| parse_discovered_model(catalog, entry, secret))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn sort_and_deduplicate_models(models: &mut Vec<DiscoveredModel>) {
     models.sort_by(|left, right| {
         left.display_name
             .to_lowercase()
@@ -585,7 +672,42 @@ fn parse_model_catalog(
     });
     let mut seen = BTreeSet::new();
     models.retain(|model| seen.insert(model.id.clone()));
-    Ok(models)
+}
+
+// Only explicit metadata excludes a model. Never infer capabilities from names
+// such as "embedding", and never turn missing metadata into a false claim.
+fn supports_chat_input(entry: &Map<String, Value>) -> bool {
+    // OMP's published non-chat catalog kinds. This parser also serves generic
+    // gateways, whose unknown kind values (for example "llm") remain unknown.
+    if string_field(entry, &["kind"]).is_some_and(|kind| {
+        matches!(
+            kind,
+            "tiny"
+                | "image"
+                | "tts"
+                | "stt"
+                | "search"
+                | "judge"
+                | "embedding"
+                | "rerank"
+                | "video"
+        )
+    }) || nested_capability_bool(entry, &["completion_chat"]) == Some(false)
+    {
+        return false;
+    }
+    for field in ["input_modalities", "input"] {
+        if let Some(modalities) = entry.get(field).and_then(Value::as_array) {
+            if modalities.iter().all(Value::is_string)
+                && !modalities
+                    .iter()
+                    .any(|value| value.as_str() == Some("text"))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn parse_discovered_model(
@@ -594,6 +716,9 @@ fn parse_discovered_model(
     credential: Option<&str>,
 ) -> Option<DiscoveredModel> {
     let entry = entry.as_object()?;
+    if catalog == ProviderModelCatalogKind::OpenAi && !supports_chat_input(entry) {
+        return None;
+    }
     let id = match catalog {
         ProviderModelCatalogKind::OpenAi | ProviderModelCatalogKind::Anthropic => {
             string_field(entry, &["id"])
@@ -613,7 +738,7 @@ fn parse_discovered_model(
         ProviderModelCatalogKind::OpenAi
         | ProviderModelCatalogKind::Ollama
         | ProviderModelCatalogKind::Anthropic => {
-            string_field(entry, &["display_name", "displayName"]).unwrap_or(&id)
+            string_field(entry, &["display_name", "displayName", "name"]).unwrap_or(&id)
         }
         ProviderModelCatalogKind::Google => string_field(entry, &["displayName"]).unwrap_or(&id),
     };
@@ -634,12 +759,23 @@ fn parse_discovered_model(
         | ProviderModelCatalogKind::Ollama
         | ProviderModelCatalogKind::Anthropic => u64_field(
             entry,
-            &["context_window", "contextWindow", "context_length"],
+            &[
+                "context_window",
+                "contextWindow",
+                "context_length",
+                "max_context_length",
+                "max_input_tokens",
+            ],
         ),
         ProviderModelCatalogKind::Google => u64_field(entry, &["contextWindow", "inputTokenLimit"]),
     };
     let supports_tools = bool_field(entry, &["supports_tools", "supportsTools"])
-        .or_else(|| nested_capability_bool(entry, &["tools", "tool_calling", "toolCalling"]))
+        .or_else(|| {
+            nested_capability_bool(
+                entry,
+                &["tools", "tool_calling", "toolCalling", "function_calling"],
+            )
+        })
         .or_else(|| tools_capability_list(entry, "capabilities"))
         .or_else(|| tools_capability_list(entry, "supported_parameters"));
 
@@ -2185,6 +2321,198 @@ mod tests {
         assert!(request_lower.contains("x-api-key: sk-sensitive-token"));
         assert!(request_lower.contains("x-static-revision: catalog-v1"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn gateway_catalog_keeps_qualified_ids_and_only_excludes_explicit_nonchat_models() {
+        let body = serde_json::json!({ "data": [
+            { "id": "anthropic/claude", "display_name": "Claude", "context_length": 200000, "input_modalities": ["text", "image"] },
+            { "id": "model-with-unknown-metadata" },
+            { "id": "text-model", "name": "Text model", "input": ["text"], "capabilities": { "function_calling": false } },
+            { "id": "nonchat", "kind": "embedding", "input_modalities": ["text"] },
+            { "id": "image-only", "input_modalities": ["image"] },
+            { "id": "audio-only", "input": ["audio"] },
+            { "id": "fim", "capabilities": { "completion_chat": false } },
+            { "id": "custom-kind", "kind": "llm" },
+            { "id": "unknown-array", "input": [42] }
+        ] });
+        let models = super::parse_model_catalog(
+            ProviderModelCatalogKind::OpenAi,
+            body.to_string().as_bytes(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "anthropic/claude",
+                "custom-kind",
+                "model-with-unknown-metadata",
+                "text-model",
+                "unknown-array"
+            ]
+        );
+        assert_eq!(models[0].display_name, "Claude");
+        assert_eq!(models[0].context_window, Some(200000));
+        assert_eq!(models[0].supports_tools, None);
+        assert_eq!(models[1].context_window, None);
+        assert_eq!(models[1].supports_tools, None);
+        assert_eq!(models[2].context_window, None);
+        assert_eq!(models[3].supports_tools, Some(false));
+    }
+
+    fn spawn_catalog_pages(
+        pages: Vec<serde_json::Value>,
+    ) -> (String, std_mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = std_mpsc::channel();
+        let handle = thread::spawn(move || {
+            for page in pages {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                sender.send(read_http_request(&mut stream)).unwrap();
+                let body = page.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        (format!("http://{address}"), receiver, handle)
+    }
+
+    #[tokio::test]
+    async fn anthropic_catalog_follows_same_endpoint_cursors_and_preserves_auth() {
+        let (base, requests, server) = spawn_catalog_pages(vec![
+            serde_json::json!({ "data": [{ "id": "claude-b", "display_name": "B" }], "has_more": true, "last_id": "cursor/a?x=1" }),
+            serde_json::json!({ "data": [{ "id": "claude-a", "display_name": "A", "max_input_tokens": 200000 }, { "id": "claude-b" }], "has_more": false }),
+        ]);
+        let mut query = model_query(
+            base,
+            ProviderModelCatalogKind::Anthropic,
+            CredentialPlacement::Header("x-api-key".into()),
+        );
+        query
+            .target
+            .additional_headers
+            .insert("anthropic-version".into(), "2023-06-01".into());
+        let models = ReqwestProviderGateway::with_defaults()
+            .unwrap()
+            .list_models(query, Some(SessionCredential::new(TEST_CREDENTIAL)))
+            .await
+            .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["claude-a", "claude-b"]
+        );
+        assert_eq!(models[0].context_window, Some(200000));
+        assert_eq!(models[0].supports_tools, None);
+        assert!(
+            requests
+                .recv()
+                .unwrap()
+                .starts_with("GET /v1/models?limit=1000 HTTP/1.1")
+        );
+        let second = requests.recv().unwrap();
+        assert!(
+            second.starts_with("GET /v1/models?limit=1000&after_id=cursor%2Fa%3Fx%3D1 HTTP/1.1")
+        );
+        assert!(
+            second
+                .to_lowercase()
+                .contains("x-api-key: sk-sensitive-token")
+        );
+        assert!(
+            second
+                .to_lowercase()
+                .contains("anthropic-version: 2023-06-01")
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_catalog_rejects_repeated_cursors_and_missing_cursors() {
+        let page = serde_json::json!({ "data": [{ "id": "claude" }], "has_more": true, "last_id": "same" });
+        let (base, _requests, server) = spawn_catalog_pages(vec![page.clone(), page]);
+        let error = ReqwestProviderGateway::with_defaults()
+            .unwrap()
+            .list_models(
+                model_query(
+                    base,
+                    ProviderModelCatalogKind::Anthropic,
+                    CredentialPlacement::None,
+                ),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::InvalidResponse(message) if message.contains("repeated"))
+        );
+        server.join().unwrap();
+        assert!(
+            super::anthropic_next_cursor(
+                ProviderModelCatalogKind::Anthropic,
+                &serde_json::json!({ "has_more": true })
+            )
+            .is_err()
+        );
+        assert!(
+            super::anthropic_next_cursor(
+                ProviderModelCatalogKind::Anthropic,
+                &serde_json::json!({ "has_more": "true" })
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_catalog_budgets_apply_across_pages_without_returning_partial_results() {
+        let many_entries = (0..2501)
+            .map(|index| serde_json::json!({ "id": format!("model-{index}") }))
+            .collect::<Vec<_>>();
+        let padding = "x".repeat(super::MAX_MODEL_CATALOG_BODY_BYTES / 2);
+        let cases = [
+            ((0..super::MAX_MODEL_CATALOG_PAGES).map(|index| serde_json::json!({ "data": [], "has_more": true, "last_id": format!("page-{index}") })).collect::<Vec<_>>(), "page limit"),
+            (vec![
+                serde_json::json!({ "data": many_entries, "has_more": true, "last_id": "page-1" }),
+                serde_json::json!({ "data": many_entries, "has_more": false })
+            ], "5000 entries"),
+            (vec![
+                serde_json::json!({ "data": [], "has_more": true, "last_id": "page-1", "unused": padding }),
+                serde_json::json!({ "data": [], "has_more": false, "unused": padding })
+            ], "byte limit")
+        ];
+        for (pages, message_fragment) in cases {
+            let (base, _requests, server) = spawn_catalog_pages(pages);
+            let error = ReqwestProviderGateway::with_defaults()
+                .unwrap()
+                .list_models(
+                    model_query(
+                        base,
+                        ProviderModelCatalogKind::Anthropic,
+                        CredentialPlacement::None,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, ProviderError::InvalidResponse(message) if message.contains(message_fragment))
+            );
+            server.join().unwrap();
+        }
     }
 
     #[test]
