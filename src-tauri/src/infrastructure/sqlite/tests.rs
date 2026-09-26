@@ -127,7 +127,7 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 6);
+    assert_eq!(schema.version, 7);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -177,7 +177,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
         .await
         .expect("production repository migrator upgrades the legacy file");
     let schema = repository.schema_info().await.expect("schema is readable");
-    assert_eq!(schema.version, 6);
+    assert_eq!(schema.version, 7);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -231,8 +231,15 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6]
+        vec![1, 2, 3, 4, 5, 6, 7]
     );
+    let index_columns = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_index_info('idx_manifest_item_workspace_content') ORDER BY seqno",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(index_columns, ["workspace_id", "content_block_id"]);
     for (version, checksum) in &applied {
         let migration = TEST_MIGRATOR
             .iter()
@@ -993,6 +1000,206 @@ async fn child_turn_cannot_reference_a_run_from_another_workspace() {
         repository.get_turn("turn-b").await,
         Err(RepositoryError::NotFound { .. })
     ));
+}
+
+#[tokio::test]
+async fn workspace_content_lookup_preserves_ownership_deduplication_and_order() {
+    let repository = SqliteRepository::connect_in_memory().await.unwrap();
+    for id in ["workspace-a", "workspace-b"] {
+        repository
+            .create_workspace(&workspace(id, id))
+            .await
+            .unwrap();
+    }
+    let mut first = root_bundle("workspace-a", "turn-a", "run-a");
+    let receipt_only = ContentBlockRecord {
+        id: "block-receipt-only".into(),
+        role: "assistant".into(),
+        content: "Shared immutable evidence".into(),
+        content_hash: "shared-evidence-hash".into(),
+        created_at: 20,
+    };
+    first.content_blocks.push(receipt_only.clone());
+    first.content_blocks.push(ContentBlockRecord {
+        id: "unreferenced".into(),
+        role: "user".into(),
+        content: "No workspace owns this block".into(),
+        content_hash: "unreferenced-hash".into(),
+        created_at: 1,
+    });
+    let mut item = first.context_items[0].clone();
+    item.position = 1;
+    item.content_block_id = receipt_only.id.clone();
+    item.role = receipt_only.role.clone();
+    first.context_items.push(item);
+    repository.persist_run_start(&first).await.unwrap();
+    let receipt = repository.get_run_receipt("run-a").await.unwrap();
+
+    let mut second = root_bundle("workspace-b", "turn-b", "run-b");
+    let mut shared = second.context_items[0].clone();
+    shared.position = 1;
+    shared.content_block_id = receipt_only.id.clone();
+    shared.role = receipt_only.role.clone();
+    second.context_items.push(shared);
+    repository.persist_run_start(&second).await.unwrap();
+
+    let draft_only = ContentBlockRecord {
+        id: "block-draft-only".into(),
+        role: "manual".into(),
+        content: "Pinned for the next send".into(),
+        content_hash: "draft-only-hash".into(),
+        created_at: 19,
+    };
+    repository
+        .update_context_draft(&ContextDraftUpdateRecord {
+            workspace_id: "workspace-a".into(),
+            parent_run_id: None,
+            expected_version: 0,
+            content_blocks: vec![draft_only.clone()],
+            items: [&draft_only, &first.content_blocks[0]]
+                .iter()
+                .enumerate()
+                .map(|(position, block)| ContextOverrideItemRecord {
+                    workspace_id: "workspace-a".into(),
+                    position: position as i64,
+                    operation: "pin".into(),
+                    source_kind: "content_block".into(),
+                    source_id: Some(block.id.clone()),
+                    content_block_id: Some(block.id.clone()),
+                    content_hash: Some(block.content_hash.clone()),
+                    created_at: 21,
+                })
+                .collect(),
+            updated_at: 21,
+        })
+        .await
+        .unwrap();
+
+    // A prompt can exist without a Receipt, including a soft-deleted Turn.
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO content_block VALUES \
+             ('turn-only', 'user', 'Historical prompt', 'turn-only-hash', 21); \
+         INSERT INTO turn (id, workspace_id, prompt_block_id, created_at, deleted_at) \
+             VALUES ('deleted-turn', 'workspace-a', 'turn-only', 21, 22);",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    let expected_ids = [
+        "block-draft-only",
+        "block-receipt-only",
+        "block-turn-a",
+        "turn-only",
+    ];
+    let blocks = repository.list_content_blocks("workspace-a").await.unwrap();
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.id.as_str())
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert_eq!(
+        repository
+            .load_workspace_context_records("workspace-a")
+            .await
+            .unwrap()
+            .content_blocks,
+        blocks
+    );
+    assert_eq!(
+        repository.list_content_blocks("workspace-b").await.unwrap(),
+        vec![receipt_only, second.content_blocks[0].clone()]
+    );
+    assert!(
+        repository
+            .list_content_blocks("missing-workspace")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(repository.get_run_receipt("run-a").await.unwrap(), receipt);
+}
+
+async fn workspace_content_read_steps(repository: &SqliteRepository) -> usize {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let observed = count.clone();
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    connection
+        .lock_handle()
+        .await
+        .unwrap()
+        .set_progress_handler(100, move || {
+            observed.fetch_add(100, Ordering::Relaxed);
+            true
+        });
+    drop(connection);
+    let blocks = repository.list_content_blocks("workspace-a").await.unwrap();
+    assert_eq!(blocks.len(), 20);
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    connection
+        .lock_handle()
+        .await
+        .unwrap()
+        .remove_progress_handler();
+    count.load(Ordering::Relaxed)
+}
+
+#[tokio::test]
+async fn workspace_content_read_work_does_not_scale_with_unrelated_history() {
+    let repository = SqliteRepository::connect_in_memory().await.unwrap();
+    for id in ["workspace-a", "workspace-b"] {
+        repository
+            .create_workspace(&workspace(id, id))
+            .await
+            .unwrap();
+    }
+    for index in 0..20 {
+        repository
+            .persist_run_start(&root_bundle(
+                "workspace-a",
+                &format!("turn-{index}"),
+                &format!("run-{index}"),
+            ))
+            .await
+            .unwrap();
+    }
+    // Warm the statement before comparing SQLite VM work, independent of CPU speed.
+    workspace_content_read_steps(&repository).await;
+    let baseline = workspace_content_read_steps(&repository).await;
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::raw_sql(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000) \
+         INSERT INTO content_block \
+         SELECT 'noise-' || i, 'user', 'Other workspace ' || i, 'noise-hash-' || i, i FROM n; \
+         INSERT INTO turn (id, workspace_id, prompt_block_id, created_at) \
+         SELECT 'turn-' || id, 'workspace-b', id, created_at FROM content_block WHERE id LIKE 'noise-%'; \
+         INSERT INTO context_manifest \
+             (id, workspace_id, compiler_version, strategy, estimated_chars, canonical_hash, created_at) \
+         SELECT 'manifest-' || id, 'workspace-b', '4', 'test', 1, 'canonical-' || id, created_at \
+         FROM content_block WHERE id LIKE 'noise-%'; \
+         INSERT INTO context_manifest_item \
+             (manifest_id, workspace_id, position, source_kind, role, content_block_id, inclusion_reason) \
+         SELECT 'manifest-' || id, 'workspace-b', 0, 'current_prompt', 'user', id, 'current_prompt' \
+         FROM content_block WHERE id LIKE 'noise-%';",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    drop(connection);
+    let with_unrelated_history = workspace_content_read_steps(&repository).await;
+    assert!(
+        with_unrelated_history <= baseline * 2 + 1000,
+        "loading the same 20 blocks must stay workspace-scoped: {baseline} -> {with_unrelated_history} SQLite VM steps"
+    );
 }
 
 #[tokio::test]
@@ -2248,6 +2455,21 @@ async fn completed_maintenance_atomically_activates_one_immutable_checkpoint_and
         .unwrap();
     assert_eq!(stored.status, "completed");
     assert_eq!(stored.summary.as_deref(), Some("Auditable summary"));
+    assert!(
+        repository
+            .list_content_blocks("workspace-a")
+            .await
+            .unwrap()
+            .contains(&summary)
+    );
+    assert!(
+        repository
+            .load_workspace_context_records("workspace-a")
+            .await
+            .unwrap()
+            .content_blocks
+            .contains(&summary)
+    );
     assert_eq!(
         repository
             .get_context_cursor("workspace-a")

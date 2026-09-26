@@ -1346,23 +1346,20 @@ async fn list_content_blocks_on(
     connection: &mut SqliteConnection,
     workspace_id: &str,
 ) -> RepositoryResult<Vec<ContentBlockRecord>> {
+    // Start from indexed workspace references, not the global block collection.
+    // UNION preserves one copy when a block has several owners in this workspace.
     let rows = sqlx::query(
         "SELECT b.id, b.role, b.content, b.content_hash, b.created_at \
          FROM content_block b \
-         WHERE EXISTS ( \
-             SELECT 1 FROM turn t \
-             WHERE t.workspace_id = ? AND t.prompt_block_id = b.id \
-         ) OR EXISTS ( \
-             SELECT 1 FROM context_manifest_item i \
-             JOIN context_manifest m ON m.id = i.manifest_id \
-             WHERE m.workspace_id = ? AND i.content_block_id = b.id \
-         ) OR EXISTS ( \
-             SELECT 1 FROM context_checkpoint c \
-             WHERE c.workspace_id = ? AND c.summary_block_id = b.id \
-         ) OR EXISTS ( \
-             SELECT 1 FROM context_override_item o \
-             WHERE o.workspace_id = ? AND o.content_block_id = b.id \
-         ) \
+         JOIN ( \
+             SELECT prompt_block_id AS id FROM turn WHERE workspace_id = ? \
+             UNION \
+             SELECT content_block_id AS id FROM context_manifest_item WHERE workspace_id = ? \
+             UNION \
+             SELECT summary_block_id AS id FROM context_checkpoint WHERE workspace_id = ? \
+             UNION \
+             SELECT content_block_id AS id FROM context_override_item WHERE workspace_id = ? \
+         ) owned ON owned.id = b.id \
          ORDER BY b.created_at, b.id",
     )
     .bind(workspace_id)
