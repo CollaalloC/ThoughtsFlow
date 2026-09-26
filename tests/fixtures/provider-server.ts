@@ -73,7 +73,7 @@ function writeModelCatalog(pathname: string, response: ServerResponse): boolean 
           id: "fixture-model",
           object: "model",
           created: 1_704_067_200,
-          owned_by: "thoughsflow-fixture",
+          owned_by: "thoughtsflow-fixture",
         },
       ],
     });

@@ -1,6 +1,6 @@
-# ThoughsFlow Domain Language
+# ThoughtsFlow Domain Language
 
-This glossary names the concepts that define ThoughsFlow's local AI reasoning and decision workspace.
+This glossary names the concepts that define ThoughtsFlow's local AI reasoning and decision workspace.
 
 ## Provider Configuration
 
@@ -69,7 +69,7 @@ _Avoid_: Thread, canvas path
 ## Agent Collaboration
 
 **Mission**:
-A user-owned collaboration objective attached to one ThoughsFlow workspace and one code project, containing work delegated to agents.
+A user-owned collaboration objective attached to one ThoughtsFlow workspace and one code project, containing work delegated to agents.
 _Avoid_: Model Run, conversation branch, provider request
 
 **Orchestration Run**:

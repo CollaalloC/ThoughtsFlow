@@ -1,4 +1,4 @@
-# ThoughsFlow 代码实现审查（修正版）
+# ThoughtsFlow 代码实现审查（修正版）
 
 > 历史报告：以下结论对应 2026-07-22，部分问题已经修复。2026-09-22 的当前实现核查与优化方案见 [原始构想达成度](docs/VISION_ALIGNMENT.md) 和 [架构优化](docs/ARCHITECTURE_EVOLUTION.md)，请勿将历史行号和建议直接当作当前缺陷。
 

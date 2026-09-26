@@ -4470,8 +4470,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "thoughsflow"
-version = "0.1.0"
+name = "thoughtsflow"
+version = "0.1.0-beta.1"
 dependencies = [
  "async-trait",
  "chrono",

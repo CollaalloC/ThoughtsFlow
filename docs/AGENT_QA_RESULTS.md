@@ -20,7 +20,7 @@
 
 ## 真实 WKWebView 到 CLI 子进程
 
-用 `node tests/webview/run-agent-journey.mjs` 启动隔离应用数据目录和模拟 Orca 可执行文件，约 42 秒通过完整旅程：创建 ThoughsFlow 工作区、选择代码项目、创建协作目标、先后派发两个独立任务并同时显示、分别回复问题、读取任务输出、分别释放执行器，最后重载 WebView 并确认协作和释放状态恢复。表单、React、DesktopBridge、Tauri 命令、真实 SQLite 迁移和进程 argv 链路都参与运行。
+用 `node tests/webview/run-agent-journey.mjs` 启动隔离应用数据目录和模拟 Orca 可执行文件，约 42 秒通过完整旅程：创建 ThoughtsFlow 工作区、选择代码项目、创建协作目标、先后派发两个独立任务并同时显示、分别回复问题、读取任务输出、分别释放执行器，最后重载 WebView 并确认协作和释放状态恢复。表单、React、DesktopBridge、Tauri 命令、真实 SQLite 迁移和进程 argv 链路都参与运行。
 
 截图见 [原生 Agent 工作面](../output/agent-workspace-native.png)。模拟输出明确标注 `no model was called`；本测试不读写业务项目、不联系模型、不创建真实 worktree。
 

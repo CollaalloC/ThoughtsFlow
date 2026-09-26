@@ -1,0 +1,187 @@
+name: Build installers
+run-name: Installers for ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      BUILD_TARGET: ${{ matrix.target }}
+      BUILD_BUNDLES: ${{ matrix.bundles }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Require a versioned source tag
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const json = file => JSON.parse(readFileSync(file, 'utf8'));
+          const version = json('package.json').version;
+          assert.match(process.env.GITHUB_REF, /^refs\/tags\/v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+          assert.equal(process.env.GITHUB_REF, `refs/tags/v${version}`);
+          assert.equal(json('package-lock.json').version, version);
+          assert.equal(json('src-tauri/tauri.conf.json').version, version);
+          assert.equal(readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1], version);
+          console.log(`Building ${version} from ${process.env.GITHUB_SHA}`);
+          NODE
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+      - run: npm ci
+      - name: Build production installers
+        # Deliberately no webview-e2e feature, fixture config, or model credentials.
+        run: npm run tauri -- build --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" -- --locked
+      - name: Collect complete platform assets
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { execFileSync } from 'node:child_process';
+          import { createHash } from 'node:crypto';
+          const target = process.env.BUILD_TARGET;
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const bundle = join('src-tauri', 'target', target, 'release', 'bundle');
+          const output = 'platform-assets';
+          mkdirSync(output);
+          const collect = (directory, suffix) => {
+            const files = readdirSync(join(bundle, directory)).filter(name => name.endsWith(suffix));
+            assert.equal(files.length, 1, `Expected one ${directory} installer, got ${files.length}`);
+            const name = `ThoughtsFlow_${version}_${target}${suffix}`;
+            copyFileSync(join(bundle, directory, files[0]), join(output, name));
+          };
+          if (process.platform === 'darwin') {
+            collect('dmg', '.dmg');
+            const apps = readdirSync(join(bundle, 'macos')).filter(name => name.endsWith('.app'));
+            assert.equal(apps.length, 1, 'Expected one macOS application bundle');
+            // tar preserves executable permissions and bundle symlinks through artifact transport.
+            execFileSync('tar', ['-czf', join(output, `ThoughtsFlow_${version}_${target}.app.tar.gz`), '-C', join(bundle, 'macos'), apps[0]]);
+          } else if (process.platform === 'win32') {
+            collect('nsis', '.exe');
+          } else {
+            collect('deb', '.deb');
+          }
+          const assets = readdirSync(output).sort().map(name => ({
+            name,
+            sha256: createHash('sha256').update(readFileSync(join(output, name))).digest('hex'),
+          }));
+          writeFileSync(join(output, `build-${target}.json`), JSON.stringify({
+            version, target, sourceCommit: process.env.GITHUB_SHA,
+            sourceTag: process.env.GITHUB_REF_NAME,
+            workflowRun: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            signing: 'No trusted publisher certificate; macOS may use ad-hoc signing. Not notarized.',
+            assets,
+          }, null, 2) + '\n');
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installers-${{ matrix.target }}
+          path: platform-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  collect:
+    name: Verify release assets
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: installers-*
+          path: platform-artifacts
+          digest-mismatch: error
+      - name: Verify every target and create release manifest
+        shell: bash
+        run: |
+          python3 scripts/generate-license-notices.py --check
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join, basename } from 'node:path';
+          import { execFileSync } from 'node:child_process';
+          import { createHash } from 'node:crypto';
+          const targets = ['aarch64-apple-darwin', 'x86_64-apple-darwin', 'x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu'];
+          const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const output = 'release-assets';
+          mkdirSync(output);
+          for (const target of targets) {
+            const directory = join('platform-artifacts', `installers-${target}`);
+            const manifestName = `build-${target}.json`;
+            const manifest = JSON.parse(readFileSync(join(directory, manifestName), 'utf8'));
+            assert.equal(manifest.target, target);
+            assert.equal(manifest.sourceCommit, process.env.GITHUB_SHA);
+            assert.equal(manifest.version, version);
+            assert.equal(manifest.assets.length, target.includes('darwin') ? 2 : 1);
+            for (const asset of manifest.assets) {
+              assert.equal(asset.name, basename(asset.name));
+              assert.equal(hash(join(directory, asset.name)), asset.sha256);
+              copyFileSync(join(directory, asset.name), join(output, asset.name));
+            }
+            copyFileSync(join(directory, manifestName), join(output, manifestName));
+          }
+          for (const name of ['LICENSE', 'THIRD_PARTY_NOTICES.md']) {
+            copyFileSync(name, join(output, name));
+          }
+          execFileSync('tar', ['-czf', join(output, 'THIRD_PARTY_LICENSES.tar.gz'), 'licenses']);
+          const checksums = readdirSync(output).sort().map(name => `${hash(join(output, name))}  ${name}`).join('\n') + '\n';
+          writeFileSync(join(output, 'SHA256SUMS.txt'), checksums);
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

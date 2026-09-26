@@ -59,7 +59,7 @@ impl ReqwestProviderGateway {
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(15))
             .pool_idle_timeout(Duration::from_secs(90))
-            .user_agent("ThoughsFlow/0.1")
+            .user_agent("ThoughtsFlow/0.1")
             .build()
             .map(Self::new)
             .map_err(|error| ProviderError::Transport(error.to_string()))

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Least-privilege capability for the packaged ThoughsFlow main window.",
+  "description": "Least-privilege capability for the packaged ThoughtsFlow main window.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

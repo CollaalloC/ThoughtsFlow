@@ -1,7 +1,7 @@
 {
-  "name": "thoughsflow",
+  "name": "thoughtsflow",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0-beta.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -66,5 +66,15 @@
   },
   "engines": {
     "node": ">=24 <25"
+  },
+  "license": "MIT",
+  "description": "A local-first AI reasoning and agent collaboration desktop workspace",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CollaalloC/ThoughtsFlow.git"
+  },
+  "homepage": "https://github.com/CollaalloC/ThoughtsFlow",
+  "bugs": {
+    "url": "https://github.com/CollaalloC/ThoughtsFlow/issues"
   }
 }

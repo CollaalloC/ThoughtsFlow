@@ -15,7 +15,7 @@ import {
   waitForBodyText,
 } from "./support";
 
-describe("ThoughsFlow real process restart journey — session 1", () => {
+describe("ThoughtsFlow real process restart journey — session 1", () => {
   it("persists a partial streaming Run before the native app process exits", async () => {
 
     const journeyId = requiredEnvironment("TF_WEBVIEW_JOURNEY_ID");

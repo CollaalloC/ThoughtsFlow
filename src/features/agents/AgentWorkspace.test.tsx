@@ -140,7 +140,7 @@ describe("AgentWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "创建协作" }));
     await ready();
     expect(bridge.createAgentMission).toHaveBeenCalledWith({ id: expect.any(String), workspaceId: "workspace-1", repositoryId: "repo-1", objective: mission.objective });
-    expect(screen.getByText(/不会使用 ThoughsFlow 的 Provider 凭据/)).toBeVisible();
+    expect(screen.getByText(/不会使用 ThoughtsFlow 的 Provider 凭据/)).toBeVisible();
     fillTask();
     await user.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
     expect(bridge.startAgentTask).toHaveBeenCalledWith({ operationId: expect.any(String), missionId: mission.id, title: "实现任务列表", spec: "仅修改任务列表，保持现有接口，运行组件测试验证。" });
@@ -148,7 +148,7 @@ describe("AgentWorkspace", () => {
     expect(screen.getByLabelText("任务标题")).toHaveValue("");
   });
 
-  it("opens Orca explicitly and prevents work without a ThoughsFlow workspace", async () => {
+  it("opens Orca explicitly and prevents work without a ThoughtsFlow workspace", async () => {
     const bridge = fixture({ agentEnvironment: vi.fn().mockResolvedValue({ ...environment, running: false }) });
     render(<AgentWorkspace bridge={bridge} />);
     expect(await screen.findByRole("button", { name: "启动 Orca" })).toBeEnabled();

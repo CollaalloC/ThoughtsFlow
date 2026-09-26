@@ -169,7 +169,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
     let directory = tempfile::tempdir().expect("temporary directory is created");
     let path = directory
         .path()
-        .join(format!("thoughsflow-v{schema_version}.sqlite"));
+        .join(format!("thoughtsflow-v{schema_version}.sqlite"));
     std::fs::write(&path, legacy_fixture_bytes(schema_version))
         .expect("frozen legacy fixture is copied without mutation");
 

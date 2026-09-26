@@ -1,10 +1,10 @@
 # 模型连接与 OMP Gateway
 
-核查日期：2026-09-26。本页区分可配置的请求协议、模型目录、实际账号可用性。新增模板复用 ThoughsFlow 的 OpenAI Chat Completions 适配器；没有将 Agent RPC 当作模型请求，也没有新增供应商 SDK 依赖。
+核查日期：2026-09-26。本页区分可配置的请求协议、模型目录、实际账号可用性。新增模板复用 ThoughtsFlow 的 OpenAI Chat Completions 适配器；没有将 Agent RPC 当作模型请求，也没有新增供应商 SDK 依赖。
 
 ## 连接方式
 
-ThoughsFlow 保留 OpenAI Chat Completions、Anthropic Messages、Google Generative AI、Ollama Chat 四种已实现协议。普通供应商模板使用 API Key；OMP Gateway 使用网关的 bearer token，供应商凭据由它的 Auth Broker 管理。密钥仍只在 ThoughsFlow 进程内存中传递，不写入 Provider Profile、SQLite 或 Context Receipt。
+ThoughtsFlow 保留 OpenAI Chat Completions、Anthropic Messages、Google Generative AI、Ollama Chat 四种已实现协议。普通供应商模板使用 API Key；OMP Gateway 使用网关的 bearer token，供应商凭据由它的 Auth Broker 管理。密钥仍只在 ThoughtsFlow 进程内存中传递，不写入 Provider Profile、SQLite 或 Context Receipt。
 
 模板表示已实现该请求协议，不表示每个模型、订阅、地区、专属参数或账户已经实际测试。新增模板本轮使用本地 HTTP 夹具验证，未调用这些厂商的付费模型。Azure 模板仍标记运行不可用；Bedrock、Vertex ADC、厂商 OAuth 没有被伪装成普通 API Key 原生支持。
 
@@ -33,12 +33,12 @@ Z.AI 的普通 API 和 GLM Coding Plan 端点不同。本模板使用普通 API�
 ## OMP Gateway 的前置条件与证据边界
 
 1. 已部署并配置 OMP Auth Broker。`omp auth-gateway serve` 要求 `OMP_AUTH_BROKER_URL` 或 `auth.broker.url/token`。
-2. 启动网关，例如 `omp auth-gateway serve --bind=127.0.0.1:4000`。ThoughsFlow 不会自动启动、升级或配置 broker，也不会默认关闭网关认证。
-3. 在 ThoughsFlow 选择 OMP Gateway，输入网关 bearer token，刷新目录。模型 ID 保持 `provider/model-id`，避免不同供应商的同名模型冲突。
+2. 启动网关，例如 `omp auth-gateway serve --bind=127.0.0.1:4000`。ThoughtsFlow 不会自动启动、升级或配置 broker，也不会默认关闭网关认证。
+3. 在 ThoughtsFlow 选择 OMP Gateway，输入网关 bearer token，刷新目录。模型 ID 保持 `provider/model-id`，避免不同供应商的同名模型冲突。
 
 该网关只使用 broker 提供的凭据，构建目录时忽略本机 `models.yml`，不直接继承本机 `~/.omp/agent/agent.db`。目录仅覆盖 broker 凭据可路由的模型；它与 `omp models --json` 的本机可用目录不是同一来源。[网关启动与目录构建源码](https://github.com/can1357/oh-my-pi/blob/v18.3.2/packages/coding-agent/src/cli/auth-gateway-cli.ts)
 
-Context Receipt 证明 ThoughsFlow 编译并发送给配置网关的上下文、模型 ID 与协议。OMP 可能再将请求转换为供应商原生协议；本版没有捕获该第二跳的 payload，因此 Receipt 不宣称包含最终供应商 wire payload。Orca 管理的 Agent 会话继续属于 Agent Mission；这里不会建立第二条 RPC 来争用它。
+Context Receipt 证明 ThoughtsFlow 编译并发送给配置网关的上下文、模型 ID 与协议。OMP 可能再将请求转换为供应商原生协议；本版没有捕获该第二跳的 payload，因此 Receipt 不宣称包含最终供应商 wire payload。Orca 管理的 Agent 会话继续属于 Agent Mission；这里不会建立第二条 RPC 来争用它。
 
 ## 模型目录行为
 
@@ -50,4 +50,4 @@ Context Receipt 证明 ThoughsFlow 编译并发送给配置网关的上下文、
 
 ## 后续 SDK 接入条件
 
-`@oh-my-pi/pi-ai` 提供更广的鉴权和 provider transport，`pi-catalog` 提供动态目录与兼容规则；其 TS 包依赖 Bun/原生模块，尚未作为 ThoughsFlow 自带 sidecar 发布。当前 OMP Gateway 是已有模型端口上的可选连接方式。独立 OMP Agent runtime、OAuth 登录 UI、自带 Auth Broker、计费及 reasoning 参数全集不属于本轮完成范围。[OMP SDK](https://github.com/can1357/oh-my-pi/blob/v18.3.2/packages/ai/README.md)
+`@oh-my-pi/pi-ai` 提供更广的鉴权和 provider transport，`pi-catalog` 提供动态目录与兼容规则；其 TS 包依赖 Bun/原生模块，尚未作为 ThoughtsFlow 自带 sidecar 发布。当前 OMP Gateway 是已有模型端口上的可选连接方式。独立 OMP Agent runtime、OAuth 登录 UI、自带 Auth Broker、计费及 reasoning 参数全集不属于本轮完成范围。[OMP SDK](https://github.com/can1357/oh-my-pi/blob/v18.3.2/packages/ai/README.md)

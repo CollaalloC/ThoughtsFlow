@@ -1,13 +1,15 @@
 [package]
-name = "thoughsflow"
-version = "0.1.0"
+name = "thoughtsflow"
+version = "0.1.0-beta.1"
 description = "Local-first AI reasoning and decision workspace"
-authors = ["ThoughsFlow contributors"]
+authors = ["ThoughtsFlow contributors"]
+license = "MIT"
+repository = "https://github.com/CollaalloC/ThoughtsFlow"
 edition = "2024"
 rust-version = "1.85"
 
 [lib]
-name = "thoughsflow_lib"
+name = "thoughtsflow_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]

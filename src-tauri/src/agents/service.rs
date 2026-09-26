@@ -364,7 +364,7 @@ impl AgentService {
         runtime: &str,
     ) -> AppResult<AgentOperation> {
         let selector = format!("path:{}", mission.repository_path);
-        let title = format!("ThoughsFlow {}", mission.id);
+        let title = format!("ThoughtsFlow {}", mission.id);
         let operation = self
             .store
             .begin(

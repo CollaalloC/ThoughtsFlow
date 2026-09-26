@@ -15,7 +15,7 @@ const launcherPids: number[] = [];
 const sessionExitCodes: number[] = [];
 const crashOperationId = randomUUID();
 const appDataDir = await mkdtemp(
-  join(tmpdir(), "thoughsflow-webview-restart-"),
+  join(tmpdir(), "thoughtsflow-webview-restart-"),
 );
 const crashCapturePath = join(
   appDataDir,

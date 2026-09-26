@@ -1,171 +1,142 @@
-# ThoughsFlow
+# ThoughtsFlow
 
-ThoughsFlow 是一个本地优先的 AI 推演与技术决策桌面工作区。它把对话保存为由精确回答版本连接的路线：重试会新增 `ModelRun`，分支会绑定选定回答的 `parent_run_id`，实际发出的 Context 会作为不可变 Receipt 保留，最后可以比较路线、标记判断并导出 Markdown Decision Packet。
+**把 AI 对话变成可以分支、检查和比较的推演过程。**
 
-当前生产入口使用 Tauri 2、React/TypeScript、Rust/Tokio 与 SQLite。`src/prototype/` 及 `output/prototype-screenshots/` 仅保留为设计证据，不在正式运行路径中。
+ThoughtsFlow 是一个本地优先的桌面工作区。你可以从某一次具体回答继续探索，比较不同路线，检查每次请求发送了哪些上下文，再把结论导出为决策文档。需要执行代码任务时，可连接本机 Orca 与 OMP，拆分任务并查看多个 Agent 的进展。
 
-## 已实现的核心闭环
+[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.1) · [模型连接](docs/MODEL_CONNECTIONS.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
 
-- 创建、打开、重命名和归档本地工作区；
-- 工作区目标与模型 `system prompt` 分开保存；未设置目标时的界面提示不会进入模型 Context；
-- Generic OpenAI-compatible Chat Completions（SSE）、Ollama `/api/chat`（NDJSON）、Anthropic Messages（SSE）与 Google Gemini `streamGenerateContent`（SSE）真实流式请求；
-- Provider 模型发现：OpenAI-compatible 与支持目录的厂商使用模型列表 API，Ollama 使用 `/api/tags`，Google 使用 `/v1beta/models`，Anthropic 使用有界分页 `/v1/models`；不支持目录的模板明确手填模型 ID；
-- 每个已保存 Provider Profile 可在本次应用会话中维护多个命名 API Key，并显式选择当前首选凭据；
-- 对结构化且可重试的配额/限流失败提供显式凭据切换与重试入口，失败或部分输出的旧 Run 保持不变；
-- 同一 Turn 多个不可覆盖的 Run、精确回答分支与兄弟分支 Context 隔离；
-- 以精确 `ModelRun` 为节点的持久化 Context Tree：活动 Run、可选分支指针和版本在重启后恢复，历史节点继续或重试会显式 fork；
-- 发送前 Context 检查、pin/exclude、超限阻断和 preview hash 复核；
-- pin/exclude 作为持久化的“下一次发送”草稿保存，切换 Context 时与活动游标用双 CAS 原子重基，发送事务成功后才消费；
-- 用户确认来源范围与保留边界后，保存不可变 compaction/branch-summary checkpoint；失败、取消和版本冲突不会激活 checkpoint 或移动游标；
-- 发送后不可变 Context Snapshot/Receipt，包含有序内容、来源、Provider、Model、Base URL、参数与 canonical hash；
-- 取消、失败、批量 checkpoint，以及启动时把未终结 Run 恢复为 `interrupted` 并保留部分输出；
-- 真实会话树投影的轻量路线图、回答与 Context Diff、采纳/否决/待验证标记；
-- Markdown Decision Packet/ADR 导出。
+> 当前为 `v0.1.0-beta.1` 早期测试版。请先用于可恢复的测试工作；安装包、平台和已知限制以发布页为准。
 
-## 开发运行
+## 能做什么
 
-需要 Node.js 24、Rust stable，以及当前平台的 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)。Node 版本由 `.node-version` 和 package engines 对齐；桌面构建与测试通过无 shell 的 Node 启动器执行。
+- **从准确的回答分支。** 同一问题可以重试多次，每次结果分别保存；从指定回答继续，不会把兄弟分支混入上下文。
+- **看清模型收到的内容。** 发送前预览并选择保留或排除的内容；发送后保留不可变 Context Receipt，记录内容、来源、模型和请求设置。
+- **整理长对话。** 经你确认后创建摘要或压缩检查点，保留原始历史；不会静默截断上下文。
+- **比较与沉淀。** 查看路线图、回答及上下文差异，标记采纳、否决或待验证，导出 Markdown Decision Packet。
+- **连接不同模型。** 支持四类流式协议、模型目录发现和手动模型 ID；API Key 仅在应用会话中保存。
+- **协作执行任务。** 可选连接 Orca 的多 Agent 编排与 OMP 执行器，人工拆分任务、并行执行、回复协作问题和查看结果。
+
+## 安装与首次使用
+
+从 [Releases](https://github.com/CollaalloC/ThoughtsFlow/releases) 下载与你的操作系统和 CPU 架构匹配的安装包，并核对发布页提供的校验和。只有实际列出的文件才是该版本已发布的安装包；支持构建某个平台不等于已完成该平台的使用验证。
+
+| 安装包 | 使用方式 |
+| --- | --- |
+| macOS `.dmg` | 打开磁盘映像，将 ThoughtsFlow 拖入 Applications 后启动 |
+| Windows `.exe` | 运行安装向导，完成后从开始菜单启动 |
+| Linux `.deb` | 在兼容的 Debian/Ubuntu 系统上使用系统包管理器安装 |
+
+早期 macOS/Windows 包未经过正式分发签名，macOS 包也未公证，系统可能提示无法验证开发者。确认下载来源和校验和后，按系统提供的单应用确认流程处理；不要为安装本项目全局关闭系统安全保护。安装包范围、签名状态和构建方式见[发布说明](docs/RELEASING.md)。
+
+1. 启动 ThoughtsFlow，创建一个工作区，填写想探索的问题或目标。
+2. 打开 **Provider 设置**，选择模型供应商，检查 Base URL，输入本次会话的 API Key。使用本机 Ollama 时通常不需要密钥。
+3. 发现并选择模型，或手动输入模型 ID，保存配置。
+4. 发送问题；从某次回答创建分支，发送前检查 Context，完成后比较路线或导出结论。
+
+普通对话不需要安装 Orca 或 OMP。ThoughtsFlow 不附带模型，也不提供模型调用额度。
+
+## 模型连接
+
+| 连接方式 | 当前状态 |
+| --- | --- |
+| OpenAI / 通用 OpenAI-compatible、OpenRouter | Chat Completions 流式请求 |
+| Anthropic、Google Gemini、Ollama | 各自的原生流式协议 |
+| DeepSeek、xAI、Mistral、Groq、Together、Moonshot、SiliconFlow | 预置兼容端点，复用 Chat Completions 协议 |
+| Qwen 北京 / 新加坡、Z.AI | 预置兼容端点，当前手动填写模型 ID |
+| OMP Gateway | 可选连接，需另行配置 OMP Auth Broker 与网关 token |
+| Azure OpenAI | 仅有模板，当前不可运行 |
+
+共 **18 个模板**，其中包含地区变体与尚不可运行的 Azure 模板。模板并不代表每家供应商的所有模型、订阅、地区和参数都经过真实账号验证。OAuth、Bedrock、Vertex ADC 目前没有原生接入。
+
+OMP Gateway 不会自动继承本机 OMP 登录或 `models.yml`。通过网关请求时，Receipt 记录 ThoughtsFlow 发给网关的内容，不代表网关转换后发给最终供应商的请求。配置条件、默认端点和协议边界见[模型连接指南](docs/MODEL_CONNECTIONS.md)。
+
+## 可选：Orca + OMP Agent 协作
+
+先分别安装并配置 [Orca](https://github.com/stablyai/orca) 和 [oh-my-pi / OMP](https://github.com/can1357/oh-my-pi)，在 Orca 中登记代码项目，并为 OMP 配好模型与认证。
+
+在 ThoughtsFlow 的 **Agent 协作** 中连接本机 Orca，选择项目与协作目标，再为任务填写范围、约束和验收条件。任务由 Orca 在独立工作区中启动 OMP；你可以查看进度、读取输出并回复协作问题。
+
+- Agent 使用 OMP 自己的配置，不复用 ThoughtsFlow 的模型密钥，也不会自动附带普通对话历史。
+- 任务由人工拆分和审查；当前不会自动合并代码或把结果自动采纳到 Decision Packet。
+- 工具审批及停止正在运行的任务继续在 Orca/OMP 原生界面处理。
+- Git worktree 提供代码隔离，**不提供操作系统权限沙箱**。
+- 连接中断或操作结果不明时，不会自动重复派发任务。
+
+CLI 路径、运行时版本与恢复语义见 [Agent 架构](docs/AGENT_ARCHITECTURE.md)、[跨平台说明](docs/CROSS_PLATFORM.md)和[上游兼容跟踪](docs/upstream/README.md)。Orca 与 OMP 是分别安装的外部运行时，本项目安装包不捆绑它们。
+
+## 数据与隐私
+
+工作区、回答、设置和操作回执保存在本机 SQLite；导出文件也保存在本机。数据库及导出文件**没有透明加密**，请按需要使用操作系统磁盘加密和备份。
+
+API Key 在输入时短暂停留于界面状态，提交后仅存于当前 Rust 进程内存，不写入数据库、Receipt 或导出文件；退出应用后需要重新输入。多个命名凭据由用户显式切换，不会自动轮换。
+
+“本地优先”不表示模型请求始终留在本机。使用远程模型时，选定的上下文会发往配置的端点；发送前可以检查目标 Host 和内容。模型服务与外部 Agent 运行时各自适用其隐私、计费和权限规则。
+
+异常退出后，未结束的模型请求会标为 `interrupted`，保留已经写入的部分输出，不自动重试。安全边界和漏洞披露方式见 [SECURITY.md](SECURITY.md)。
+
+项目曾使用 ThoughsFlow 拼写。为继续读取早期版本的本地数据，应用标识 `io.thoughsflow.desktop`、数据库名 `thoughsflow.sqlite3` 和既有 `THOUGHSFLOW_*` 环境变量保持兼容；此次名称修正不迁移数据库。
+
+## 从源码运行
+
+需要 **Node.js 24**、**Rust 1.97.1** 和当前系统的 [Tauri 2 前置依赖](https://v2.tauri.app/start/prerequisites/)。Rust 版本由 `rust-toolchain.toml` 固定。Windows 需要相应的 C++ 构建工具与 WebView2，Linux 需要 WebKitGTK 等系统库，macOS 需要 Xcode Command Line Tools；详细安装步骤以 Tauri 文档为准。
 
 ```bash
-npm install
+git clone https://github.com/CollaalloC/ThoughtsFlow.git
+cd ThoughtsFlow
+npm ci
 npm run tauri:dev
 ```
 
-正式前端通过 Tauri IPC 工作；单独运行 `npm run dev` 只能加载界面资源，不能替代 Rust Core。构建当前平台安装包：
+构建当前系统的安装包：
 
 ```bash
 npm run tauri -- build
 ```
 
-## Provider 配置
+安装包输出到 Cargo target 目录下的 `release/bundle/`，默认位于 `src-tauri/target/release/bundle/`。单独运行 `npm run dev` 只启动前端资源服务；完整应用需要 Tauri 的 Rust 后端。
 
-在“Provider 设置”中选择：
-
-- `OpenAI`、`OpenRouter` 或 `Generic OpenAI-compatible`：模板提供默认端点、Bearer 认证位置与 SSE 协议；
-- `Ollama`：模板默认 `http://127.0.0.1:11434`，本地端点使用原生 `/api/chat` NDJSON，不需要 API Key；改为远端或代理端点时可设置 Bearer 会话凭据，只有内存中存在非空凭据才会发送认证头；
-- `Anthropic`：使用 `/v1/messages`、`x-api-key` 与固定的 `anthropic-version: 2023-06-01`；未显式配置 `max_output_tokens` 时，Rust 会在 Context 预览与 Receipt hash 生成前冻结有效默认值 `4096`；
-- `Google Gemini`：使用 `/v1beta/models/{model}:streamGenerateContent?alt=sse` 与 `x-goog-api-key`，模型 ID 可来自发现结果或手动输入；
-- `Azure OpenAI`：模板仍只展示目标协议与认证要求，当前没有可运行的部署/版本化端点适配器。
-
-Rust Core 内置并唯一维护 18 个权威模板。除 OpenAI、Generic OpenAI-compatible、Ollama、Anthropic、Google、Azure OpenAI 和 OpenRouter 外，新增 OMP Gateway、DeepSeek、xAI、Mistral、Groq、Together、Moonshot、Qwen 北京/新加坡、Z.AI 和 SiliconFlow。前端不能改写其协议或认证位置；Azure 仍未开放运行。选择模板会填入默认 Base URL，用户仍可覆盖为代理或自托管端点。新的 Context Receipt 会锁定模板 ID/revision、实际协议、非敏感认证位置、静态头与最终生效参数；API Key 不进入 Receipt。历史 Receipt 不会用当前模板反向重算。连接条件与逐厂商依据见 [MODEL_CONNECTIONS.md](docs/MODEL_CONNECTIONS.md)。
-
-“发现模型”既可使用已保存 Profile，也可在保存前检查当前 draft。前者由 Rust 从 SQLite 与会话凭据存储解析权威目标；后者只把模板 ID、Base URL 和可选的本次会话凭据交给 Rust，由内置模板决定认证头、路径和响应格式。目录只向界面显示的 Host 发送模型元数据 GET，不携带工作区 Context。Anthropic 使用有总量、分页和超时限制的实时 `/v1/models` 查询。原始目录响应和发现结果不写入 SQLite；只有显式保存后模型 ID 才持久化。Qwen、Z.AI 当前手填模型 ID，目录发现及目录式连接测试保持关闭。大目录在前端最多渲染 100 个匹配项，可输入模型 ID 或名称查找其余候选。
-
-OMP Gateway 是独立模型连接方式，需要已有的 OMP Auth Broker 和网关 token，不会自动继承本机 OMP 登录或 `models.yml`。模型 ID 保留 `provider/model-id`；Receipt 只证明 ThoughsFlow 发给网关的内容，不冒充网关转换后的最终厂商 payload。Agent 任务仍由 Orca 管理，当前不提供上游尚未支持的 OMP worker 模型覆盖参数。
-
-已保存的 Provider Profile 可以维护多个带标签的会话 API Key。API Key 在提交前会短暂停留于 WebView 密码输入状态；交接后，Secret 只存在于当前 Rust 进程内存，WebView 只能读取凭据的标签、顺序和当前首选状态。退出应用会清除全部会话凭据；Secret 不写入 SQLite、前端持久状态、日志、Receipt 或导出文件。凭据顺序用于人工管理，不触发静默自动轮换：切换当前首选凭据和再次运行都必须由用户明确操作；存在备用项时也不能直接删除当前首选，必须先显式激活替代项。
-
-保存 Provider 时，名称、模型或参数等不改变端点身份的更新会保留现有会话凭据；Provider 身份或 Base URL 的变更只会在保存成功后清除旧凭据。保存失败不会预先清除或替换原有凭据。模型发现所需的 draft 凭据只通过一次命令进入 Rust；已保存 Profile 的发现则复用 Rust 内存中的当前首选凭据。
-
-远程端点必须使用 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。Base URL 不允许包含用户名或密码、query 或 fragment，Provider 请求也不会跟随 3xx 重定向。若 Provider 原样回显当前会话凭据，Rust 会在内容进入 `RunEvent`、错误、模型列表或 SQLite 前进行精确脱敏；该防线只匹配已知凭据原文，不能识别经过变形或编码的泄露。
-
-## 数据、隐私与恢复
-
-权威工作区数据位于 Tauri 的应用数据目录：
-
-```text
-<app_data_dir>/thoughsflow.sqlite3
-<app_data_dir>/exports/decision-packet-<uuid>.md
-```
-
-macOS 的默认位置通常是：
-
-```text
-~/Library/Application Support/io.thoughsflow.desktop/
-```
-
-“数据保存在本机”只描述 SQLite 和导出文件的位置。每轮发送前，Composer 与 Inspector 会另行显示本轮 Context 将发往的 Provider、Model 和 Host；调用远程 Provider 时，相应 Context 会离开本机。
-
-Context Tree 的原始历史路径始终可检查。人工 checkpoint 的摘要文本只在本机保存；选择 Provider 生成摘要时，压缩预览中列出的来源范围和摘要请求会发送到所选 Provider。应用不会静默摘要、自动压缩或在失败后自动重试。
-
-Run、Manifest 与 Snapshot 在 Provider I/O 前由同一数据库事务落盘。流式输出约每 400ms 或累计 4KB 做 checkpoint；应用启动时，数据库中的 `connecting` 或 `streaming` Run 会变为 `interrupted`，已有部分输出不会丢失。首版没有数据库透明加密，也不承诺删除后物理不可恢复。
-
-只有同时带有 `retryable: true` 且机器码精确为 `quota_exhausted` 或 `rate_limited` 的失败，界面才提供凭据恢复入口；不会根据错误文案、普通 5xx、断流或网络故障猜测并切换凭据。用户显式选择另一个命名凭据后，Rust 会在同一个 Provider Profile 串行命令中用该精确凭据创建新的 `ModelRun`；只有创建成功才把它设为当前首选，创建失败会保持原首选不变。重试继续使用失败 Run 绑定的精确 Provider Profile；原失败 Run、部分输出和 Context Receipt 保持不可变。不同 API Key 可能仍共享同一个 Project、Organization 或其他配额作用域，因此人工切换不保证恢复可用额度。
-
-Decision Packet 只能由 Rust 文件适配器在上述 `exports` 目录创建新文件；WebView 命令不接受目标路径，也不会覆盖已有文件。
-
-## Orca + OMP Agent 协作
-
-“Agent 协作”工作面把 ThoughsFlow 的目标工作台、Orca 的多 Agent 编排和 OMP 的任务执行连接起来。架构与分阶段实施说明见 [AGENT_ARCHITECTURE.md](docs/AGENT_ARCHITECTURE.md)。本机协议核查基线为 Orca 1.4.206、OMP 18.2.8。
-
-1. 安装 Orca 和 OMP，在 Orca 中登记代码项目，并配置好 OMP 的模型与认证。
-2. 打开一个 ThoughsFlow 工作区，进入“Agent 协作”，检测或启动本机 Orca。
-3. 选择代码项目，填写协作目标；每个目标拥有独立的 Orca Run 与专用协调者终端。
-4. 为每个可独立完成的任务填写标题、范围、约束与验收条件，点击“启动 OMP 任务”。任务在 Orca 新建的独立工作区中运行，可以并行执行；不会自动合并代码。
-5. 查看任务进展、读取输出、回复协调问题；任务结算后可以释放执行器，Orca 保留其输出存档。
-
-Agent 使用本机 OMP 设置，不复用 ThoughsFlow 的 Provider 会话凭据，也不自动附带对话历史。停止运行中任务和 OMP 工具审批继续在 Orca/OMP 的原生界面处理；ThoughsFlow 的问题回复只处理协作消息。独立 worktree 从 Orca 项目默认 base 创建，不包含当前未提交改动，也不是操作系统权限沙箱。
-
-关联和每次操作的回执保存在现有 SQLite。任务状态与执行器存活分别显示；命令接受不代表任务完成。连接中断或操作结果未知时，不会自动重发或启动替代执行器。重新连接只恢复原协作身份；未知派发仍需根据回执和 Orca 实际状态核查。当前版本提供人工任务拆分、并行执行和人工审查，自动依赖调度与结果采纳到 Decision Packet 属于后续阶段。
-
-CLI 不在默认路径时，可在启动应用的进程环境中设置绝对路径 `THOUGHSFLOW_ORCA_BIN`、`THOUGHSFLOW_OMP_BIN`。发现顺序为显式配置、PATH、平台候选目录；Windows 使用安装目录内 `resources/bin/orca.exe`，Linux 使用 `orca-ide`。不执行 `.cmd/.bat`；显式配置的 `.js/.mjs` 通过固定 Node 启动，可另设 `THOUGHSFLOW_NODE_BIN`。WebView 不提供任意命令执行入口。Agent 功能仅连接本机 Orca；缺少运行环境不会影响普通对话功能。
-
-三平台构建与 GUI fixture CI 已配置，当前 Windows/Linux 尚无实际 runner 通过记录。架构、验证分层及系统依赖见 [CROSS_PLATFORM.md](docs/CROSS_PLATFORM.md)；上游版本与能力跟踪见 [docs/upstream](docs/upstream/README.md)，性能证据见 [PERFORMANCE_20260926.md](docs/PERFORMANCE_20260926.md)。
-
-## 验证
+主要检查：
 
 ```bash
 npm run check
-npm run test:fixtures
-npm run test:e2e
-npm run test:native
-npm run test:webview
-npm run test:webview:agents
-
-cd src-tauri
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+npm run test:webview:typecheck
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features
 ```
 
-`npm run test:webview` 会构建独立标识符、独立数据目录且仅测试构建启用 WebDriver 的 macOS 应用，然后在真实 WKWebView 中执行冒烟和三进程重启旅程。旅程覆盖活动叶切换与重开、运行中断恢复、摘要失败/取消、checkpoint 提交后 IPC 响应前崩溃，以及同一 operation ID 的幂等重放。测试专用驱动、审计捕获和故障注入均受 `webview-e2e` feature 限制，不进入普通 production build。
+三平台 CI 与独立的原生 WebView fixture 测试已配置。真实模型测试必须显式启用，可能产生模型费用或运行外部 Agent；普通测试不需要模型密钥。测试分层和执行方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-`npm run test:webview:agents` 在真实 WKWebView 中走 Agent 表单、Tauri IPC、SQLite 和 CLI 子进程，使用隔离的模拟 Orca 可执行程序验证创建、派发、提问回复、输出、释放和页面重载恢复，不联系真实模型。它与本机 Orca 控制链路核查分别记录，不能作为真实 OMP 模型任务已完成的证据。
-
-真实 OMP 验证是独立的显式 opt-in：设置 `TF_AGENT_LIVE=1` 和从 `orca repo list --json` 取得的 `TF_AGENT_LIVE_REPO_ID` 后运行 `npm run test:webview:agents:live`。该测试会使用现有 OMP 模型配置，在 Orca 独立工作区创建一个带随机标记的验证文件，读取结果并释放已结算执行器；保留临时应用数据库与回执路径以便失败后核查，不会在普通测试中自动运行，也不会在超时后自动重派。
-
-本机 OpenAI-compatible 端点可以用固定、无项目数据的提示做显式 opt-in 探针：
-
-```bash
-npm run test:webview:live-proxy
-```
-
-该命令会真实联系配置在测试中的本机端点，必须由操作者明确运行；测试只发送代码中固定的 `TF_APP_OK` 提示，不发送仓库或工作区内容。
-
-`npm run test:e2e` 保留 Playwright 旅程发现；没有外部 Tauri URL 时会明确跳过，不作为原生通过证据。`npm run test:native` 则以 Tauri 内置 MockRuntime 走真实 IPC、AppState 与文件 SQLite，适合确定性检查，但同样不替代上面的真实 WKWebView 旅程。固定 1,000 Turn 的路线图、1,000 Run Context Tree 组件基准，以及后端 1,000 Turn/2,000 Run 和深度 1,000 重建基准分别位于 `tests/performance/` 与 `src-tauri/tests/native_context_tree.rs`。最新实测与平台边界记录在 `CORE_QA_RESULTS.md`。
-
-## 架构边界
+## 架构与边界
 
 ```text
-React UI
-  -> versioned DesktopBridge
-  -> Tauri commands / Channel
-  -> Rust Application Service
-  -> Domain + Ports
-  -> SQLite / Provider / filesystem adapters
+React / TypeScript UI
+        │ typed DesktopBridge
+        ▼
+Tauri commands → Rust application services → domain + ports
+        ├─ SQLite：工作区、精确回答树与不可变回执
+        ├─ Provider adapters：模型请求与目录
+        ├─ Filesystem adapter：决策文档导出
+        └─ Orca adapter → 本机 Orca → OMP workers
 ```
 
-组件不直接调用 SQL、Provider、API Key 或任意文件系统；所有 IPC 通过 `src/platform/desktop-bridge.ts`。唯一业务拓扑是 `Turn.parent_run_id`；持久 `ContextCursor` 只选择其中一条精确 root→Run 路径，路线图位置只属于 `ViewState`，不能改变 Context 编译结果。旧 Receipt 从不按当前树或当前 Provider 设置重算。
+模型对话与 Agent 任务使用独立的状态、凭据和执行边界。界面不直接访问数据库或执行任意 shell 命令；旧回执不会按当前配置重新计算。
 
-应用服务只依赖 `RepositoryPort`、运行热路径专用的 `RunPersistencePort`、`ProviderGateway`、`ProviderConnectionTester`、只读 `ProviderModelCatalog` 与 `DecisionPacketWriter`；SQLite、Reqwest 和本地文件系统实现由 Tauri 组合根注入。Tauri 结构化命令错误在 DesktopBridge 统一转换为 `DesktopBridgeError`，保留 `code`、`retryable` 和 `details`。
+当前还没有云同步、多人协作、附件/RAG、完整全文搜索、可恢复的工作区导入包、自动任务依赖调度或 OS 密钥库。普通对话为文本模型请求，Agent 工具能力来自另行安装的 Orca/OMP。
 
-Context Tree 的设计参考固定在 oh-my-pi commit [`d16c6168`](https://github.com/can1357/oh-my-pi/commit/d16c6168c86f40fc44f25118c2fd06fe160fcb93)：复用活动叶/树投影与非破坏式压缩重建的设计思想，没有复制其实质代码，也没有移植通用 SessionEntry 日志、自动压缩、workspace 克隆或 Snapcompact。
+进一步阅读：[产品构想](PRODUCT_BLUEPRINT.md) · [构想与实现对照](docs/VISION_ALIGNMENT.md) · [架构路线](docs/PLATFORM_MODEL_ROADMAP.md) · [最近的性能测量](docs/PERFORMANCE_REFRESH_STORAGE_20260926.md) · [变更记录](CHANGELOG.md)
 
-## 当前限制
+## 致谢与许可证
 
-- 当前运行 dialect 为 OpenAI-compatible Chat Completions、Ollama native、Anthropic Messages 与 Google Gemini `streamGenerateContent`；Azure OpenAI 尚不可运行；
-- Google 的 `thoughtSignature` 会被识别为不透明协议元数据且不会误显示为 reasoning，但当前不持久化或回送；纯文本多轮通常仍可调用，复杂推理质量可能受影响，工具调用所要求的签名连续性也不在本轮范围内；
-- 没有登录、云同步、多人协作、移动端、RAG、附件或完整知识库；Agent、工具和 MCP 执行由本机 Orca/OMP 提供，普通对话仍为纯文本模型请求；
-- Context token 数为保守估算，不是 Provider tokenizer 的精确计数；超限会阻止发送，不做静默截断或摘要；
-- Context pin/exclude 是持久化的“下一次发送”草稿；成功发送后消费，失败不消费，切换路径时原子清空并重基；已锁定 Receipt 永远不变；
-- 会话凭据当前没有 OS Credential Store、OAuth 或远程 Secret broker；退出应用后必须重新提供；
-- 命名凭据只支持人工激活与显式重试，不做静默自动轮换；共享 Project/Organization 配额时，更换 Key 可能无效；
-- 当前只在本仓库的 macOS 环境做原生构建/冒烟，不声称 Windows 或 Linux 已实机验证。
+ThoughtsFlow 的设计深入学习了 **[oh-my-pi](https://github.com/can1357/oh-my-pi)** 的 Agent 执行、模型接入、会话树与上下文管理，以及 **[Orca](https://github.com/stablyai/orca)** 的多 Agent 编排和工作区协作方式。感谢这些项目及其贡献者公开设计与实现。
 
-产品定位、架构证据和原型结论分别见 [PRODUCT_BLUEPRINT.md](./PRODUCT_BLUEPRINT.md)、[产品市场定位与切入策略调研.md](./产品市场定位与切入策略调研.md)、[跨平台技术路线与产品技术架构调研.md](./跨平台技术路线与产品技术架构调研.md) 与 [AI分支对话产品需求与架构调研报告.md](./AI分支对话产品需求与架构调研报告.md)。
+ThoughtsFlow 是独立项目，与上述项目没有官方隶属或背书关系。代码许可见 [LICENSE](LICENSE)；上游许可证、参考来源和第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。外部 Orca、OMP 运行时仍分别遵循各自的许可证与使用条款。
 
-当前实现与最初构想的逐项对应见 [VISION_ALIGNMENT.md](docs/VISION_ALIGNMENT.md)。工作区异步归属、Agent 回执原子提交与后续证据闭环的设计见 [ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md)。核心推演流程已具备生产实现，但完整全文搜索、可恢复工作区数据包、Agent 结果进入决策和真实用户验证仍是明确的待完成项。
+## English overview
 
-## 项目级 MCP 配置
+ThoughtsFlow is a local-first desktop workspace for branching AI conversations and technical decisions. Branch from an exact model response, inspect the context sent to a model, compare alternatives, and export a Markdown decision packet. An optional integration connects separately installed Orca orchestration with OMP agent execution.
 
-`.codex/config.toml` 中的 TikHub MCP 仅作用于本仓库。启动 Codex 前通过本地环境或密钥管理器提供 `TIKHUB_API_KEY`，不要把 token 写入 Git。修改 MCP 配置后需要重启 Codex 并新建任务，配置才会重新加载。
+Built with Tauri 2, React, TypeScript, Rust and SQLite. It supports four streaming model protocols and 18 provider templates, including regional presets and an Azure template that is not yet runnable. API keys are session-only; local databases are not encrypted. Remote model calls send the selected context to your configured endpoint.
+
+This is an early beta. Download available platform packages from [Releases](https://github.com/CollaalloC/ThoughtsFlow/releases), or build with Node.js 24, Rust 1.97.1 (pinned in `rust-toolchain.toml`) and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/): `npm ci`, then `npm run tauri:dev`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and tests, and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for upstream attribution.

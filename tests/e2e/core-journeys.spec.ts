@@ -14,7 +14,7 @@ function uniqueName(testInfo: TestInfo, label: string) {
   return `${label}-${testInfo.project.name}-${stamp}`;
 }
 
-test.describe("ThoughsFlow Context Tree core journeys", () => {
+test.describe("ThoughtsFlow Context Tree core journeys", () => {
   test.skip(
     !nativeHarnessEnabled,
     "Requires THOUGHSFLOW_E2E_NATIVE=1 and THOUGHSFLOW_E2E_BASE_URL for a Tauri WebDriver harness.",

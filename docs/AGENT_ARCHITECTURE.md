@@ -1,10 +1,10 @@
-# ThoughsFlow × Orca × OMP 架构与实施
+# ThoughtsFlow × Orca × OMP 架构与实施
 
-本方案依据 `ask-matt` 路由的设计原则：先澄清关键产品选择，建立领域词汇，以少量接口承载复杂行为，再按可独立验证的纵向功能实施。用户已确认接入当前 ThoughsFlow，并允许依赖 Orca 运行时。采用的取舍见 [ADR 0001](adr/0001-orca-runtime-omp-workers.md)。
+本方案依据 `ask-matt` 路由的设计原则：先澄清关键产品选择，建立领域词汇，以少量接口承载复杂行为，再按可独立验证的纵向功能实施。用户已确认接入当前 ThoughtsFlow，并允许依赖 Orca 运行时。采用的取舍见 [ADR 0001](adr/0001-orca-runtime-omp-workers.md)。
 
 ## 产品闭环
 
-用户在 ThoughsFlow 选择已经登记到 Orca 的本地项目，创建协作目标，将目标拆成有明确范围和验收条件的任务。多个 OMP 执行器分别在独立工作区执行；用户在同一面板查看任务结果、运行状态和输出，回复执行器提问，并释放已结束的执行器。代码是否合并仍由用户决定。
+用户在 ThoughtsFlow 选择已经登记到 Orca 的本地项目，创建协作目标，将目标拆成有明确范围和验收条件的任务。多个 OMP 执行器分别在独立工作区执行；用户在同一面板查看任务结果、运行状态和输出，回复执行器提问，并释放已结束的执行器。代码是否合并仍由用户决定。
 
 初版采用人工拆分任务。它先解决真实的任务执行闭环；自然语言自动拆解、依赖调度和自动评审属于后续纵向功能，不以额外模型调用掩盖底层连接问题。
 
@@ -12,7 +12,7 @@
 
 ```mermaid
 flowchart TD
-    UI[ThoughsFlow Agent 工作面] --> IPC[DesktopBridge / Tauri IPC]
+    UI[ThoughtsFlow Agent 工作面] --> IPC[DesktopBridge / Tauri IPC]
     IPC --> Service[Agent 协作模块]
     Service --> Store[(现有 SQLite：关联与操作回执)]
     Service --> Adapter[Orca CLI Adapter]
@@ -27,7 +27,7 @@ flowchart TD
 
 | 模块 | 权威数据与行为 | 对外承诺 |
 | --- | --- | --- |
-| ThoughsFlow 对话与决策 | Turn、Model Run、Context Receipt、Decision Mark | 继续保持精确回答版本和不可变 Receipt |
+| ThoughtsFlow 对话与决策 | Turn、Model Run、Context Receipt、Decision Mark | 继续保持精确回答版本和不可变 Receipt |
 | Agent 协作模块 | Mission 关联、用户发起的操作及其回执 | 不重复启动未知结果的操作，不把外部进程状态当作任务结果 |
 | Orca Runtime | Run、Task、Dispatch、执行器、工作区、消息 | 使用真实生命周期与身份信息 |
 | OMP | Agent 循环、模型设置、工具、会话、内部子代理 | 由 Orca 以原生 `omp` Agent 启动 |
@@ -42,7 +42,7 @@ Rust 的 Orca Adapter 负责固定可执行程序的发现、独立 argv、JSON 
 
 ## 数据与状态
 
-- **Mission** 对应一个 ThoughsFlow 工作区中的协作目标，绑定一个 Orca Run 和专用协调者。选择的代码项目与 ThoughsFlow 对话工作区是不同概念。
+- **Mission** 对应一个 ThoughtsFlow 工作区中的协作目标，绑定一个 Orca Run 和专用协调者。选择的代码项目与 ThoughtsFlow 对话工作区是不同概念。
 - **Task** 是可验收工作；**Dispatch** 是该任务的一次执行尝试。重试不覆盖旧执行结果。
 - **Operation** 是用户的一次控制请求。先保存请求 ID，再进行外部调用，最后保存回执。状态为 pending、succeeded、failed 或 unknown。
 - **任务结果** 与 **执行器存活** 分开显示。任务完成后执行器可能仍然存活；执行器退出不能证明任务成功。
@@ -93,4 +93,4 @@ Orca 1.4.206 的 worker-start 支持 `--agent omp`，但其 `--model` 参数支�
 
 同日后续用户授权的真实 OMP 短任务已经完成文件生成、独立校验、结果回传和释放，见 [LIVE_AGENT_QA_RESULTS.md](LIVE_AGENT_QA_RESULTS.md)。它不代表真实多 Agent 并发或全部模型配置均已验证。
 
-OMP 的底层能力另参考 [v18.2.8 RPC 文档](https://github.com/can1357/oh-my-pi/blob/v18.2.8/docs/rpc.md)。本方案让 Orca 拥有 OMP 连接，不在 ThoughsFlow 同时启动第二条 RPC 控制链。
+OMP 的底层能力另参考 [v18.2.8 RPC 文档](https://github.com/can1357/oh-my-pi/blob/v18.2.8/docs/rpc.md)。本方案让 Orca 拥有 OMP 连接，不在 ThoughtsFlow 同时启动第二条 RPC 控制链。

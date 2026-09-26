@@ -32,7 +32,7 @@ type ReplayResult = {
   error?: string;
 };
 
-describe("ThoughsFlow real process restart journey — session 3", () => {
+describe("ThoughtsFlow real process restart journey — session 3", () => {
   it("replays the exact committed operation without a second Provider call", async () => {
 
     const journeyId = requiredEnvironment("TF_WEBVIEW_JOURNEY_ID");

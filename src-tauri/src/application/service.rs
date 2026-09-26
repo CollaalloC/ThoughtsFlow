@@ -36,6 +36,7 @@ const DEFAULT_PROVIDER_ID: &str = "provider-local-ollama";
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a careful technical reasoning partner. Make assumptions explicit and preserve competing options.";
 const DEFAULT_MAX_CONTEXT_CHARS: usize = 100_000;
 const DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS: u32 = 4_096;
+// Persisted in existing profiles; keep this key stable across the product rename.
 const INTERNAL_DEFAULT_KEY: &str = "_thoughsflowIsDefault";
 
 pub struct DefaultApplicationBackend {
@@ -6323,6 +6324,46 @@ mod tests {
                 .code,
             "invalid_provider_parameters"
         );
+    }
+
+    #[test]
+    fn legacy_default_provider_profile_remains_usable_after_product_rename() {
+        let profile = ProviderProfile {
+            id: "profile-before-rename".into(),
+            provider_id: "openai".into(),
+            name: "Existing OpenAI".into(),
+            dialect: domain::ProviderDialect::OpenAiCompatible,
+            base_url: "https://api.openai.com/v1".into(),
+            model: "model-1".into(),
+            parameters: BTreeMap::from([
+                ("_thoughsflowIsDefault".into(), "true".into()),
+                ("temperature".into(), "0.25".into()),
+            ]),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let view = provider_profile_view(profile.clone()).unwrap();
+        assert!(view.is_default);
+        assert_eq!(
+            view.parameters,
+            Some(BTreeMap::from([("temperature".into(), json!(0.25))]))
+        );
+
+        let receipt = domain_provider_snapshot(&profile).unwrap();
+        assert_eq!(
+            receipt.parameters,
+            BTreeMap::from([("temperature".into(), "0.25".into())])
+        );
+        let request = canonical_provider_request(
+            "run-after-rename".into(),
+            profile.model.clone(),
+            vec![CanonicalMessage {
+                role: ProviderMessageRole::User,
+                content: "question".into(),
+            }],
+            &effective_provider_parameters(&profile).unwrap(),
+        );
+        assert_eq!(request.temperature, Some(0.25_f32));
     }
 
     #[test]

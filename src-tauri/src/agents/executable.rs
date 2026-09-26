@@ -254,7 +254,7 @@ mod tests {
     use super::*;
 
     fn paths(platform: Platform) -> SearchPaths {
-        let root = std::env::temp_dir().join("ThoughsFlow 平台 fixtures");
+        let root = std::env::temp_dir().join("ThoughtsFlow 平台 fixtures");
         SearchPaths {
             platform,
             path: vec![root.join("first"), root.join("second")],

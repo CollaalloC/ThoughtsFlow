@@ -21,7 +21,7 @@ test("build plans preserve paths and arguments on all supported desktop systems"
     assert.equal(env.CARGO_TARGET_DIR, "stale", "planning must not mutate parent environment");
     assert.deepEqual(plan.args.slice(1), ["build", "--debug", "--no-bundle", "--features", "webview-e2e", "--config", "src-tauri/tauri.webview.conf.json"]);
     assert.ok(plan.args[0].endsWith(platform === "win32" ? "@tauri-apps\\cli\\tauri.js" : "@tauri-apps/cli/tauri.js"));
-    assert.equal(desktopBinaryPath(root, platform), joinFor(platform, plan.options.env.CARGO_TARGET_DIR, "debug", platform === "win32" ? "thoughsflow.exe" : "thoughsflow"));
+    assert.equal(desktopBinaryPath(root, platform), joinFor(platform, plan.options.env.CARGO_TARGET_DIR, "debug", platform === "win32" ? "thoughtsflow.exe" : "thoughtsflow"));
     const literal = "path with spaces; $(echo no-shell) & more";
     const wdio = planDesktopCommand("wdio", { platform, root, args: ["run", literal] });
     assert.equal(wdio.args.at(-1), literal);
@@ -46,7 +46,7 @@ test("unknown OS and command fail before spawning; live agent requires both opt-
 });
 
 test("execution keeps nonzero exit status and never evaluates shell syntax", () => {
-  const root = mkdtempSync(join(tmpdir(), "thoughsflow runner space "));
+  const root = mkdtempSync(join(tmpdir(), "thoughtsflow runner space "));
   try {
     const script = join(root, "child with spaces.mjs");
     const literal = "$(echo must-remain-literal); &";

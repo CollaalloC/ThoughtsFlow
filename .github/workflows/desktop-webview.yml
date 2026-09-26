@@ -31,7 +31,7 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
-          toolchain: stable
+          toolchain: 1.97.1
       - name: Install Linux desktop and virtual display dependencies
         if: runner.os == 'Linux'
         run: |

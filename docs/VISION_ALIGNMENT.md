@@ -4,7 +4,7 @@
 
 ## 判断
 
-ThoughsFlow 已实现原始构想最重要的工程内核：从准确回答版本分支、隔离各路线的上下文、检查实际发送内容、保存不可变凭证，以及本地持久化和故障恢复。后续定位提出的“比较路线 → 记录采纳或否决理由 → 导出 Decision Packet”也已有生产实现。
+ThoughtsFlow 已实现原始构想最重要的工程内核：从准确回答版本分支、隔离各路线的上下文、检查实际发送内容、保存不可变凭证，以及本地持久化和故障恢复。后续定位提出的“比较路线 → 记录采纳或否决理由 → 导出 Decision Packet”也已有生产实现。
 
 但原始 P0 仍有未完成项，尤其是完整全文搜索、可恢复的数据导出与备份恢复。新增 Agent 工作面能够承载执行控制，却尚未与路线依据和决策证据连通。因此当前版本可视为具备核心能力的可用实现，不能认定全部产品构想已经达成。
 
@@ -22,7 +22,7 @@ ThoughsFlow 已实现原始构想最重要的工程内核：从准确回答版�
 | 层次与原始目标 | 当前生产实现 | 未完成或尚未验证的部分 | 可查证据（仓库相对路径与行号） |
 | --- | --- | --- | --- |
 | 原始 P0：从精确回答分支，旁支不污染当前输入 | `Turn.parent_run_id` 绑定准确 Model Run；Context Tree 保存活动 cursor、branch pointer 和草稿；领域性质测试检查兄弟分支隔离 | 已完成回答可以分支；原规划中“停止后显式接受部分回答再分支”的入口尚未提供。真实用户能否理解回答版本和分支的区别，仍需可用性验证 | 需求报告第 352–356、402–406 行；`src-tauri/src/domain/tests.rs:1240` 的 `branch_cannot_target_an_unfinished_run`、`:1278` 的 `property_wide_branches_never_leak_sibling_context`；`CORE_QA_RESULTS.md:63` |
-| 原始 P0：可检查、可调整、可审计的 Context | Inspector、固定和排除、typed source / hash、运行快照与 checkpoint 来源均已有实现和测试 | ThoughsFlow 的发送凭证不覆盖 OMP 内部模型和工具调用；不能扩大对可见性的承诺 | 需求报告第 360–364 行；`CORE_QA_RESULTS.md:66`、`:70`、`:75`；`docs/AGENT_ARCHITECTURE.md:64` |
+| 原始 P0：可检查、可调整、可审计的 Context | Inspector、固定和排除、typed source / hash、运行快照与 checkpoint 来源均已有实现和测试 | ThoughtsFlow 的发送凭证不覆盖 OMP 内部模型和工具调用；不能扩大对可见性的承诺 | 需求报告第 360–364 行；`CORE_QA_RESULTS.md:66`、`:70`、`:75`；`docs/AGENT_ARCHITECTURE.md:64` |
 | 原始 P0：本地持久化、流式失败恢复和模型连接 | SQLite 自动保存、启动时恢复中断运行；历史 QA 包含真实 macOS WebView 跨进程恢复与本机代理模型探针 | 没有 Windows / Linux 实机验证；其它真实云模型未验；数据库持久化不能替代用户可操作的备份恢复 | `src-tauri/src/application/service.rs:80` 的 `initialize`；`CORE_QA_RESULTS.md:28`、`:43`、`:84` |
 | 原始 P0：工作区管理、导航和搜索 | 创建、重命名、归档；路线图和 Context Tree 导航；Context Tree 可按当前投影字段筛选 | Focus 的“搜索工作区”按钮没有事件处理；树筛选只检查回答预览，未提供 Prompt / 回答全文的跨工作区搜索；路线图未保存视口 | 需求报告第 342–347、375–378 行；`src/features/conversation/FocusWorkspace.tsx:1466`、`:1414`；`src/features/context-tree/ContextTree.tsx:112` 的 `visibleNodes`；`src/features/route-map/RouteMap.tsx:298` 的 `ReactFlow` |
 | 原始 P0：开放导出、手动备份与恢复 | 已有 Decision Packet Markdown 导出 | Decision Packet 不包含完整工作区可恢复状态；生产 IPC 未提供完整工作区 JSON 导出、导入或备份恢复；未见完整删除 / 归档恢复入口 | 需求报告第 373–379 行；`src/platform/desktop-bridge.ts:64` 的 `DesktopBridge` 工作区接口、`:120` 的 `exportDecisionPacket`；`src-tauri/src/application/service.rs:4462` 的 `export_decision_packet_impl` |
@@ -53,4 +53,4 @@ ThoughsFlow 已实现原始构想最重要的工程内核：从准确回答版�
 | 3 | Agent 依据与结果证据进入决策闭环 | 能说明“依据什么执行、实际观察到什么、为什么采纳”，减少手工复制与出处丢失 | 从准确 Model Run 显式选择任务依据；冻结授权传出的内容及 hash；按 Mission / Task / Dispatch 捕获结果内容与时间；用户作采纳 / 否决 / 待验证判断后，Decision Packet 保留来源。CLI 成功、worker 退出和任务完成保持不同语义 |
 | 4 | 真实用户验证与一次真实 OMP 任务的完整旅程 | 确定哪些能力值得继续投入，验证接入真实环境后的可用性 | 工程验收单独记录真实 OMP 的派发、结果、证据捕获和恢复；用户研究按自己的项目观察分支回访、24 小时后定位、30+ 节点误入率和第二个任务主动复用。付费意向与实际付款分别记录 |
 
-其中第 3 项是下一步最关键的产品架构优化。应保留 `ModelRun`、Orca `Run`、`Dispatch`、控制 `Operation` 和结果证据各自的身份，不把所有状态塞进同一个 Run，也不为 OMP 输出伪造 ThoughsFlow 的 Provider Receipt。它可以沿用现有 Orca 运行时和操作回执模块逐步实现，无需先重写执行平台。
+其中第 3 项是下一步最关键的产品架构优化。应保留 `ModelRun`、Orca `Run`、`Dispatch`、控制 `Operation` 和结果证据各自的身份，不把所有状态塞进同一个 Run，也不为 OMP 输出伪造 ThoughtsFlow 的 Provider Receipt。它可以沿用现有 Orca 运行时和操作回执模块逐步实现，无需先重写执行平台。

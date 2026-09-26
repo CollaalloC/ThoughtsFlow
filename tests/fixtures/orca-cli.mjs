@@ -11,7 +11,7 @@ const runtimeId = "fixture-runtime";
 const version = "1.4.206-fixture";
 const repoPath = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workspaceId = `fixture-repo::${repoPath}`;
-const fixtureMarker = "ThoughsFlow Orca CLI fixture";
+const fixtureMarker = "ThoughtsFlow Orca CLI fixture";
 const outputText = "OMP fixture output; no model was called";
 const flag = (name) => {
   const index = argv.indexOf(`--${name}`);
@@ -103,7 +103,7 @@ try {
           result = { target: { kind: "local" }, app: { running: true, pid: 12345 }, runtime: { state: "ready", reachable: true, runtimeId, appVersion: version, capabilities: ["orchestration.contract.v1"] }, graph: { state: "ready" } };
           break;
         case "repo list":
-          result = { repos: [{ id: "fixture-repo", name: "ThoughsFlow", path: repoPath, kind: "git", baseRef: "main", defaultBranch: "main" }] };
+          result = { repos: [{ id: "fixture-repo", name: "ThoughtsFlow", path: repoPath, kind: "git", baseRef: "main", defaultBranch: "main" }] };
           break;
         case "terminal create": {
           const row = { handle: nextId("term"), tabId: nextId("tab"), leafId: nextId("leaf"), ptyId: nextId("pty"), worktreeId: workspaceId, worktreePath: repoPath, title: flag("title") ?? "Fixture coordinator", connected: true, writable: true, surface: "terminal" };

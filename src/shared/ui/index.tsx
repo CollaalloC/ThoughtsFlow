@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <span className="tf-brand" aria-label="ThoughsFlow">
+    <span className="tf-brand" aria-label="ThoughtsFlow">
       <span className="tf-brand__mark" aria-hidden="true">
         <i />
         <i />

@@ -1,4 +1,4 @@
-# ThoughsFlow Core QA Results
+# ThoughtsFlow Core QA Results
 
 验证日期：2026-07-29（Asia/Shanghai）
 
@@ -77,8 +77,8 @@ Reply with exactly TF_APP_OK and nothing else.
 
 ## Release 产物
 
-- `src-tauri/target/release/bundle/macos/ThoughsFlow.app`
-- `src-tauri/target/release/bundle/dmg/ThoughsFlow_0.1.0_aarch64.dmg`
+- `src-tauri/target/release/bundle/macos/ThoughtsFlow.app`
+- `src-tauri/target/release/bundle/dmg/ThoughtsFlow_0.1.0_aarch64.dmg`
 - DMG SHA-256：`eafca5358f5722c0abd8787451beb5ef2f0ae139a18e46266f611018d7c4310c`
 
 ## 边界

@@ -8,8 +8,12 @@ dist/
 .omp/
 .codegraph/
 .serena/
+.codex/
 src-tauri/target/
 src-tauri/gen/schemas/
 coverage/
 playwright-report/
 test-results/
+release-assets/
+platform-assets/
+platform-artifacts/

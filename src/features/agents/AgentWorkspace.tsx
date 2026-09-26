@@ -360,7 +360,7 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
         {titleError ? <p id="agent-title-error" className="agent-workspace__error" role="alert">{titleError}</p> : null}
         <label>任务说明<textarea aria-label="任务说明" aria-invalid={!!specError} aria-describedby={specError ? "agent-spec-error" : undefined} required rows={4} value={spec} onChange={(event) => setSpec(event.target.value)} placeholder="这个 Agent 应修改哪些内容、需要遵守什么约束、如何验证完成" disabled={busy} /></label>
         {specError ? <p id="agent-spec-error" className="agent-workspace__error" role="alert">{specError}</p> : null}
-        <p>启动后，OMP 可在独立 worktree 中读写文件；不会自动合并，也不会使用 ThoughsFlow 的 Provider 凭据。</p>
+        <p>启动后，OMP 可在独立 worktree 中读写文件；不会自动合并，也不会使用 ThoughtsFlow 的 Provider 凭据。</p>
         <button className="agent-workspace__primary" disabled={!canMutate || snapshot?.canStartTasks === false || uncertainStart || !title.trim() || !spec.trim() || !!titleError || !!specError} type="submit">{busy ? "正在提交…" : "启动 OMP 任务"}</button>
       </form>
       <section className="agent-workspace__tasks" aria-label="协作任务">

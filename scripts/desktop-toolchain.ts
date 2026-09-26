@@ -21,7 +21,7 @@ function desktopPaths(platform: NodeJS.Platform) {
 export function desktopBinaryPath(root = projectRoot, platform = process.platform) {
   return desktopPaths(platform).join(
     root, "src-tauri", "target", "webview-e2e", "debug",
-    platform === "win32" ? "thoughsflow.exe" : "thoughsflow",
+    platform === "win32" ? "thoughtsflow.exe" : "thoughtsflow",
   );
 }
 

@@ -2,19 +2,19 @@
 
 更新时间：2026-09-26。
 
-ThoughsFlow 的目标平台是 Windows、Linux 和 macOS。当前已准备三平台编译、单元测试和桌面 WebView 测试配置；Windows/Linux 的真实运行结论必须等待对应系统的 CI 与运行验证。当前仓库未配置 Git remote，本次没有推送或远端 CI 运行记录。
+ThoughtsFlow 的目标平台是 Windows、Linux 和 macOS。当前已准备三平台编译、单元测试和桌面 WebView 测试配置；Windows/Linux 的真实运行结论必须等待对应系统的 CI 与运行验证。当前仓库未配置 Git remote，本次没有推送或远端 CI 运行记录。
 
 ## 平台边界
 
 React 工作台、IPC 数据结构、Rust 业务服务和 SQLite 数据以共用代码实现。操作系统差异集中在 Tauri 系统依赖、原生程序定位和进程启动处。模型厂商由 Provider adapter 处理，不能把模型协议与操作系统绑定。
 
-ThoughsFlow 的核心推演功能通过自己的 Provider 运行。Agent 协作另依赖本机 Orca/OMP 的实际可用性与协议能力。三平台编译通过不等于 Orca/OMP 在三平台均已可用；运行时诊断必须报告缺失或不兼容，不能将编译目标当成运行能力。
+ThoughtsFlow 的核心推演功能通过自己的 Provider 运行。Agent 协作另依赖本机 Orca/OMP 的实际可用性与协议能力。三平台编译通过不等于 Orca/OMP 在三平台均已可用；运行时诊断必须报告缺失或不兼容，不能将编译目标当成运行能力。
 
 构建和 WebView 测试脚本统一使用 Node 24。`.node-version` 与 `package.json` 的 engines 共同限定该主版本，以直接运行仓库内的 TypeScript 测试入口。`scripts/desktop-toolchain.ts` 构造程序路径、独立 argv 和子进程环境，再由 Node 启动已安装包声明的 JS CLI 入口。它不调用 shell、不执行 `.bin/*.cmd`，路径含空格和参数中的 shell 字符保持原样。
 
 - Tauri 使用 `node_modules/@tauri-apps/cli/tauri.js`。
 - WDIO 使用 `node_modules/@wdio/cli/bin/wdio.js`。
-- Windows 测试应用使用 `thoughsflow.exe`，其他平台使用 `thoughsflow`。
+- Windows 测试应用使用 `thoughtsflow.exe`，其他平台使用 `thoughtsflow`。
 - WebView 构建以绝对 `CARGO_TARGET_DIR` 输出到 `src-tauri/target/webview-e2e`，运行配置与构建目录一致。
 - WebView 服务向应用传入可信的 `process.execPath` 作为 `THOUGHSFLOW_NODE_BIN`，避免图形界面启动时 PATH 缺少 Node。
 - `scripts/run-native-test.mjs` 保留原有 Cargo 查找顺序与测试行为。

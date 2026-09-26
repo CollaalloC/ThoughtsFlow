@@ -4,5 +4,5 @@
 )]
 
 fn main() {
-    thoughsflow_lib::run();
+    thoughtsflow_lib::run();
 }

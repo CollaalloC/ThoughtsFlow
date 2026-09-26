@@ -22,7 +22,7 @@ import {
   waitForBodyText,
 } from "./support";
 
-describe("ThoughsFlow real process restart journey — session 2", () => {
+describe("ThoughtsFlow real process restart journey — session 2", () => {
   it("recovers interrupted output, rejects unsafe maintenance, then crashes after commit", async () => {
 
     const journeyId = requiredEnvironment("TF_WEBVIEW_JOURNEY_ID");

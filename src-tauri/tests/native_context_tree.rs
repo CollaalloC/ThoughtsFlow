@@ -13,7 +13,7 @@ use tauri::{
     test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets},
     webview::InvokeRequest,
 };
-use thoughsflow_lib::{
+use thoughtsflow_lib::{
     application::{ApplicationBackend, DefaultApplicationBackend, GetContextTreeInput},
     builder_for_runtime,
     domain::{
@@ -134,7 +134,7 @@ fn run_bundle(
             id: block_id.clone(),
             role: "user".into(),
             content: prompt.into(),
-            content_hash: thoughsflow_lib::domain::sha256_hex(prompt.as_bytes()),
+            content_hash: thoughtsflow_lib::domain::sha256_hex(prompt.as_bytes()),
             created_at,
         }],
         manifest: ContextManifestRecord {
@@ -388,7 +388,7 @@ async fn native_ipc_context_tree_survives_reopen_checkpoint_and_restart_recovery
     reopened_repository
         .checkpoint_run(
             "run-restart",
-            &thoughsflow_lib::infrastructure::sqlite::RunCheckpoint {
+            &thoughtsflow_lib::infrastructure::sqlite::RunCheckpoint {
                 output_markdown: "崩溃前的部分输出".into(),
                 reasoning_markdown: String::new(),
                 usage_json: None,

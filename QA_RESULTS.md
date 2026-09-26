@@ -1,4 +1,4 @@
-# ThoughsFlow 原型验证记录
+# ThoughtsFlow 原型验证记录
 
 > 验证日期：2026-07-18
 > 验证对象：UI Prototype 0.1

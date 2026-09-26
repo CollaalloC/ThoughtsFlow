@@ -9,7 +9,7 @@ const appBinaryPath = desktopBinaryPath();
 const suppliedDataDir =
   process.env.THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR?.trim();
 const appDataDir =
-  suppliedDataDir || join(tmpdir(), `thoughsflow-webview-${process.pid}`);
+  suppliedDataDir || join(tmpdir(), `thoughtsflow-webview-${process.pid}`);
 
 export const config: WebdriverIO.Config = {
   runner: "local",

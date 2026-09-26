@@ -12,7 +12,7 @@ describe("Explicit opt-in: real Orca and OMP", () => {
     if (process.env.TF_AGENT_FIXTURE_STATE) throw new Error("A live test cannot use fixture state");
     const directory = process.env.TF_AGENT_LIVE_DIRECTORY;
     const marker = `TF_REAL_OMP_OK_${randomUUID()}`;
-    const objective = `ThoughsFlow live verification ${marker}`;
+    const objective = `ThoughtsFlow live verification ${marker}`;
     const title = "真实 OMP 文件验证";
     const evidence: Record<string, unknown> = { marker, objective, title, startedAt: new Date().toISOString(), status: "opening" };
     const save = () => writeFileSync(join(directory, "journey.json"), JSON.stringify(evidence, null, 2));
@@ -38,7 +38,7 @@ describe("Explicit opt-in: real Orca and OMP", () => {
       save();
       await (await controlByLabel("任务标题")).setValue(title);
       await (await controlByLabel("任务说明", "textarea")).setValue([
-        "Target: only .thoughsflow-smoke-proof.json in your assigned isolated worktree.",
+        "Target: only .thoughtsflow-smoke-proof.json in your assigned isolated worktree.",
         `Use a tool to create that UTF-8 JSON file with marker=${JSON.stringify(marker)}, sum=42, and cwd equal to the actual absolute working directory returned by a tool.`,
         "Then use Python's standard library to load the file and assert the marker, 17 + 25 == sum, and cwd.",
         "Do not read project source, install dependencies, edit any other file, commit, push, publish, or start subagents. Keep this test short.",

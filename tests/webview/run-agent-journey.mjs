@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { executeDesktopCommand, planDesktopCommand, projectRoot } from "../../scripts/desktop-toolchain.ts";
 
-const directory = mkdtempSync(join(tmpdir(), "thoughsflow-agent-journey-"));
+const directory = mkdtempSync(join(tmpdir(), "thoughtsflow-agent-journey-"));
 try {
   process.exitCode = executeDesktopCommand(planDesktopCommand("wdio", {
     args: ["run", "wdio.webview.conf.ts", "--spec", "tests/webview/agents.smoke.spec.ts"],

@@ -140,5 +140,5 @@ pub fn run() {
 fn run_builder(builder: tauri::Builder<tauri::Wry>) {
     builder
         .run(tauri::generate_context!())
-        .expect("failed to run ThoughsFlow desktop application");
+        .expect("failed to run ThoughtsFlow desktop application");
 }

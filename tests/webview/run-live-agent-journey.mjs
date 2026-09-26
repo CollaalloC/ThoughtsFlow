@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { executeDesktopCommand, planDesktopCommand, requireLiveAgentOptIn } from "../../scripts/desktop-toolchain.ts";
 
 requireLiveAgentOptIn();
-const directory = mkdtempSync(join(tmpdir(), "thoughsflow-real-agent-"));
+const directory = mkdtempSync(join(tmpdir(), "thoughtsflow-real-agent-"));
 const env = {
   ...process.env,
   THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR: join(directory, "app-data"),

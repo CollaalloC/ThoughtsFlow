@@ -105,7 +105,7 @@ async function selectOptionByText(
   );
 }
 
-describe("ThoughsFlow native desktop WebView", () => {
+describe("ThoughtsFlow native desktop WebView", () => {
   const provider = new ProviderFixture();
 
   before(async () => {

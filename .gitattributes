@@ -1,0 +1,5 @@
+# Lockfile hashes must match on every release runner.
+package-lock.json text eol=lf
+src-tauri/Cargo.lock text eol=lf
+# Preserve upstream license/source bytes, including original line endings and whitespace.
+licenses/** -text -whitespace

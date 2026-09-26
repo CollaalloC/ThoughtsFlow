@@ -16,7 +16,7 @@ const baseUrl = "http://localhost:8317/v1";
 const model = "gpt-5.6-sol";
 const prompt = "Reply with exactly TF_APP_OK and nothing else.";
 
-describe("ThoughsFlow opt-in live OpenAI-compatible proxy probe", () => {
+describe("ThoughtsFlow opt-in live OpenAI-compatible proxy probe", () => {
   it("records an exact Run and immutable Receipt through the native WKWebView", async () => {
     if (process.env.TF_WEBVIEW_LIVE_PROXY !== "1") {
       throw new Error(

@@ -520,7 +520,7 @@ export function FocusWorkspace({
         if (targetId) await openWorkspace(targetId, initial.runId);
       })
       .catch((reason: unknown) => {
-        if (active) reportError(reason, "无法初始化 ThoughsFlow。");
+        if (active) reportError(reason, "无法初始化 ThoughtsFlow。");
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };

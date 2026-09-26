@@ -22,7 +22,7 @@ const SECOND_OP: &str = "c6510d2d-61b1-4ced-aec9-c87715b19244";
 
 fn test_repository_path() -> String {
     std::env::temp_dir()
-        .join("thoughsflow-agent-test-repo")
+        .join("thoughtsflow-agent-test-repo")
         .to_string_lossy()
         .into_owned()
 }
@@ -500,7 +500,7 @@ async fn reconnect_never_uses_title_as_ownership() {
     let (_repository, store, runner, service) = setup().await;
     ready(&store).await;
     *runner.terminals.lock().unwrap() = vec![
-        json!({"handle":"foreign-handle","tabId":"other-tab","leafId":"other-leaf","title":format!("ThoughsFlow {MISSION}")}),
+        json!({"handle":"foreign-handle","tabId":"other-tab","leafId":"other-leaf","title":format!("ThoughtsFlow {MISSION}")}),
     ];
     service
         .reconnect(ReconnectInput {
