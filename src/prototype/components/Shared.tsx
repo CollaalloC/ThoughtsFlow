@@ -17,7 +17,7 @@ export function Brand({ compact = false }: { compact?: boolean }) {
       </span>
       {!compact && (
         <span className="brand__text">
-          Thoughs<span>Flow</span>
+          Thoughts<span>Flow</span>
         </span>
       )}
     </div>

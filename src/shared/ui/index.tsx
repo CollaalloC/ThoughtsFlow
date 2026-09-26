@@ -13,7 +13,7 @@ export function Brand({ compact = false }: { compact?: boolean }) {
       </span>
       {!compact && (
         <span className="tf-brand__word">
-          Thoughs<span>Flow</span>
+          Thoughts<span>Flow</span>
         </span>
       )}
     </span>
