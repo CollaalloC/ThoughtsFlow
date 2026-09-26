@@ -60,6 +60,7 @@ import {
   SafeMarkdown,
 } from "../../shared/ui";
 import { CredentialRecovery } from "./CredentialRecovery";
+import { useWorkspaceSession } from "./workspace-session";
 import "../../shared/tokens/index.css";
 import "../../shared/ui/styles.css";
 import "./focus-workspace.css";
@@ -318,6 +319,8 @@ export function FocusWorkspace({
   onOpenDecisions,
   onOpenSettings,
 }: FocusWorkspaceProps) {
+  const session = useWorkspaceSession();
+  const initialLocation = useRef({ workspaceId: initialWorkspaceId, runId: initialRunId });
   const [workspaces, setWorkspaces] = useState<WorkspaceView[]>([]);
   const [detail, setDetail] = useState<WorkspaceDetailView | null>(null);
   const [profiles, setProfiles] = useState<ProviderProfileView[]>([]);
@@ -349,6 +352,15 @@ export function FocusWorkspace({
   const manualCheckpointOperation = useRef<{ fingerprint: string; id: string } | null>(null);
   const providerCheckpointOperation = useRef<{ fingerprint: string; id: string } | null>(null);
   const snapshotRequestToken = useRef(0);
+  const directStreamRuns = useRef(new Set<string>());
+  const activeSend = useRef<{ runId: string | null } | null>(null);
+  const receiveRunEvent = useRef<(event: RunEventView) => void>(() => undefined);
+  const composerDrafts = useRef(new Map<string, { text: string; branch: string; branchRunId: string | null }>());
+  if (detail) composerDrafts.current.set(detail.workspace.id, { text: draft, branch: branchDraft, branchRunId });
+  const ownsWorkspace = useMemo(
+    () => session.capture(detail?.workspace.id),
+    [detail?.workspace.id, session, session.generation],
+  );
 
   useEffect(() => {
     if (detail) onWorkspaceChange?.(detail.workspace.id);
@@ -421,31 +433,53 @@ export function FocusWorkspace({
     setActiveTurnId(activeTurn?.id);
   }, []);
 
-  const openWorkspace = useCallback(async (workspaceId: string) => {
+  const openWorkspace = useCallback(async (workspaceId: string, targetRunId?: string) => {
+    const isCurrentNavigation = session.navigate();
+    const isCurrentRead = session.read(workspaceId, "workspace");
+    const refreshingCurrentWorkspace = isCurrentRead();
+    const canOpen = () => isCurrentNavigation() && (!refreshingCurrentWorkspace || isCurrentRead());
     clearError();
     try {
       const [next, loadedTree] = await Promise.all([
         bridge.openWorkspace(workspaceId) as Promise<WorkspaceDetailView>,
         bridge.getContextTree({ workspaceId }),
       ]);
+      if (!canOpen()) return;
       let nextTree = loadedTree;
       if (
-        initialRunId
-        && nextTree.cursor.activeRunId !== initialRunId
-        && nextTree.nodes.some((node) => node.runId === initialRunId)
+        targetRunId
+        && nextTree.cursor.activeRunId !== targetRunId
+        && nextTree.nodes.some((node) => node.runId === targetRunId)
       ) {
-        const departureNode = nextTree.nodes.find((node) => node.runId === initialRunId);
+        const departureNode = nextTree.nodes.find((node) => node.runId === targetRunId);
         await bridge.setActiveContext({
           workspaceId,
-          runId: initialRunId,
+          runId: targetRunId,
           branchId: departureNode
             ? resolveContextBranchId(nextTree, departureNode.branchIds)
             : null,
           expectedCursorVersion: nextTree.cursor.version,
           expectedDraftVersion: nextTree.draftVersion,
         });
+        if (!canOpen()) return;
         nextTree = await bridge.getContextTree({ workspaceId });
       }
+      if (!canOpen()) return;
+      if (session.activate(workspaceId)) {
+        directStreamRuns.current.clear();
+        activeSend.current = null;
+        const savedDraft = composerDrafts.current.get(workspaceId);
+        setDraft(savedDraft?.text ?? "");
+        setBusy(false);
+        setContextTreeBusy(false);
+        setMaintenanceBusy(false);
+        setBranchRunId(savedDraft?.branchRunId ?? null);
+        setBranchDraft(savedDraft?.branch ?? "");
+        setNotice(null);
+        manualCheckpointOperation.current = null;
+        providerCheckpointOperation.current = null;
+      }
+      clearError();
       setDetail(next);
       applyContextTree(nextTree, next.turns, next.selectedRunIds);
       setDraftVersion(null);
@@ -453,9 +487,10 @@ export function FocusWorkspace({
       setSnapshot(null);
       setMaintenanceOpen(false);
     } catch (reason) {
+      if (!canOpen()) return;
       reportError(reason, "无法打开本地工作区。");
     }
-  }, [applyContextTree, bridge, clearError, initialRunId, reportError]);
+  }, [applyContextTree, bridge, clearError, reportError, session]);
 
   useEffect(() => {
     let active = true;
@@ -467,17 +502,18 @@ export function FocusWorkspace({
         setWorkspaces(visible);
         setProfiles(nextProfiles);
         setProviderId(nextProfiles[0]?.id ?? "");
-        const targetId = initialWorkspaceId && visible.some((item) => item.id === initialWorkspaceId)
-          ? initialWorkspaceId
+        const initial = initialLocation.current;
+        const targetId = initial.workspaceId && visible.some((item) => item.id === initial.workspaceId)
+          ? initial.workspaceId
           : visible[0]?.id;
-        if (targetId) await openWorkspace(targetId);
+        if (targetId) await openWorkspace(targetId, initial.runId);
       })
       .catch((reason: unknown) => {
         if (active) reportError(reason, "无法初始化 ThoughsFlow。");
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [bridge, initialWorkspaceId, openWorkspace, reportError]);
+  }, [bridge, openWorkspace, reportError]);
 
   useEffect(() => {
     snapshotRequestToken.current += 1;
@@ -491,8 +527,10 @@ export function FocusWorkspace({
     exactProviderProfileId: string | undefined = selectedProfile?.id,
     exactDraftVersion: number | null = draftVersion,
     requestedBranchId?: string | null,
+    purpose: "preview" | "send-preview" = "preview",
   ) => {
-    if (!detail || !exactProviderProfileId) return null;
+    if (!ownsWorkspace() || !detail || !exactProviderProfileId) return null;
+    const isCurrentRead = session.read(detail.workspace.id, purpose);
     const parentNode = exactParentRunId
       ? contextTree?.nodes.find((node) => node.runId === exactParentRunId)
       : undefined;
@@ -508,13 +546,18 @@ export function FocusWorkspace({
       providerProfileId: exactProviderProfileId,
       branchId,
     };
-    const result = (exactDraftVersion === null
-      ? await bridge.inspectContext(input)
-      : await bridge.previewContextTransition({
-          ...input,
-          draftVersion: exactDraftVersion,
-        })) as ContextPreviewView;
-    return result;
+    try {
+      const result = (exactDraftVersion === null
+        ? await bridge.inspectContext(input)
+        : await bridge.previewContextTransition({
+            ...input,
+            draftVersion: exactDraftVersion,
+          })) as ContextPreviewView;
+      return isCurrentRead() ? result : null;
+    } catch (reason) {
+      if (isCurrentRead()) throw reason;
+      return null;
+    }
   }, [
     bridge,
     contextTree,
@@ -522,6 +565,8 @@ export function FocusWorkspace({
     draftVersion,
     parentRunId,
     selectedProfile?.id,
+    ownsWorkspace,
+    session,
   ]);
 
   useEffect(() => {
@@ -533,25 +578,28 @@ export function FocusWorkspace({
     const timer = window.setTimeout(() => {
       inspect(draft)
         .then((result) => {
-          if (!active || !result) return;
+          if (!active || !ownsWorkspace() || !result) return;
           setPreview(result);
           setDraftVersion(result.draftVersion);
         })
         .catch((reason: unknown) => {
-          if (!active) return;
+          if (!active || !ownsWorkspace()) return;
           const retryInspection = () => {
+            if (!ownsWorkspace()) return;
             clearError();
             void inspect(draft)
               .then((result) => {
-                if (!result) return;
+                if (!ownsWorkspace() || !result) return;
                 setPreview(result);
                 setDraftVersion(result.draftVersion);
               })
-              .catch((nextReason: unknown) => reportError(
-                nextReason,
-                "无法检查本轮 Context。",
-                { label: "重新检查 Context", execute: retryInspection },
-              ));
+              .catch((nextReason: unknown) => {
+                if (ownsWorkspace()) reportError(
+                  nextReason,
+                  "无法检查本轮 Context。",
+                  { label: "重新检查 Context", execute: retryInspection },
+                );
+              });
           };
           reportError(
             reason,
@@ -561,26 +609,36 @@ export function FocusWorkspace({
         });
     }, 120);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [clearError, detail, draft, inspect, parentRunId, reportError, selectedProfile]);
+  }, [clearError, detail, draft, inspect, ownsWorkspace, parentRunId, reportError, selectedProfile]);
 
   const refreshContextTree = useCallback(async () => {
     if (!detail) return null;
     const workspaceId = detail.workspace.id;
-    const [nextDetail, nextTree] = await Promise.all([
-      bridge.openWorkspace(workspaceId) as Promise<WorkspaceDetailView>,
-      bridge.getContextTree({ workspaceId }),
-    ]);
+    const isCurrent = session.read(workspaceId, "workspace");
+    if (!isCurrent()) return null;
+    let nextDetail: WorkspaceDetailView;
+    let nextTree: ContextTreeProjection;
+    try {
+      [nextDetail, nextTree] = await Promise.all([
+        bridge.openWorkspace(workspaceId) as Promise<WorkspaceDetailView>,
+        bridge.getContextTree({ workspaceId }),
+      ]);
+    } catch (reason) {
+      if (isCurrent()) throw reason;
+      return null;
+    }
+    if (!isCurrent()) return null;
     setDetail(nextDetail);
     applyContextTree(nextTree, nextDetail.turns, nextDetail.selectedRunIds);
     return nextTree;
-  }, [applyContextTree, bridge, detail]);
+  }, [applyContextTree, bridge, detail, session]);
 
   const selectActiveContext = async (
     runId: string | null,
     requestedBranchId?: string | null,
     propagateFailure = false,
   ) => {
-    if (!detail || !contextTree || contextTreeBusy) return;
+    if (!ownsWorkspace() || !detail || !contextTree || contextTreeBusy) return;
     const node = runId
       ? contextTree.nodes.find((item) => item.runId === runId)
       : undefined;
@@ -590,6 +648,7 @@ export function FocusWorkspace({
         ? resolveContextBranchId(contextTree, node.branchIds)
         : null;
     setContextTreeBusy(true);
+    session.invalidateReads();
     clearError();
     try {
       await bridge.setActiveContext({
@@ -599,19 +658,25 @@ export function FocusWorkspace({
         expectedCursorVersion: contextTree.cursor.version,
         expectedDraftVersion: contextTree.draftVersion,
       });
+      if (!ownsWorkspace()) return;
+      session.invalidateReads();
       await refreshContextTree();
+      if (!ownsWorkspace()) return;
       setDraftVersion(null);
       setPreview(null);
       setSnapshot(null);
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       if (isContextVersionConflict(reason)) {
         try {
           await refreshContextTree();
+          if (!ownsWorkspace()) return;
           setDraftVersion(null);
         } catch {
           // Preserve the original structured conflict as the actionable error.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(
         reason,
         "无法切换 Context 位置。",
@@ -624,7 +689,7 @@ export function FocusWorkspace({
       );
       if (propagateFailure) throw reason;
     } finally {
-      setContextTreeBusy(false);
+      if (ownsWorkspace()) setContextTreeBusy(false);
     }
   };
 
@@ -633,8 +698,9 @@ export function FocusWorkspace({
     name: string,
     expectedBranchVersion: number,
   ) => {
-    if (!detail || contextTreeBusy) return;
+    if (!ownsWorkspace() || !detail || contextTreeBusy) return;
     setContextTreeBusy(true);
+    session.invalidateReads();
     clearError();
     try {
       await bridge.renameBranch({
@@ -643,8 +709,11 @@ export function FocusWorkspace({
         name,
         expectedBranchVersion,
       });
+      if (!ownsWorkspace()) return;
+      session.invalidateReads();
       await refreshContextTree();
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       if (isContextVersionConflict(reason)) {
         try {
           await refreshContextTree();
@@ -652,20 +721,22 @@ export function FocusWorkspace({
           // Preserve the original structured conflict as the actionable error.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(reason, "分支名称未保存。");
     } finally {
-      setContextTreeBusy(false);
+      if (ownsWorkspace()) setContextTreeBusy(false);
     }
   };
 
   const refreshPreviewAfterMaintenance = async () => {
+    if (!ownsWorkspace()) return;
     const refreshed = await inspect(
       draft,
       contextTree?.cursor.activeRunId ?? null,
       selectedProfile?.id,
       draftVersion,
     );
-    if (refreshed) {
+    if (ownsWorkspace() && refreshed) {
       setPreview(refreshed);
       setDraftVersion(refreshed.draftVersion);
     }
@@ -687,13 +758,15 @@ export function FocusWorkspace({
 
   const createManualCheckpoint = async (proposal: ManualCheckpointProposal) => {
     if (
-      !detail
+      !ownsWorkspace()
+      || !detail
       || !contextTree?.cursor.activeRunId
       || !contextTree.cursor.branchId
       || !activeContextBranch
       || maintenanceBusy
     ) return;
     setMaintenanceBusy(true);
+    session.invalidateReads();
     clearError();
     try {
       const operationFingerprint = JSON.stringify({
@@ -717,8 +790,12 @@ export function FocusWorkspace({
         expectedCursorVersion: contextTree.cursor.version,
         expectedBranchVersion: activeContextBranch.version,
       });
+      if (!ownsWorkspace()) return;
+      session.invalidateReads();
       await refreshContextTree();
+      if (!ownsWorkspace()) return;
       await refreshPreviewAfterMaintenance();
+      if (!ownsWorkspace()) return;
       manualCheckpointOperation.current = null;
       setMaintenanceOpen(false);
       setNotice(
@@ -727,17 +804,20 @@ export function FocusWorkspace({
           : "Context 检查点已保存并激活。",
       );
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       if (isContextVersionConflict(reason)) {
         try {
           await refreshContextTree();
+          if (!ownsWorkspace()) return;
           setDraftVersion(null);
         } catch {
           // Preserve the maintenance proposal and original structured conflict.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(reason, "Context 检查点未保存。");
     } finally {
-      setMaintenanceBusy(false);
+      if (ownsWorkspace()) setMaintenanceBusy(false);
     }
   };
 
@@ -745,7 +825,8 @@ export function FocusWorkspace({
     proposal: ProviderCheckpointProposal,
   ) => {
     if (
-      !detail
+      !ownsWorkspace()
+      || !detail
       || !contextTree?.cursor.activeRunId
       || !contextTree.cursor.branchId
       || !activeContextBranch
@@ -753,6 +834,7 @@ export function FocusWorkspace({
       || maintenanceBusy
     ) return;
     setMaintenanceBusy(true);
+    session.invalidateReads();
     clearError();
     try {
       const operationFingerprint = JSON.stringify({
@@ -779,30 +861,38 @@ export function FocusWorkspace({
         expectedBranchVersion: activeContextBranch.version,
         expectedDraftVersion: draftVersion,
       });
+      if (!ownsWorkspace()) return;
+      session.invalidateReads();
       await refreshContextTree();
+      if (!ownsWorkspace()) return;
       await refreshPreviewAfterMaintenance();
+      if (!ownsWorkspace()) return;
       providerCheckpointOperation.current = null;
       setMaintenanceOpen(false);
       setNotice("摘要已生成，Context 已原子切换。");
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       if (isTerminalContextMaintenanceError(reason)) {
         providerCheckpointOperation.current = null;
       }
       if (isContextVersionConflict(reason)) {
         try {
           await refreshContextTree();
+          if (!ownsWorkspace()) return;
           setDraftVersion(null);
         } catch {
           // Preserve the maintenance proposal and original structured conflict.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(reason, "摘要失败；Context 位置与检查点均未改变。");
     } finally {
-      setMaintenanceBusy(false);
+      if (ownsWorkspace()) setMaintenanceBusy(false);
     }
   };
 
   const cancelContextMaintenance = async () => {
+    if (!ownsWorkspace()) return;
     if (!maintenanceBusy) {
       manualCheckpointOperation.current = null;
       providerCheckpointOperation.current = null;
@@ -814,9 +904,11 @@ export function FocusWorkspace({
     clearError();
     try {
       await bridge.cancelContextMaintenance(operationId);
+      if (!ownsWorkspace()) return;
       providerCheckpointOperation.current = null;
       setNotice("已请求取消摘要；检查点和当前 Context 不会移动。");
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       reportError(reason, "摘要取消请求失败。");
     }
   };
@@ -844,8 +936,20 @@ export function FocusWorkspace({
     } : current);
   };
 
+  const finishRunEvent = (runId: string, failureMessage: string) => {
+    // An adopted older Run can finish while this workspace is starting another one.
+    // Its result belongs here, but it cannot unlock or refresh over the active send.
+    if (activeSend.current && activeSend.current.runId !== runId) return;
+    activeSend.current = null;
+    setNotice(null);
+    setBusy(false);
+    void refreshContextTree().catch((reason: unknown) => {
+      if (ownsWorkspace()) reportError(reason, failureMessage);
+    });
+  };
+
   const consumeRunEvent = (event: unknown) => {
-    if (!event || typeof event !== "object") return;
+    if (!ownsWorkspace() || !event || typeof event !== "object") return;
     const runEvent = event as RunEventView;
     if (!runEvent.runId) return;
     if (runEvent.type === "run-started") {
@@ -874,43 +978,27 @@ export function FocusWorkspace({
       updateRun(runEvent.runId, { usage: runEvent.usage });
     } else if (runEvent.type === "run-completed") {
       updateRun(runEvent.runId, { status: "completed", completedAt: new Date().toISOString(), usage: runEvent.usage });
-      setNotice(null);
-      setBusy(false);
-      void refreshContextTree().catch((reason: unknown) => {
-        reportError(reason, "Run 已完成，但无法刷新权威工作区状态。");
-      });
+      finishRunEvent(runEvent.runId, "Run 已完成，但无法刷新权威工作区状态。");
     } else if (runEvent.type === "run-failed") {
       updateRun(runEvent.runId, {
         status: "failed",
         completedAt: runEvent.at ?? new Date().toISOString(),
         error: runEvent.error,
       });
-      setNotice(null);
-      setBusy(false);
-      void refreshContextTree().catch((reason: unknown) => {
-        reportError(reason, "Run 已失败，但无法刷新权威工作区状态。");
-      });
+      finishRunEvent(runEvent.runId, "Run 已失败，但无法刷新权威工作区状态。");
     } else if (runEvent.type === "run-cancelled") {
       updateRun(runEvent.runId, {
         status: "cancelled",
         completedAt: runEvent.at ?? new Date().toISOString(),
       });
-      setNotice(null);
-      setBusy(false);
-      void refreshContextTree().catch((reason: unknown) => {
-        reportError(reason, "Run 已取消，但无法刷新权威工作区状态。");
-      });
+      finishRunEvent(runEvent.runId, "Run 已取消，但无法刷新权威工作区状态。");
     } else if (runEvent.type === "persistence-failed") {
       updateRun(runEvent.runId, {
         status: "interrupted",
         completedAt: runEvent.at ?? new Date().toISOString(),
         error: runEvent.error,
       });
-      setNotice(null);
-      setBusy(false);
-      void refreshContextTree().catch((reason: unknown) => {
-        reportError(reason, "Run 持久化失败，且无法刷新权威工作区状态。");
-      });
+      finishRunEvent(runEvent.runId, "Run 持久化失败，且无法刷新权威工作区状态。");
     }
   };
 
@@ -919,6 +1007,7 @@ export function FocusWorkspace({
     let ready = false;
     return {
       consume: (event: RunEventView) => {
+        if (!ownsWorkspace()) return;
         if (ready) consumeRunEvent(event);
         else pending.push(event);
       },
@@ -929,10 +1018,23 @@ export function FocusWorkspace({
     };
   };
 
+  // Runs reopened after navigation use a fresh UI owner. Runs started here keep their
+  // ACK buffer, so the bridge's broadcast must not apply their deltas a second time.
+  receiveRunEvent.current = (event) => {
+    if (!directStreamRuns.current.has(event.runId)
+      && detail?.turns.some((turn) => turn.runs.some((run) => run.id === event.runId))) {
+      consumeRunEvent(event);
+    }
+  };
+  useEffect(() => bridge.subscribeToRunEvents((event) => receiveRunEvent.current(event)), [bridge]);
+
   const startTurn = async (prompt: string, exactParentRunId?: string | null) => {
-    if (!detail || !selectedProfile || !contextTree || busy) return;
+    if (!ownsWorkspace() || !detail || !selectedProfile || !contextTree || busy || activeSend.current) return;
+    const sending: { runId: string | null } = { runId: null };
+    activeSend.current = sending;
     clearError();
     setBusy(true);
+    session.invalidateReads();
     try {
       const sourceNode = exactParentRunId
         ? contextTree.nodes.find((node) => node.runId === exactParentRunId)
@@ -949,7 +1051,9 @@ export function FocusWorkspace({
         selectedProfile.id,
         draftVersion,
         sourceBranchId,
+        "send-preview",
       );
+      if (!ownsWorkspace()) return;
       if (!checked) throw new Error("无法生成发送前凭证。");
       setPreview(checked);
       setDraftVersion(checked.draftVersion);
@@ -970,6 +1074,10 @@ export function FocusWorkspace({
         expectedBranchVersion: sourceBranch?.version ?? null,
         expectedDraftVersion: checked.draftVersion,
       }, streamEvents.consume);
+      if (!ownsWorkspace()) return;
+      sending.runId = started.runId;
+      directStreamRuns.current.add(started.runId);
+      session.invalidateReads();
       const optimisticRun: RunView = {
         id: started.runId,
         turnId: started.turnId,
@@ -1057,22 +1165,26 @@ export function FocusWorkspace({
           ],
         };
       });
-      setDraft("");
-      setBranchDraft("");
+      setDraft((current) => current === draft ? "" : current);
+      setBranchDraft((current) => current === branchDraft ? "" : current);
       setBranchRunId(null);
       setNotice("请求凭证已锁定，正在等待 Provider 返回。");
       streamEvents.release();
     } catch (reason) {
+      if (!ownsWorkspace()) return;
+      activeSend.current = null;
       setBusy(false);
       if (isContextVersionConflict(reason)) {
         try {
           await refreshContextTree();
+          if (!ownsWorkspace()) return;
           setDraftVersion(null);
           setPreview(null);
         } catch {
           // Keep the original structured conflict as the actionable error.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(
         reason,
         "发送失败。",
@@ -1097,11 +1209,14 @@ export function FocusWorkspace({
     retryCredentialId?: string,
     propagateFailure = false,
   ) => {
-    if (!detail || !contextTree || busy) return;
+    if (!ownsWorkspace() || !detail || !contextTree || busy || activeSend.current) return;
     const turn = detail.turns.find((item) => item.id === run.turnId);
     if (!turn) return;
+    const sending: { runId: string | null } = { runId: null };
+    activeSend.current = sending;
     const retryProfile = profiles.find((profile) => profile.id === retryProviderProfileId);
     setBusy(true);
+    session.invalidateReads();
     clearError();
     try {
       const retryNode = contextTree.nodes.find((node) => node.runId === run.id);
@@ -1117,7 +1232,9 @@ export function FocusWorkspace({
         retryProviderProfileId,
         draftVersion,
         retryBranchId,
+        "send-preview",
       );
+      if (!ownsWorkspace()) return;
       if (!checked || checked.blocked) throw new Error(checked?.warnings[0] || "Context 无法发送。");
       if (checked.providerProfileId !== retryProviderProfileId) {
         throw new Error("Context 预览的 Provider 已变化，请重新确认后重试。");
@@ -1133,6 +1250,10 @@ export function FocusWorkspace({
         expectedBranchVersion: retryBranch?.version ?? null,
         expectedDraftVersion: checked.draftVersion,
       }, streamEvents.consume);
+      if (!ownsWorkspace()) return;
+      sending.runId = started.runId;
+      directStreamRuns.current.add(started.runId);
+      session.invalidateReads();
       const nextRun: RunView = {
         ...run,
         id: started.runId,
@@ -1216,16 +1337,20 @@ export function FocusWorkspace({
       });
       streamEvents.release();
     } catch (reason) {
+      if (!ownsWorkspace()) return;
+      activeSend.current = null;
       setBusy(false);
       if (isContextVersionConflict(reason)) {
         try {
           await refreshContextTree();
+          if (!ownsWorkspace()) return;
           setDraftVersion(null);
           setPreview(null);
         } catch {
           // Keep the original structured conflict as the actionable error.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(
         reason,
         "重试失败。",
@@ -1241,7 +1366,7 @@ export function FocusWorkspace({
   };
 
   const toggleOverride = async (item: ContextInspectorItem, kind: "included" | "pinned") => {
-    if (!detail || !preview || item.mandatory) return;
+    if (!ownsWorkspace() || !detail || !preview || item.mandatory) return;
     const targetIdentity = sourceIdentity(item);
     const sourceItems = new Map<string, ContextInspectorItem>();
     [...preview.rawItems, ...preview.items].forEach((candidate) => {
@@ -1267,6 +1392,8 @@ export function FocusWorkspace({
         expectedDraftVersion: preview.draftVersion,
         items: nextItems,
       });
+      if (!ownsWorkspace()) return;
+      session.invalidateReads();
       setDraftVersion(updated.draftVersion);
       setContextTree((current) => current ? {
         ...current,
@@ -1278,11 +1405,12 @@ export function FocusWorkspace({
         selectedProfile?.id,
         updated.draftVersion,
       );
-      if (refreshed) {
+      if (ownsWorkspace() && refreshed) {
         setPreview(refreshed);
         setDraftVersion(refreshed.draftVersion);
       }
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       if (isContextVersionConflict(reason)) {
         setDraftVersion(null);
         try {
@@ -1291,12 +1419,13 @@ export function FocusWorkspace({
           // Keep the original conflict visible and leave the composer draft untouched.
         }
       }
+      if (!ownsWorkspace()) return;
       reportError(reason, "上下文调整未保存。");
     }
   };
 
   const loadSnapshot = async (tab: InspectorTab) => {
-    if (tab !== "snapshot") return;
+    if (!ownsWorkspace() || tab !== "snapshot") return;
     const selectedRun = detail?.turns
       .flatMap((turn) => turn.runs)
       .find((run) => run.id === contextTree?.cursor.activeRunId);
@@ -1304,25 +1433,29 @@ export function FocusWorkspace({
     const requestToken = snapshotRequestToken.current + 1;
     snapshotRequestToken.current = requestToken;
     const requestContextIdentity = contextCursorIdentityRef.current;
+    const isCurrentRead = session.read(detail?.workspace.id, "snapshot");
     setSnapshot(null);
     setSnapshotLoading(true);
     try {
       const loadedSnapshot = await bridge.getRunSnapshot(selectedRun.id);
       if (
-        snapshotRequestToken.current !== requestToken
+        !isCurrentRead()
+        || snapshotRequestToken.current !== requestToken
         || contextCursorIdentityRef.current !== requestContextIdentity
         || loadedSnapshot.runId !== selectedRun.id
       ) return;
       setSnapshot(normalizeSnapshot(loadedSnapshot));
     } catch (reason) {
       if (
-        snapshotRequestToken.current !== requestToken
+        !isCurrentRead()
+        || snapshotRequestToken.current !== requestToken
         || contextCursorIdentityRef.current !== requestContextIdentity
       ) return;
       reportError(reason, "无法读取锁定快照。");
     } finally {
       if (
-        snapshotRequestToken.current === requestToken
+        ownsWorkspace()
+        && snapshotRequestToken.current === requestToken
         && contextCursorIdentityRef.current === requestContextIdentity
       ) {
         setSnapshotLoading(false);
@@ -1334,41 +1467,48 @@ export function FocusWorkspace({
     event.preventDefault();
     const name = newWorkspaceTitle.trim();
     const goal = newWorkspaceGoal.trim();
-    if (!name || !goal) return;
+    if (!ownsWorkspace() || !name || !goal) return;
     try {
       const created = (await bridge.createWorkspace({ name, goal })) as WorkspaceView;
+      if (!ownsWorkspace()) return;
       setWorkspaces((current) => [created, ...current]);
       setNewWorkspaceOpen(false);
       setNewWorkspaceTitle("");
       setNewWorkspaceGoal("");
       await openWorkspace(created.id);
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       reportError(reason, "创建工作区失败。");
     }
   };
 
   const renameWorkspace = async () => {
-    if (!detail) return;
+    if (!ownsWorkspace() || !detail) return;
     const name = window.prompt("重命名工作区", detail.workspace.name)?.trim();
     if (!name || name === detail.workspace.name) return;
     try {
       const updated = (await bridge.updateWorkspace({ id: detail.workspace.id, name })) as WorkspaceView;
-      setDetail({ ...detail, workspace: updated });
+      if (!ownsWorkspace()) return;
+      setDetail((current) => current ? { ...current, workspace: updated } : current);
       setWorkspaces((current) => current.map((item) => item.id === updated.id ? updated : item));
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       reportError(reason, "重命名失败。");
     }
   };
 
   const archiveWorkspace = async () => {
-    if (!detail) return;
+    if (!ownsWorkspace() || !detail) return;
     try {
       await bridge.updateWorkspace({ id: detail.workspace.id, archived: true });
+      if (!ownsWorkspace()) return;
       const remaining = workspaces.filter((item) => item.id !== detail.workspace.id);
       setWorkspaces(remaining);
       setDetail(null);
       if (remaining[0]) await openWorkspace(remaining[0].id);
+      else session.activate(undefined);
     } catch (reason) {
+      if (!ownsWorkspace()) return;
       reportError(reason, "归档失败。");
     }
   };
@@ -1487,7 +1627,7 @@ export function FocusWorkspace({
                 type="button"
                 onClick={() => {
                   void selectActiveContext(pointer.runId, undefined, true)
-                    .then(() => onOpenRouteMap?.(detail.workspace.id))
+                    .then(() => { if (ownsWorkspace()) onOpenRouteMap?.(detail.workspace.id); })
                     .catch(() => undefined);
                 }}
               >

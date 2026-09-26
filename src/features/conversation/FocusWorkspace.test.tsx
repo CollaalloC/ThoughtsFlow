@@ -1,10 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
   ContextPreview,
   ContextTreeProjection,
   RunHandle,
+  RunEvent,
   RunSnapshot,
   WorkspaceDetail,
 } from "../../shared/contracts";
@@ -307,7 +309,373 @@ function bridgeFixture() {
   } as unknown as DesktopBridge;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function addOtherWorkspace(bridge: DesktopBridge) {
+  const other = { ...workspace, id: "workspace-other", name: "另一个工作区" };
+  const otherTree: ContextTreeProjection = {
+    ...contextTree, workspaceId: other.id, rootId: `workspace-root:${other.id}`,
+    cursor: { ...contextTree.cursor, workspaceId: other.id, activeRunId: null, branchId: null },
+    nodes: [], edges: [], branches: [], checkpoints: [],
+  };
+  const otherDetail: WorkspaceDetail = {
+    ...detail, workspace: other, turns: [], selectedRunIds: {}, contextCursor: otherTree.cursor,
+  };
+  vi.mocked(bridge.listWorkspaces).mockResolvedValue([workspace, other]);
+  vi.mocked(bridge.openWorkspace).mockImplementation(async (id) => id === other.id ? otherDetail : detail);
+  vi.mocked(bridge.getContextTree).mockImplementation(async ({ workspaceId }) => workspaceId === other.id ? otherTree : contextTree);
+  return { other, otherDetail, otherTree };
+}
+
+async function sendPrompt(bridge: DesktopBridge, prompt = "A 的后台请求") {
+  await screen.findByRole("heading", { name: workspace.name });
+  fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: prompt } });
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(bridge.createTurnAndStartRun).toHaveBeenCalled());
+}
+
 describe("FocusWorkspace", () => {
+  it("can create the first workspace after StrictMode replays mount effects", async () => {
+    const bridge = bridgeFixture();
+    vi.mocked(bridge.listWorkspaces).mockResolvedValue([]);
+    vi.mocked(bridge.createWorkspace).mockResolvedValue(workspace);
+    render(<StrictMode><FocusWorkspace bridge={bridge} /></StrictMode>);
+    await screen.findByRole("button", { name: "添加工作区" });
+    fireEvent.click(screen.getByRole("button", { name: "添加工作区" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "工作区名称" }), { target: { value: workspace.name } });
+    fireEvent.change(screen.getByRole("textbox", { name: "工作区目标" }), { target: { value: workspace.goal } });
+    fireEvent.click(screen.getByRole("button", { name: "确认创建" }));
+    await waitFor(() => expect(bridge.createWorkspace).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
+  });
+
+  it("keeps each workspace's unfinished draft across navigation", async () => {
+    const bridge = bridgeFixture();
+    const { other } = addOtherWorkspace(bridge);
+    render(<FocusWorkspace bridge={bridge} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "A 的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("");
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "B 的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: workspace.name }));
+    await screen.findByRole("heading", { name: workspace.name });
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("A 的草稿");
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("B 的草稿");
+    expect(bridge.createTurnAndStartRun).not.toHaveBeenCalled();
+  });
+
+  it("adopts a reopened Run's broadcast without duplicating direct stream deltas", async () => {
+    const bridge = bridgeFixture();
+    const { other } = addOtherWorkspace(bridge);
+    let broadcast!: (event: RunEvent) => void;
+    let direct!: (event: RunEvent) => void;
+    vi.mocked(bridge.subscribeToRunEvents).mockImplementation((listener) => { broadcast = listener; return () => undefined; });
+    vi.mocked(bridge.createTurnAndStartRun).mockImplementation(async (_input, onEvent) => { direct = onEvent; return runHandle("run-live"); });
+    render(<FocusWorkspace bridge={bridge} />);
+    await sendPrompt(bridge);
+    await screen.findByText(/从精确 Run run-live 继续/);
+    const delta: RunEvent = { apiVersion: 1, at: workspace.createdAt, type: "text-delta", runId: "run-live", text: "第一段" };
+    act(() => { direct(delta); broadcast(delta); });
+    expect(screen.getByText("第一段")).toBeVisible();
+    expect(screen.queryByText("第一段第一段")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail, turns: [{ ...detail.turns[0], runs: [{ ...detail.turns[0].runs[0], id: "run-live", status: "streaming", output: "第一段" }] }],
+      selectedRunIds: { "turn-1": "run-live" },
+    });
+    vi.mocked(bridge.getContextTree).mockResolvedValue({
+      ...contextTree, cursor: { ...contextTree.cursor, activeRunId: "run-live" },
+      nodes: [{ ...contextTree.nodes[0], runId: "run-live", status: "streaming", canContinue: false }],
+    });
+    fireEvent.click(screen.getByRole("button", { name: workspace.name }));
+    await screen.findByRole("heading", { name: workspace.name });
+    act(() => {
+      const next = { ...delta, text: "第二段" };
+      direct(next);
+      broadcast(next);
+    });
+    expect(screen.getByText("第一段第二段")).toBeVisible();
+    expect(screen.queryByText("第一段第二段第二段")).not.toBeInTheDocument();
+    const reads = vi.mocked(bridge.openWorkspace).mock.calls.length;
+    vi.mocked(bridge.openWorkspace).mockResolvedValue({
+      ...detail, turns: [{ ...detail.turns[0], runs: [{ ...detail.turns[0].runs[0], id: "run-live", output: "第一段第二段" }] }],
+      selectedRunIds: { "turn-1": "run-live" },
+    });
+    vi.mocked(bridge.getContextTree).mockResolvedValue({
+      ...contextTree, cursor: { ...contextTree.cursor, activeRunId: "run-live" },
+      nodes: [{ ...contextTree.nodes[0], runId: "run-live", status: "completed", canContinue: true }],
+    });
+    act(() => {
+      const completed: RunEvent = { apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-live" };
+      direct(completed);
+      broadcast(completed);
+    });
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(reads + 1));
+    expect(screen.getByText("第一段第二段")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "停止生成" })).not.toBeInTheDocument();
+  });
+
+  it("does not reinitialize when the shell echoes the selected workspace", async () => {
+    const bridge = bridgeFixture();
+    const { other } = addOtherWorkspace(bridge);
+    const view = render(<FocusWorkspace bridge={bridge} initialWorkspaceId={workspace.id} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    view.rerender(<FocusWorkspace bridge={bridge} initialWorkspaceId={other.id} />);
+    expect(bridge.listProviderProfiles).toHaveBeenCalledTimes(1);
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the active send locked when an adopted older Run finishes in the same workspace", async () => {
+    const bridge = bridgeFixture();
+    const pending = deferred<RunHandle>();
+    let broadcast!: (event: RunEvent) => void;
+    vi.mocked(bridge.subscribeToRunEvents).mockImplementation((listener) => { broadcast = listener; return () => undefined; });
+    vi.mocked(bridge.createTurnAndStartRun).mockReturnValue(pending.promise);
+    render(<FocusWorkspace bridge={bridge} />);
+    await sendPrompt(bridge);
+    const reads = vi.mocked(bridge.openWorkspace).mock.calls.length;
+    act(() => broadcast({ apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-b" }));
+    expect(screen.getByRole("button", { name: "发送中" })).toBeDisabled();
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(reads);
+    await act(async () => { pending.resolve(runHandle("run-current")); await pending.promise; });
+    await screen.findByText(/从精确 Run run-curren 继续/);
+    act(() => broadcast({ apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-b" }));
+    expect(screen.getByRole("button", { name: "发送中" })).toBeDisabled();
+    expect(screen.getByText("请求凭证已锁定，正在等待 Provider 返回。")).toBeVisible();
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(reads);
+  });
+  it("keeps the latest workspace selection when older reads finish last", async () => {
+    const bridge = bridgeFixture();
+    const other = { ...workspace, id: "workspace-other", name: "另一个工作区" };
+    const oldRead = deferred<WorkspaceDetail>();
+    vi.mocked(bridge.listWorkspaces).mockResolvedValue([workspace, other]);
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockReturnValueOnce(oldRead.promise)
+      .mockResolvedValueOnce({ ...detail, workspace: other });
+    const onWorkspaceChange = vi.fn();
+    render(<FocusWorkspace bridge={bridge} onWorkspaceChange={onWorkspaceChange} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(within(screen.getByRole("navigation", { name: "工作区" })).getByRole("button", { name: workspace.name }));
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    await act(async () => { oldRead.resolve(detail); await oldRead.promise; });
+    expect(screen.getByRole("heading", { name: other.name })).toBeVisible();
+    expect(onWorkspaceChange).toHaveBeenLastCalledWith(other.id);
+  });
+
+  it.each(["success", "failure"] as const)("ignores a previous workspace's late send %s and stream events", async (outcome) => {
+    const bridge = bridgeFixture();
+    const { other } = addOtherWorkspace(bridge);
+    const pending = deferred<RunHandle>();
+    let emit!: (event: RunEvent) => void;
+    vi.mocked(bridge.createTurnAndStartRun).mockImplementation((_input, onEvent) => {
+      emit = onEvent;
+      return pending.promise;
+    });
+    render(<FocusWorkspace bridge={bridge} />);
+    await sendPrompt(bridge);
+    act(() => emit({ apiVersion: 1, at: workspace.createdAt, type: "text-delta", runId: "run-old", text: "A 的早到输出" }));
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "B 的新草稿" } });
+    const reads = vi.mocked(bridge.openWorkspace).mock.calls.length;
+    await act(async () => {
+      if (outcome === "success") pending.resolve(runHandle("run-old"));
+      else pending.reject(new Error("A 的延迟错误"));
+      await pending.promise.catch(() => undefined);
+      emit({ apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-old" });
+    });
+    expect(screen.getByRole("heading", { name: other.name })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("B 的新草稿");
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+    expect(screen.queryByText("A 的后台请求")).not.toBeInTheDocument();
+    expect(screen.queryByText("A 的早到输出")).not.toBeInTheDocument();
+    expect(screen.queryByText("A 的延迟错误")).not.toBeInTheDocument();
+    expect(screen.getByText("创建根 Turn")).toBeVisible();
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(reads);
+    expect(bridge.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("ignores an old stream completion while the new workspace is sending", async () => {
+    const bridge = bridgeFixture();
+    const { other } = addOtherWorkspace(bridge);
+    let oldStream!: (event: RunEvent) => void;
+    vi.mocked(bridge.createTurnAndStartRun)
+      .mockImplementationOnce(async (_input, onEvent) => { oldStream = onEvent; return runHandle("run-old"); })
+      .mockReturnValueOnce(new Promise(() => undefined));
+    render(<FocusWorkspace bridge={bridge} />);
+    await sendPrompt(bridge);
+    await screen.findByText(/从精确 Run run-old 继续/);
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "B 的请求" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(bridge.createTurnAndStartRun).toHaveBeenCalledTimes(2));
+    const reads = vi.mocked(bridge.openWorkspace).mock.calls.length;
+    act(() => oldStream({ apiVersion: 1, at: workspace.createdAt, type: "run-failed", runId: "run-old", error: { code: "old", message: "A 的流失败" } }));
+    expect(screen.getByRole("heading", { name: other.name })).toBeVisible();
+    expect(screen.getByRole("button", { name: "发送中" })).toBeDisabled();
+    expect(screen.queryByText("A 的流失败")).not.toBeInTheDocument();
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(reads);
+  });
+
+  it("does not let an old terminal refresh replace a newly opened workspace", async () => {
+    const bridge = bridgeFixture();
+    const { other, otherDetail } = addOtherWorkspace(bridge);
+    const oldRefresh = deferred<WorkspaceDetail>();
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockReturnValueOnce(oldRefresh.promise)
+      .mockResolvedValueOnce(otherDetail);
+    let emit!: (event: RunEvent) => void;
+    vi.mocked(bridge.createTurnAndStartRun).mockImplementation(async (_input, onEvent) => {
+      emit = onEvent;
+      return runHandle("run-old");
+    });
+    render(<FocusWorkspace bridge={bridge} />);
+    await sendPrompt(bridge);
+    await screen.findByText(/从精确 Run run-old 继续/);
+    act(() => emit({ apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-old" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    await act(async () => { oldRefresh.resolve(detail); await oldRefresh.promise; });
+    expect(screen.getByRole("heading", { name: other.name })).toBeVisible();
+    expect(screen.getByText("创建根 Turn")).toBeVisible();
+  });
+
+  it("preserves a draft edited during send and rejects reads from before the new Run", async () => {
+    const bridge = bridgeFixture();
+    const oldRead = deferred<WorkspaceDetail>();
+    const send = deferred<RunHandle>();
+    vi.mocked(bridge.openWorkspace).mockResolvedValueOnce(detail).mockReturnValueOnce(oldRead.promise);
+    vi.mocked(bridge.createTurnAndStartRun).mockReturnValue(send.promise);
+    render(<FocusWorkspace bridge={bridge} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.click(within(screen.getByRole("navigation", { name: "工作区" })).getByRole("button", { name: workspace.name }));
+    await sendPrompt(bridge, "发出的草稿");
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "后续仍在编辑" } });
+    await act(async () => { send.resolve(runHandle("run-new")); await send.promise; });
+    await screen.findByText(/从精确 Run run-new 继续/);
+    await act(async () => { oldRead.resolve(detail); await oldRead.promise; });
+    expect(screen.getByText(/从精确 Run run-new 继续/)).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("后续仍在编辑");
+  });
+
+  it("does not let an automatic preview supersede the send's slower context check", async () => {
+    const bridge = bridgeFixture();
+    const checked = deferred<ContextPreview>();
+    vi.mocked(bridge.inspectContext).mockReturnValueOnce(checked.promise).mockResolvedValue(preview);
+    render(<FocusWorkspace bridge={bridge} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "慢速校验仍需发送" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalledTimes(2));
+    await act(async () => { checked.resolve(preview); await checked.promise; });
+    await waitFor(() => expect(bridge.createTurnAndStartRun).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("无法生成发送前凭证。")).not.toBeInTheDocument();
+  });
+
+  it("keeps the newest same-workspace refresh when an earlier refresh arrives last", async () => {
+    const bridge = bridgeFixture();
+    const oldRefresh = deferred<WorkspaceDetail>();
+    const nextTree = contextTreeAt("run-b");
+    vi.mocked(bridge.openWorkspace).mockResolvedValueOnce(detail).mockReturnValueOnce(oldRefresh.promise)
+      .mockResolvedValue({ ...detail, selectedRunIds: { "turn-1": "run-b" }, contextCursor: nextTree.cursor });
+    vi.mocked(bridge.getContextTree).mockResolvedValueOnce(contextTree).mockResolvedValueOnce(contextTree).mockResolvedValue(nextTree);
+    let emit!: (event: RunEvent) => void;
+    vi.mocked(bridge.createTurnAndStartRun).mockImplementation(async (_input, onEvent) => { emit = onEvent; return runHandle("run-old"); });
+    render(<FocusWorkspace bridge={bridge} />);
+    await sendPrompt(bridge);
+    await screen.findByText(/从精确 Run run-old 继续/);
+    act(() => emit({ apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-old" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    act(() => emit({ apiVersion: 1, at: workspace.createdAt, type: "run-completed", runId: "run-old" }));
+    await screen.findByText(/从精确 Run run-b 继续/);
+    await act(async () => { oldRefresh.resolve(detail); await oldRefresh.promise; });
+    expect(screen.getByText(/从精确 Run run-b 继续/)).toBeVisible();
+  });
+
+  it.each(["success", "failure"] as const)("discards a previous workspace's delayed maintenance %s", async (outcome) => {
+    const bridge = bridgeFixture();
+    const { other, otherTree } = addOtherWorkspace(bridge);
+    const checkpoint = deferred<Awaited<ReturnType<DesktopBridge["createContextCheckpoint"]>>>();
+    vi.mocked(bridge.createContextCheckpoint).mockReturnValue(checkpoint.promise);
+    vi.mocked(bridge.getContextTree).mockImplementation(async ({ workspaceId }) => workspaceId === other.id ? otherTree : maintenanceTreeFixture());
+    render(<FocusWorkspace bridge={bridge} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    const open = screen.getByRole("button", { name: "准备 Context 压缩" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+    fireEvent.change(screen.getByRole("textbox", { name: "人工摘要" }), { target: { value: "A 的摘要" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存人工压缩检查点" }));
+    await waitFor(() => expect(bridge.createContextCheckpoint).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), { target: { value: "B 在继续编辑" } });
+    const reads = vi.mocked(bridge.openWorkspace).mock.calls.length;
+    await act(async () => {
+      if (outcome === "success") checkpoint.resolve({
+        id: "checkpoint-old", workspaceId: workspace.id, branchId: "branch-a", branchVersion: 2,
+        kind: "compaction", anchorRunId: "run-a", sourceRunIds: ["run-parent"], sourceHash: "old",
+        firstKeptRunId: "run-a", summary: "A 的摘要", provider: null, status: "completed", createdAt: workspace.createdAt,
+      });
+      else checkpoint.reject(new Error("A 的维护错误"));
+      await checkpoint.promise.catch(() => undefined);
+    });
+    expect(screen.getByRole("heading", { name: other.name })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("B 在继续编辑");
+    expect(screen.queryByText("Context 检查点已保存并激活。")).not.toBeInTheDocument();
+    expect(screen.queryByText("A 的维护错误")).not.toBeInTheDocument();
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(reads);
+  });
+
+  it.each(["success", "failure"] as const)("discards delayed preview and snapshot %s from the previous workspace", async (outcome) => {
+    const bridge = bridgeFixture();
+    const { other } = addOtherWorkspace(bridge);
+    const oldPreview = deferred<ContextPreview>();
+    const oldSnapshot = deferred<RunSnapshot>();
+    vi.mocked(bridge.inspectContext).mockImplementation((input) => input.workspaceId === workspace.id
+      ? oldPreview.promise : Promise.resolve({ ...preview, estimatedTokens: 123 }));
+    vi.mocked(bridge.getRunSnapshot).mockReturnValue(oldSnapshot.promise);
+    render(<FocusWorkspace bridge={bridge} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "本次实际发送的内容" }));
+    await waitFor(() => expect(bridge.getRunSnapshot).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: other.name }));
+    await screen.findByRole("heading", { name: other.name });
+    await act(async () => {
+      if (outcome === "success") {
+        oldPreview.resolve({ ...preview, estimatedTokens: 999 });
+        oldSnapshot.resolve({ id: "old", runId: "run-a", canonicalHash: "old-workspace-hash", createdAt: workspace.createdAt,
+          providerName: "Old provider", model: "old", baseUrl: "https://old.example.com", additionalHeaders: {}, parameters: {}, items: preview.items });
+      } else {
+        oldPreview.reject(new Error("A 的预览错误"));
+        oldSnapshot.reject(new Error("A 的快照错误"));
+      }
+      await Promise.allSettled([oldPreview.promise, oldSnapshot.promise]);
+    });
+    expect(screen.getByRole("heading", { name: other.name })).toBeVisible();
+    expect(screen.queryByText("old-workspace-hash")).not.toBeInTheDocument();
+    expect(screen.queryByText(/999 tokens/)).not.toBeInTheDocument();
+    expect(screen.queryByText("A 的预览错误")).not.toBeInTheDocument();
+    expect(screen.queryByText("A 的快照错误")).not.toBeInTheDocument();
+  });
+
   it("keeps random UUID generation unless a valid WebView E2E operation ID is supplied", () => {
     const randomId = "11111111-1111-4111-8111-111111111111";
     const forcedId = "22222222-2222-4222-8222-222222222222";
@@ -385,6 +753,7 @@ describe("FocusWorkspace", () => {
     render(<FocusWorkspace bridge={bridge} />);
 
     expect(await screen.findByText("已保留的失败部分输出")).toBeVisible();
+    await waitFor(() => expect(bridge.inspectContext).toHaveBeenCalled());
     expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue(
       composerProfile.id,
     );
@@ -576,6 +945,25 @@ describe("FocusWorkspace", () => {
     expect(
       within(answer as HTMLElement).queryByText("外发 · new-endpoint.example.com"),
     ).not.toBeInTheDocument();
+  });
+
+  it("notifies the shell only after a workspace opens successfully", async () => {
+    const bridge = bridgeFixture();
+    const onWorkspaceChange = vi.fn();
+    const other = { ...workspace, id: "workspace-other", name: "另一个工作区" };
+    vi.mocked(bridge.listWorkspaces).mockResolvedValue([workspace, other]);
+    vi.mocked(bridge.openWorkspace)
+      .mockResolvedValueOnce(detail)
+      .mockRejectedValueOnce(new Error("打开失败"))
+      .mockResolvedValueOnce({ ...detail, workspace: other });
+    render(<FocusWorkspace bridge={bridge} onWorkspaceChange={onWorkspaceChange} />);
+    await waitFor(() => expect(onWorkspaceChange).toHaveBeenLastCalledWith(workspace.id));
+    const otherButton = screen.getByRole("button", { name: other.name });
+    fireEvent.click(otherButton);
+    await screen.findByText("打开失败");
+    expect(onWorkspaceChange).toHaveBeenCalledTimes(1);
+    fireEvent.click(otherButton);
+    await waitFor(() => expect(onWorkspaceChange).toHaveBeenLastCalledWith(other.id));
   });
 
   it("requires and persists an explicit workspace goal", async () => {

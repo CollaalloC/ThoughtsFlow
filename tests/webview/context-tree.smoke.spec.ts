@@ -15,7 +15,20 @@ async function button(name: string) {
   const element = await $(
     `//button[@aria-label=${xpathLiteral(name)} or normalize-space(.)=${xpathLiteral(name)}]`,
   );
-  await element.waitForClickable();
+  try {
+    await element.waitForClickable();
+  } catch (reason) {
+    const geometry = await browser.execute((target) => {
+      const rect = target.getBoundingClientRect();
+      return {
+        disabled: target.hasAttribute("disabled"),
+        rect: rect.toJSON(),
+        viewport: { width: innerWidth, height: innerHeight },
+        coveringElement: document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.outerHTML,
+      };
+    }, element);
+    throw new Error(`${String(reason)}\nButton geometry: ${JSON.stringify(geometry)}\nNative WebView state:\n${await $("body").getText()}`);
+  }
   return element;
 }
 
