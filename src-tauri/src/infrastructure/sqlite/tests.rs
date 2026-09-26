@@ -127,7 +127,7 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 8);
+    assert_eq!(schema.version, 9);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -166,6 +166,260 @@ fn legacy_fixture_bytes(schema_version: i64) -> &'static [u8] {
     }
 }
 
+async fn development_v5_fixture() -> (tempfile::TempDir, sqlx::SqliteConnection) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("development.sqlite");
+    std::fs::write(
+        &path,
+        include_bytes!("../../../tests/fixtures/sqlite/development-v5.sqlite"),
+    )
+    .unwrap();
+    let connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .foreign_keys(true)
+        .connect()
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+async fn development_evidence(connection: &mut sqlx::SqliteConnection) -> Vec<String> {
+    let mut evidence = Vec::new();
+    for statement in [
+        "SELECT parameters_json FROM context_snapshot WHERE id = 'snapshot-marker'",
+        "SELECT request_json FROM context_snapshot WHERE id = 'snapshot-marker'",
+        "SELECT canonical_hash FROM context_snapshot WHERE id = 'snapshot-marker'",
+        "SELECT canonical_hash FROM context_manifest WHERE id = 'manifest-marker'",
+        "SELECT provider_snapshot_json FROM model_run WHERE id = 'run-marker'",
+        "SELECT content_hash FROM content_block WHERE id = 'prompt-upgrade'",
+    ] {
+        evidence.push(
+            sqlx::query_scalar(statement)
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+        );
+    }
+    evidence
+}
+
+async fn development_migration_history(
+    connection: &mut sqlx::SqliteConnection,
+) -> Vec<(i64, String, String, bool, Vec<u8>, i64)> {
+    sqlx::query_as(
+        "SELECT version, description, installed_on, success, checksum, execution_time \
+         FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(connection)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn development_v5_upgrade_preserves_original_history_and_receipts_across_reopen() {
+    let (directory, mut connection) = development_v5_fixture().await;
+    let history = development_migration_history(&mut connection).await;
+    let evidence = development_evidence(&mut connection).await;
+    assert_eq!(history.len(), 5);
+    assert_ne!(
+        history[4].4.as_slice(),
+        TEST_MIGRATOR
+            .iter()
+            .find(|m| m.version == 5)
+            .unwrap()
+            .checksum
+            .as_ref()
+    );
+    assert!(evidence[0].contains("_thoughsflowIsDefault"));
+    assert!(evidence[1].contains("ThoughsFlow"));
+    assert_eq!(
+        crate::domain::sha256_hex(evidence[1].as_bytes()),
+        evidence[2]
+    );
+    connection.close().await.unwrap();
+
+    for _ in 0..2 {
+        let repository = SqliteRepository::connect(directory.path().join("development.sqlite"))
+            .await
+            .expect("the recognized development lineage upgrades and reopens");
+        assert_eq!(repository.schema_info().await.unwrap().version, 9);
+        let profile = repository
+            .get_provider_profile("provider-upgrade")
+            .await
+            .unwrap();
+        assert_eq!(profile.default_model, "legacy-model");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&profile.parameters_json).unwrap(),
+            serde_json::json!({"_thoughtsflowIsDefault": "true", "temperature": "0.25"})
+        );
+        let mut connection = repository.acquire_test_connection().await.unwrap();
+        assert_eq!(development_evidence(&mut connection).await, evidence);
+        let upgraded = development_migration_history(&mut connection).await;
+        assert_eq!(
+            &upgraded[..5],
+            history.as_slice(),
+            "the old checksum and every migration metadata field remain original"
+        );
+        assert_eq!(upgraded.len(), 9);
+        let error = sqlx::query(
+            "INSERT INTO context_manifest_item \
+             (manifest_id, workspace_id, position, source_kind, role, content_block_id, \
+              inclusion_reason, source_ref_kind) \
+             SELECT manifest_id, workspace_id, 1, source_kind, role, content_block_id, \
+                    inclusion_reason, 'turn_prompt' \
+             FROM context_manifest_item WHERE manifest_id = 'manifest-marker' AND position = 0",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("typed context source identity must be paired and nonempty")
+        );
+        let unique: i64 = sqlx::query_scalar(
+            "SELECT \"unique\" FROM pragma_index_list('context_checkpoint') \
+             WHERE name = 'ux_context_checkpoint_workspace_created_at'",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(unique, 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn development_v5_constraint_failure_rolls_back_all_migrations_and_mutable_marker_changes() {
+    let (directory, mut connection) = development_v5_fixture().await;
+    for id in ["same-time-a", "same-time-b"] {
+        sqlx::query(
+            "INSERT INTO context_maintenance_run \
+             (id, workspace_id, kind, anchor_run_id, source_run_ids_json, source_hash, \
+              request_json, status, summary_block_id, created_at, started_at, finished_at) \
+             VALUES (?, 'workspace-upgrade', 'compaction', 'run-upgrade', \
+                     '[\"run-upgrade\"]', 'source-hash', '{}', 'completed', 'prompt-upgrade', 3, 3, 4)",
+        ).bind(id).execute(&mut connection).await.unwrap();
+        sqlx::query(
+            "INSERT INTO context_checkpoint \
+             (id, workspace_id, maintenance_run_id, kind, anchor_run_id, summary_block_id, \
+              source_run_ids_json, source_hash, created_at) \
+             VALUES (?, 'workspace-upgrade', ?, 'compaction', 'run-upgrade', \
+                     'prompt-upgrade', '[\"run-upgrade\"]', 'source-hash', 4)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+    let history = development_migration_history(&mut connection).await;
+    let evidence = development_evidence(&mut connection).await;
+    let parameters: String = sqlx::query_scalar(
+        "SELECT parameters_json FROM provider_profile WHERE id = 'provider-upgrade'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    let path = directory.path().join("development.sqlite");
+    let error = SqliteRepository::connect(&path)
+        .await
+        .expect_err("immutable timestamp collisions require explicit resolution");
+    assert!(error.to_string().contains("UNIQUE constraint failed: context_checkpoint.workspace_id, context_checkpoint.created_at"), "{error}");
+    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .connect()
+        .await
+        .unwrap();
+    assert_eq!(
+        development_migration_history(&mut connection).await,
+        history
+    );
+    assert_eq!(development_evidence(&mut connection).await, evidence);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT parameters_json FROM provider_profile WHERE id = 'provider-upgrade'"
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        parameters
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('agent_mission', 'context_manifest_item_typed_source_identity', 'ux_context_checkpoint_workspace_created_at')"
+    ).fetch_one(&mut connection).await.unwrap(), 0, "even the trigger created before the failing index rolls back");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM context_checkpoint WHERE created_at = 4"
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn development_v5_compatibility_rejects_unknown_checksums_history_and_schema_drift() {
+    for (alteration, expected) in [
+        (
+            "UPDATE _sqlx_migrations SET checksum = zeroblob(48) WHERE version = 5",
+            "migration 5 was previously applied but has been modified",
+        ),
+        (
+            "UPDATE _sqlx_migrations SET checksum = zeroblob(48) WHERE version = 3",
+            "not a recognized contiguous history",
+        ),
+        (
+            "DELETE FROM _sqlx_migrations WHERE version = 2",
+            "not a recognized contiguous history",
+        ),
+        (
+            "DROP TRIGGER context_snapshot_no_update",
+            "schema does not match",
+        ),
+        (
+            "CREATE TABLE unexpected_state (value TEXT)",
+            "schema does not match",
+        ),
+        (
+            "CREATE TABLE sqliteXcustom_state (value TEXT)",
+            "schema does not match",
+        ),
+    ] {
+        let (directory, mut connection) = development_v5_fixture().await;
+        sqlx::raw_sql(alteration)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let history = development_migration_history(&mut connection).await;
+        let evidence = development_evidence(&mut connection).await;
+        connection.close().await.unwrap();
+        let path = directory.path().join("development.sqlite");
+        let error = SqliteRepository::connect(&path)
+            .await
+            .expect_err("unknown databases are not auto-repaired");
+        assert!(error.to_string().contains(expected), "{error}");
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(path)
+            .connect()
+            .await
+            .unwrap();
+        assert_eq!(
+            development_migration_history(&mut connection).await,
+            history
+        );
+        assert_eq!(development_evidence(&mut connection).await, evidence);
+    }
+}
+
 async fn assert_real_file_upgrade_from(schema_version: i64) {
     let directory = tempfile::tempdir().expect("temporary directory is created");
     let path = directory
@@ -199,7 +453,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
         .await
         .expect("production repository migrator upgrades the legacy file");
     let schema = repository.schema_info().await.expect("schema is readable");
-    assert_eq!(schema.version, 8);
+    assert_eq!(schema.version, 9);
     let migrated = repository
         .get_provider_profile("provider-upgrade")
         .await
@@ -262,7 +516,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     let index_columns = sqlx::query_scalar::<_, String>(
         "SELECT name FROM pragma_index_info('idx_manifest_item_workspace_content') ORDER BY seqno",
@@ -510,7 +764,7 @@ async fn default_marker_upgrade_preserves_json_types_values_and_all_historical_e
     let repository = SqliteRepository::connect(&directory.path().join("upgrade.sqlite"))
         .await
         .expect("schema v7 upgrades through the production startup path");
-    assert_eq!(repository.schema_info().await.unwrap().version, 8);
+    assert_eq!(repository.schema_info().await.unwrap().version, 9);
     for (index, value) in values.iter().enumerate() {
         let profile = repository
             .get_provider_profile(&format!("marker-{index}"))
@@ -723,7 +977,7 @@ async fn default_marker_upgrade_rolls_back_profile_writes_if_migration_history_c
     let repository = SqliteRepository::connect(&path)
         .await
         .expect("repair permits a complete retry");
-    assert_eq!(repository.schema_info().await.unwrap().version, 8);
+    assert_eq!(repository.schema_info().await.unwrap().version, 9);
     let parameters = repository
         .get_provider_profile("provider-upgrade")
         .await

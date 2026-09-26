@@ -218,13 +218,24 @@ async fn finish(repository: &SqliteRepository, run_id: &str, output: &str, at: i
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn native_ipc_legacy_default_profile_survives_upgrade_and_sends_preserved_settings() {
+    for (name, bytes) in [
+        (
+            "legacy-v7",
+            &include_bytes!("fixtures/sqlite/legacy-v7.sqlite")[..],
+        ),
+        (
+            "development-v5",
+            &include_bytes!("fixtures/sqlite/development-v5.sqlite")[..],
+        ),
+    ] {
+        assert_upgraded_default_profile_sends_preserved_settings(name, bytes).await;
+    }
+}
+
+async fn assert_upgraded_default_profile_sends_preserved_settings(name: &str, bytes: &[u8]) {
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("legacy-default.sqlite3");
-    std::fs::write(
-        &database,
-        include_bytes!("fixtures/sqlite/legacy-v7.sqlite"),
-    )
-    .unwrap();
+    let database = directory.path().join(format!("{name}-default.sqlite3"));
+    std::fs::write(&database, bytes).unwrap();
 
     // A local HTTP server records the real Reqwest request; it never reaches a
     // model vendor. Every socket operation has a bound even if the test fails.
@@ -289,9 +300,9 @@ async fn native_ipc_legacy_default_profile_survives_upgrade_and_sends_preserved_
     });
 
     // Redirect the mutable endpoint and create an empty workspace while the
-    // database is still v7. The fixture's historical receipts deliberately use
+    // database is still on its old schema. Historical receipts deliberately use
     // synthetic hashes for migration tests; leave those evidence rows intact.
-    // The default marker, model and sampling values come from the frozen v7.
+    // The default marker, model and sampling values come from the frozen fixture.
     let old_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&database))
@@ -321,7 +332,11 @@ async fn native_ipc_legacy_default_profile_survives_upgrade_and_sends_preserved_
 
     // Use the production migration and startup paths before crossing the
     // public IPC surface that the desktop frontend uses to select a default.
-    let repository = Arc::new(SqliteRepository::connect(&database).await.unwrap());
+    let repository = Arc::new(
+        SqliteRepository::connect(&database)
+            .await
+            .unwrap_or_else(|error| panic!("{name} upgrade failed: {error}")),
+    );
     let backend = backend(repository.clone(), directory.path().join("exports"));
     backend.initialize().await.unwrap();
     let app = app(backend);

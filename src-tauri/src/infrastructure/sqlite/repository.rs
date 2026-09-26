@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     path::Path,
     sync::atomic::{AtomicUsize, Ordering},
@@ -6,14 +7,109 @@ use std::{
 };
 
 use sqlx::{
-    Row, Sqlite, SqliteConnection, SqlitePool, Transaction,
-    migrate::Migrator,
+    Connection, Row, Sqlite, SqliteConnection, SqlitePool, Transaction,
+    migrate::{Migration, Migrator},
     sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
 };
 
 use super::*;
 
 static MIGRATOR: Migrator = sqlx::migrate!();
+
+// This exact pre-commit development script predates the canonical v5 by two
+// additive constraints. Keep its original evidence; never rewrite its checksum.
+const DEVELOPMENT_V5_CHECKSUM: [u8; 48] = [
+    0xbb, 0xaa, 0x28, 0xed, 0x3b, 0x82, 0xd0, 0xc7, 0x2c, 0x73, 0x8b, 0xd2, 0xd5, 0x60, 0x48, 0xa5,
+    0x96, 0x67, 0xae, 0x69, 0xdc, 0xcb, 0x29, 0xcb, 0xcc, 0xde, 0x06, 0x2b, 0xa9, 0xc2, 0xf6, 0xa4,
+    0xf9, 0x27, 0x02, 0xde, 0x73, 0xa1, 0x1e, 0x8b, 0x0c, 0x39, 0x03, 0xb5, 0x2a, 0xa5, 0x29, 0x21,
+];
+
+type SchemaObject = (String, String, String, Option<String>);
+
+async fn stored_schema(connection: &mut SqliteConnection) -> RepositoryResult<Vec<SchemaObject>> {
+    Ok(sqlx::query_as(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema \
+         WHERE name NOT GLOB 'sqlite_*' AND name <> '_sqlx_migrations' ORDER BY type, name",
+    )
+    .fetch_all(connection)
+    .await?)
+}
+
+async fn migrate_database(pool: &SqlitePool) -> RepositoryResult<()> {
+    let has_history: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let checksum: Option<Vec<u8>> = if has_history {
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 5")
+            .fetch_optional(pool)
+            .await?
+    } else {
+        None
+    };
+    if checksum.as_deref() != Some(DEVELOPMENT_V5_CHECKSUM.as_slice()) {
+        // Includes unknown checksums: the normal SQLx validator rejects them.
+        MIGRATOR.run(pool).await?;
+        return Ok(());
+    }
+
+    // A single write reservation covers schema inspection and every remaining
+    // migration. Any incompatibility also rolls back mutable profile changes.
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut migrations = MIGRATOR.migrations.to_vec();
+    let canonical = migrations.iter_mut().find(|m| m.version == 5).unwrap();
+    *canonical = Migration::new(
+        canonical.version,
+        canonical.description.clone(),
+        canonical.migration_type,
+        Cow::Borrowed(include_str!(
+            "../../../migration-compat/0005_context_tree_development.sql"
+        )),
+        canonical.no_tx,
+    );
+    if canonical.checksum.as_ref() != DEVELOPMENT_V5_CHECKSUM {
+        return Err(RepositoryError::InvalidStoredValue(
+            "frozen development migration v5 checksum does not match its allowlist".into(),
+        ));
+    }
+    let migrator = Migrator {
+        migrations: Cow::Owned(migrations),
+        ..Migrator::DEFAULT
+    };
+    let applied = sqlx::query_as::<_, (i64, Vec<u8>, bool)>(
+        "SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for (position, (version, checksum, success)) in applied.iter().enumerate() {
+        let expected = migrator.iter().nth(position);
+        if !success
+            || expected.is_none_or(|m| m.version != *version || m.checksum.as_ref() != checksum)
+        {
+            return Err(RepositoryError::InvalidStoredValue(
+                "development v5 migration history is not a recognized contiguous history".into(),
+            ));
+        }
+    }
+
+    // Compare only schema, never private row content, against the exact known
+    // migration lineage. Reopen and interrupted-upgrade states use the same gate.
+    let last_version = applied.last().map(|entry| entry.0).unwrap_or(0);
+    let mut expected = SqliteConnection::connect("sqlite::memory:").await?;
+    for migration in migrator.iter().filter(|m| m.version <= last_version) {
+        sqlx::raw_sql(&migration.sql).execute(&mut expected).await?;
+    }
+    if stored_schema(&mut transaction).await? != stored_schema(&mut expected).await? {
+        return Err(RepositoryError::InvalidStoredValue(
+            "development v5 database schema does not match its recognized migration history".into(),
+        ));
+    }
+    expected.close().await?;
+    migrator.run(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
 
 static CONTEXT_LOGICAL_READS: AtomicUsize = AtomicUsize::new(0);
 
@@ -100,7 +196,7 @@ impl SqliteRepository {
         pool_options: SqlitePoolOptions,
     ) -> RepositoryResult<Self> {
         let pool = pool_options.connect_with(options).await?;
-        MIGRATOR.run(&pool).await?;
+        migrate_database(&pool).await?;
         // Do not rely solely on connect options: verify the live connection
         // used by the pool has the safety setting enabled.
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")

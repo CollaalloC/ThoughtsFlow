@@ -49,3 +49,26 @@ to prove the production SQLx transaction rolls everything back.
 
 Do not regenerate this file from the current production migrator: that would
 erase its independence from the migration being tested.
+
+## Frozen pre-commit development v5
+
+`development-v5.sqlite` is synthetic. It copies `legacy-v4.sqlite` and applies
+the independently reconstructed pre-commit v5 SQL frozen in
+`../../../migration-compat/0005_context_tree_development.sql`. Its migration
+history retains that script's original SHA-384; the public canonical v5 SQL is
+not substituted. Fixture SHA-256:
+`4fbce9855a8adf0b4840d17f22e88285e35d0fc971b9074ae77f6c03f2a4296e`.
+
+The fixture sets `provider-upgrade` to the old string default marker and
+temperature `0.25`, keeping `legacy-model`. Added `run-marker` and
+`snapshot-marker` rows contain deliberately old product/marker names. Their
+manifest and snapshot hashes match the original synthetic request bytes.
+No actual application database, user prompt, credential, or Agent identifier
+was copied into this file.
+
+Tests exercise the production startup path, preserve every original migration
+metadata field and historical receipt value, verify the new constraints and
+restart, and reject unknown checksums, incomplete histories, and schema drift.
+A pair of synthetic conflicting checkpoint timestamps proves that the whole
+development upgrade rolls back rather than rewriting historical timestamps or
+leaving migration 8's mutable marker change partly committed.

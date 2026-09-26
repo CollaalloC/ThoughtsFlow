@@ -3,6 +3,7 @@ package-lock.json text eol=lf
 src-tauri/Cargo.lock text eol=lf
 # SQLx hashes migration bytes; Windows checkout must not turn LF into CRLF.
 src-tauri/migrations/*.sql text eol=lf
+src-tauri/migration-compat/*.sql text eol=lf
 src-tauri/tests/fixtures/sqlite/*.sqlite -text
 # Preserve upstream license/source bytes, including original line endings and whitespace.
 licenses/** -text -whitespace
