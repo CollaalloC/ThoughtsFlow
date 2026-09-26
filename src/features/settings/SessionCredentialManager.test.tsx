@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopBridge } from "../../platform/desktop-bridge";
+import { createDesktopBridge, type DesktopBridge } from "../../platform/desktop-bridge";
 import type { SessionCredentialSummary } from "../../shared/contracts";
 import { SessionCredentialManager } from "./SessionCredentialManager";
 
@@ -28,6 +28,7 @@ const emergencyCredential: SessionCredentialSummary = {
 
 function createBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   return {
+    ...createDesktopBridge(async () => { throw new Error("Unexpected IPC in test"); }),
     listWorkspaces: vi.fn(),
     createWorkspace: vi.fn(),
     openWorkspace: vi.fn(),

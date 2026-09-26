@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopBridge } from "../platform/desktop-bridge";
+import { createDesktopBridge, type DesktopBridge } from "../platform/desktop-bridge";
 import type {
   CompareRunsResult,
   ContextTreeProjection,
@@ -177,6 +177,7 @@ const comparison: CompareRunsResult = {
 
 function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   return {
+    ...createDesktopBridge(async () => { throw new Error("Unexpected IPC in test"); }),
     listWorkspaces: vi.fn().mockResolvedValue([workspace]),
     createWorkspace: vi.fn().mockResolvedValue(workspace),
     openWorkspace: vi.fn().mockResolvedValue(detail),
@@ -249,6 +250,39 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
 }
 
 describe("App", () => {
+  it("binds Agent collaboration to the workspace successfully selected in Focus", async () => {
+    const user = userEvent.setup();
+    const otherWorkspace = { ...workspace, id: "workspace-2", name: "第二工作区" };
+    const bridge = bridgeFixture({
+      listWorkspaces: vi.fn().mockResolvedValue([workspace, otherWorkspace]),
+      openWorkspace: vi.fn().mockImplementation(async (id: string) => ({ ...detail, workspace: id === otherWorkspace.id ? otherWorkspace : workspace })),
+      agentEnvironment: vi.fn().mockResolvedValue({ available: true, running: false, orcaVersion: "1", ompVersion: "1", runtimeId: null, projects: [], message: null }),
+      listAgentMissions: vi.fn().mockResolvedValue([]),
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByRole("heading", { name: workspace.name });
+    await user.click(within(screen.getByRole("navigation", { name: "工作区" })).getByRole("button", { name: otherWorkspace.name }));
+    await screen.findByRole("heading", { name: otherWorkspace.name });
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Agent 协作" }));
+    await waitFor(() => expect(bridge.listAgentMissions).toHaveBeenCalledWith(otherWorkspace.id));
+  });
+
+  it("opens Agent collaboration for the current workspace without starting a task", async () => {
+    const user = userEvent.setup();
+    const bridge = bridgeFixture({
+      agentEnvironment: vi.fn().mockResolvedValue({ available: true, running: false, orcaVersion: "1", ompVersion: "1", runtimeId: null, projects: [], message: null }),
+      listAgentMissions: vi.fn().mockResolvedValue([]),
+      startAgentTask: vi.fn(),
+    });
+    render(<App bridge={bridge} />);
+    const navigation = screen.getByRole("navigation", { name: "工作面" });
+    await waitFor(() => expect(within(navigation).getByRole("button", { name: "Agent 协作" })).toBeEnabled());
+    await user.click(within(navigation).getByRole("button", { name: "Agent 协作" }));
+    expect(await screen.findByRole("region", { name: "Agent 协作工作面" })).toBeVisible();
+    expect(bridge.listAgentMissions).toHaveBeenCalledWith(workspace.id);
+    expect(bridge.startAgentTask).not.toHaveBeenCalled();
+  });
+
   it("deep-links credential recovery to the failed Provider and clears it on ordinary navigation", async () => {
     const user = userEvent.setup();
     const failedProvider: ProviderProfile = {

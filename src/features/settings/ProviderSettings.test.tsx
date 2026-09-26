@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
+import { createDesktopBridge, DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type { ProviderModelInfo, ProviderTemplate } from "../../shared/contracts";
 import { ProviderSettings } from "./ProviderSettings";
 
@@ -32,6 +32,7 @@ function deferred<T>() {
 
 function createProviderSettingsBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   return {
+    ...createDesktopBridge(async () => { throw new Error("Unexpected IPC in test"); }),
     listWorkspaces: vi.fn(),
     createWorkspace: vi.fn(),
     openWorkspace: vi.fn(),

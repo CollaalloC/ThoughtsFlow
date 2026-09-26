@@ -1,4 +1,4 @@
-import { ArrowLeft, GitCompareArrows, Map, MessageSquareText, Settings2 } from "lucide-react";
+import { ArrowLeft, Bot, GitCompareArrows, Map, MessageSquareText, Settings2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { DecisionRunOption } from "../features/decision";
 import { FocusWorkspace } from "../features/conversation";
@@ -14,7 +14,11 @@ import "../shared/tokens/index.css";
 import "../shared/ui/styles.css";
 import "./app.css";
 
-type AppView = "focus" | "route" | "decision" | "settings";
+type AppView = "focus" | "route" | "decision" | "agents" | "settings";
+
+const AgentWorkspace = lazy(() =>
+  import("../features/agents").then((module) => ({ default: module.AgentWorkspace })),
+);
 
 const DecisionWorkspace = lazy(() =>
   import("../features/decision").then((module) => ({ default: module.DecisionWorkspace })),
@@ -245,6 +249,14 @@ export function App({ bridge: providedBridge }: AppProps) {
             <GitCompareArrows aria-hidden="true" size={14} /> 决策
           </button>
           <button
+            aria-current={view === "agents" ? "page" : undefined}
+            disabled={!workspaceId}
+            onClick={() => openOrdinaryView("agents")}
+            type="button"
+          >
+            <Bot aria-hidden="true" size={14} /> Agent 协作
+          </button>
+          <button
             aria-current={view === "settings" ? "page" : undefined}
             onClick={() => openSettings()}
             type="button"
@@ -259,6 +271,7 @@ export function App({ bridge: providedBridge }: AppProps) {
           <FocusWorkspace
             bridge={bridge}
             initialWorkspaceId={workspaceId}
+            onWorkspaceChange={setWorkspaceId}
             onOpenDecisions={openDecisions}
             onOpenRouteMap={openRoute}
             onOpenSettings={openSettings}
@@ -274,12 +287,13 @@ export function App({ bridge: providedBridge }: AppProps) {
                 <ArrowLeft aria-hidden="true" size={15} /> 返回 Focus
               </button>
               <div>
-                <span>{view === "route" ? "ROUTE MAP" : view === "decision" ? "DECISION" : "PROVIDERS"}</span>
+                <span>{view === "route" ? "ROUTE MAP" : view === "decision" ? "DECISION" : view === "agents" ? "AGENTS" : "PROVIDERS"}</span>
                 {detail?.workspace.name ? <strong>{detail.workspace.name}</strong> : null}
               </div>
             </header>
 
             <Suspense fallback={<LoadingState label="正在加载工作面" />}>
+              {view === "agents" ? <AgentWorkspace bridge={bridge} workspaceId={workspaceId} /> : null}
               {view === "settings" ? (
                 <ProviderSettings
                   bridge={bridge}
@@ -287,11 +301,11 @@ export function App({ bridge: providedBridge }: AppProps) {
                 />
               ) : null}
 
-              {view !== "settings" && loading ? (
+              {(view === "route" || view === "decision") && loading ? (
                 <LoadingState label={view === "route" ? "正在读取路线投影" : "正在读取决策工作区"} />
               ) : null}
 
-              {view !== "settings" && error ? (
+              {(view === "route" || view === "decision") && error ? (
                 <div className="app-shell__error">
                   <ErrorState message={error} />
                   <button onClick={() => setReloadKey((value) => value + 1)} type="button">

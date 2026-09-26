@@ -89,6 +89,7 @@ type FocusWorkspaceProps = {
   bridge: DesktopBridge;
   initialWorkspaceId?: string;
   initialRunId?: string;
+  onWorkspaceChange?: (workspaceId: string) => void;
   onOpenRouteMap?: (workspaceId: string, runId?: string) => void;
   onOpenDecisions?: (workspaceId: string) => void;
   onOpenSettings?: (providerProfileId?: string) => void;
@@ -312,6 +313,7 @@ export function FocusWorkspace({
   bridge,
   initialWorkspaceId,
   initialRunId,
+  onWorkspaceChange,
   onOpenRouteMap,
   onOpenDecisions,
   onOpenSettings,
@@ -347,6 +349,10 @@ export function FocusWorkspace({
   const manualCheckpointOperation = useRef<{ fingerprint: string; id: string } | null>(null);
   const providerCheckpointOperation = useRef<{ fingerprint: string; id: string } | null>(null);
   const snapshotRequestToken = useRef(0);
+
+  useEffect(() => {
+    if (detail) onWorkspaceChange?.(detail.workspace.id);
+  }, [detail?.workspace.id, onWorkspaceChange]);
 
   const selectedProfile = profiles.find((profile) => profile.id === providerId) ?? profiles[0];
   const parentRunId = contextTree?.cursor.activeRunId ?? null;

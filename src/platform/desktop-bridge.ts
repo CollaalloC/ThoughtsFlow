@@ -1,5 +1,16 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  AgentEnvironment,
+  AgentMission,
+  AgentOperation,
+  AgentOutput,
+  AgentSnapshot,
+  CreateAgentMissionInput,
+  ReadAgentOutputInput,
+  ReconnectAgentMissionInput,
+  ReleaseAgentWorkerInput,
+  ReplyToAgentInput,
+  StartAgentTaskInput,
   ApiEnvelope,
   CompareRunsResult,
   ContextBranchView,
@@ -38,6 +49,17 @@ import type {
 } from "../shared/contracts";
 
 export interface DesktopBridge {
+  agentEnvironment(): Promise<AgentEnvironment>;
+  openAgentRuntime(): Promise<AgentEnvironment>;
+  listAgentMissions(workspaceId: string): Promise<AgentMission[]>;
+  createAgentMission(input: CreateAgentMissionInput): Promise<AgentMission>;
+  getAgentSnapshot(missionId: string): Promise<AgentSnapshot>;
+  startAgentTask(input: StartAgentTaskInput): Promise<AgentOperation>;
+  replyToAgent(input: ReplyToAgentInput): Promise<AgentOperation>;
+  releaseAgentWorker(input: ReleaseAgentWorkerInput): Promise<AgentOperation>;
+  reconnectAgentMission(input: ReconnectAgentMissionInput): Promise<AgentOperation>;
+  listAgentOperations(missionId: string): Promise<AgentOperation[]>;
+  readAgentOutput(input: ReadAgentOutputInput): Promise<AgentOutput>;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
   createWorkspace(input: {
     name: string;
@@ -224,6 +246,17 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
   };
 
   return {
+    agentEnvironment: () => request("agent_environment"),
+    openAgentRuntime: () => request("agent_open_runtime"),
+    listAgentMissions: (workspaceId) => request("agent_list_missions", { workspaceId }),
+    createAgentMission: (input) => request("agent_create_mission", { input }),
+    getAgentSnapshot: (missionId) => request("agent_snapshot", { missionId }),
+    startAgentTask: (input) => request("agent_start_task", { input }),
+    replyToAgent: (input) => request("agent_reply", { input }),
+    releaseAgentWorker: (input) => request("agent_release_worker", { input }),
+    reconnectAgentMission: (input) => request("agent_reconnect", { input }),
+    listAgentOperations: (missionId) => request("agent_operations", { missionId }),
+    readAgentOutput: (input) => request("agent_read_output", { input }),
     listWorkspaces: () => request("list_workspaces"),
     createWorkspace: (input) => request("create_workspace", { input }),
     openWorkspace: (id) => request("open_workspace", { id }),
