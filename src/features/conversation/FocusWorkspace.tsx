@@ -85,6 +85,7 @@ type WorkspaceDetailView = WorkspaceDetail;
 type ContextPreviewView = ContextPreview;
 type ProviderProfileView = ProviderProfile;
 type RunEventView = RunEvent;
+const inspectorOverlayQuery = "(max-width: 1180px)";
 
 type FocusWorkspaceProps = {
   bridge: DesktopBridge;
@@ -337,7 +338,7 @@ export function FocusWorkspace({
   const [branchDraft, setBranchDraft] = useState("");
   const [preview, setPreview] = useState<ContextPreviewView | null>(null);
   const [draftVersion, setDraftVersion] = useState<number | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(() => !window.matchMedia(inspectorOverlayQuery).matches);
   const [snapshot, setSnapshot] = useState<LockedSnapshot | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -361,6 +362,16 @@ export function FocusWorkspace({
     () => session.capture(detail?.workspace.id),
     [detail?.workspace.id, session, session.generation],
   );
+
+  useEffect(() => {
+    const media = window.matchMedia(inspectorOverlayQuery);
+    const closeOnNarrow = (event: MediaQueryListEvent) => {
+      if (event.matches) setInspectorOpen(false);
+    };
+    if (media.matches) setInspectorOpen(false);
+    media.addEventListener("change", closeOnNarrow);
+    return () => media.removeEventListener("change", closeOnNarrow);
+  }, []);
 
   useEffect(() => {
     if (detail) onWorkspaceChange?.(detail.workspace.id);

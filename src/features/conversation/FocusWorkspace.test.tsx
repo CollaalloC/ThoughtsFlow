@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
   ContextPreview,
@@ -340,6 +340,45 @@ async function sendPrompt(bridge: DesktopBridge, prompt = "A 的后台请求") {
 }
 
 describe("FocusWorkspace", () => {
+  describe("responsive Inspector", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("starts closed on narrow screens and can be opened and closed explicitly", async () => {
+      const media = { ...window.matchMedia("(max-width: 1180px)"), matches: true };
+      vi.spyOn(window, "matchMedia").mockReturnValue(media);
+      render(<FocusWorkspace bridge={bridgeFixture()} />);
+      await screen.findByRole("heading", { name: workspace.name });
+      expect(screen.queryByRole("complementary", { name: "Context Inspector" })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "打开上下文检查器" }));
+      expect(screen.getByRole("complementary", { name: "Context Inspector" })).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "关闭上下文检查器" }));
+      expect(screen.queryByRole("complementary", { name: "Context Inspector" })).not.toBeInTheDocument();
+    });
+
+    it("collapses when entering narrow layout without reopening on expansion and removes its listener", async () => {
+      const media = {
+        ...window.matchMedia("(max-width: 1180px)"),
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      };
+      vi.spyOn(window, "matchMedia").mockReturnValue(media);
+      const rendered = render(<FocusWorkspace bridge={bridgeFixture()} />);
+      expect(await screen.findByRole("complementary", { name: "Context Inspector" })).toBeVisible();
+      expect(media.addEventListener).toHaveBeenCalledWith("change", expect.any(Function));
+      const listener = media.addEventListener.mock.calls[0][1];
+      act(() => listener({ matches: true }));
+      expect(screen.queryByRole("complementary", { name: "Context Inspector" })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "打开上下文检查器" }));
+      expect(screen.getByRole("complementary", { name: "Context Inspector" })).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "关闭上下文检查器" }));
+      act(() => listener({ matches: false }));
+      expect(screen.queryByRole("complementary", { name: "Context Inspector" })).not.toBeInTheDocument();
+      rendered.unmount();
+      expect(media.removeEventListener).toHaveBeenCalledWith("change", listener);
+    });
+  });
+
   it("can create the first workspace after StrictMode replays mount effects", async () => {
     const bridge = bridgeFixture();
     vi.mocked(bridge.listWorkspaces).mockResolvedValue([]);

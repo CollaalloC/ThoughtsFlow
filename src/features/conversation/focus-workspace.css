@@ -156,7 +156,7 @@
 
 @media (max-width: 1180px) {
   .focus-workspace.has-inspector { grid-template-columns: 210px minmax(0, 1fr); }
-  .focus-workspace.has-inspector > .context-inspector { position: fixed; top: 0; right: 0; bottom: 0; width: min(360px, 90vw); box-shadow: -18px 0 46px rgb(32 38 34 / 16%); }
+  .focus-workspace.has-inspector > .context-inspector { position: absolute; top: 0; right: 0; bottom: 0; width: min(360px, 90vw); box-shadow: -18px 0 46px rgb(32 38 34 / 16%); }
   .focus-header__actions .tf-button span:not(.focus-header__count) { display: none; }
 }
 
