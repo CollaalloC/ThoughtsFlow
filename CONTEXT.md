@@ -65,3 +65,25 @@ _Avoid_: Route, parent link, UI tab
 **Route**:
 A lineage of Turns connected through exact Model Runs.
 _Avoid_: Thread, canvas path
+
+## Agent Collaboration
+
+**Mission**:
+A user-owned collaboration objective attached to one ThoughsFlow workspace and one code project, containing work delegated to agents.
+_Avoid_: Model Run, conversation branch, provider request
+
+**Orchestration Run**:
+The external coordination scope that groups Agent Tasks and their Dispatches for one Mission.
+_Avoid_: Model Run, model answer, Provider request
+
+**Agent Task**:
+An independently reviewable piece of work with an explicit scope, constraints, and acceptance criteria.
+_Avoid_: Prompt, terminal, agent process
+
+**Dispatch**:
+One authoritative attempt by an agent to execute an Agent Task; a later attempt does not overwrite its result.
+_Avoid_: Model Run, Task, retry in place
+
+**Agent Operation**:
+One user request to control collaboration, with a durable identity and evidence of its outcome; command acceptance is separate from task completion.
+_Avoid_: Agent result, inferred success

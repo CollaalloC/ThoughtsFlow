@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-22",
+  "result": "passed",
+  "kind": "real-single-agent-smoke",
+  "durationSeconds": 106.2,
+  "orcaVersion": "1.4.206",
+  "ompVersion": "18.2.8",
+  "reportedModel": "openai-codex/gpt-6-astra",
+  "missionId": "f4ee8be1-a259-4542-a3c0-ae7ffb7c08e0",
+  "runId": "run_fa760e504ba6",
+  "taskId": "task_6eb5c47aee69",
+  "dispatchId": "ctx_4defa370e000",
+  "taskStatus": "completed",
+  "workerOutcome": "succeeded",
+  "resourceState": "released",
+  "liveness": "exited",
+  "sourceArtifact": "/Users/collaalloc/orca/workspaces/ThoughsFlow/tf-8a0f84e7823d482c8d1e8119dc3072e1/.thoughsflow-smoke-proof.json",
+  "artifact": "output/real-agent-proof-20260922.json",
+  "sha256": "292c62b751b2a03585b7fa285aa62a93102d78f949e3a95f05a317f030d45223",
+  "independentVerification": {
+    "nonce": true,
+    "sum42": true,
+    "workingDirectory": true
+  },
+  "onlyGitChange": ".thoughsflow-smoke-proof.json",
+  "coordinatorCleaned": true,
+  "limitations": [
+    "One real Agent short task; real multi-Agent concurrency not validated",
+    "Agent Python assertions passed but subsequent guide lookup in the same call failed and was recovered",
+    "Archived transcript is clipped, not a full error-free log"
+  ]
+}

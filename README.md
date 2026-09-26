@@ -82,6 +82,22 @@ Run、Manifest 与 Snapshot 在 Provider I/O 前由同一数据库事务落盘�
 
 Decision Packet 只能由 Rust 文件适配器在上述 `exports` 目录创建新文件；WebView 命令不接受目标路径，也不会覆盖已有文件。
 
+## Orca + OMP Agent 协作
+
+“Agent 协作”工作面把 ThoughsFlow 的目标工作台、Orca 的多 Agent 编排和 OMP 的任务执行连接起来。架构与分阶段实施说明见 [AGENT_ARCHITECTURE.md](docs/AGENT_ARCHITECTURE.md)。本机协议核查基线为 Orca 1.4.206、OMP 18.2.8。
+
+1. 安装 Orca 和 OMP，在 Orca 中登记代码项目，并配置好 OMP 的模型与认证。
+2. 打开一个 ThoughsFlow 工作区，进入“Agent 协作”，检测或启动本机 Orca。
+3. 选择代码项目，填写协作目标；每个目标拥有独立的 Orca Run 与专用协调者终端。
+4. 为每个可独立完成的任务填写标题、范围、约束与验收条件，点击“启动 OMP 任务”。任务在 Orca 新建的独立工作区中运行，可以并行执行；不会自动合并代码。
+5. 查看任务进展、读取输出、回复协调问题；任务结算后可以释放执行器，Orca 保留其输出存档。
+
+Agent 使用本机 OMP 设置，不复用 ThoughsFlow 的 Provider 会话凭据，也不自动附带对话历史。停止运行中任务和 OMP 工具审批继续在 Orca/OMP 的原生界面处理；ThoughsFlow 的问题回复只处理协作消息。独立 worktree 从 Orca 项目默认 base 创建，不包含当前未提交改动，也不是操作系统权限沙箱。
+
+关联和每次操作的回执保存在现有 SQLite。任务状态与执行器存活分别显示；命令接受不代表任务完成。连接中断或操作结果未知时，不会自动重发或启动替代执行器。重新连接只恢复原协作身份；未知派发仍需根据回执和 Orca 实际状态核查。当前版本提供人工任务拆分、并行执行和人工审查，自动依赖调度与结果采纳到 Decision Packet 属于后续阶段。
+
+CLI 不在默认路径时，可在启动应用的进程环境中设置绝对路径 `THOUGHSFLOW_ORCA_BIN`、`THOUGHSFLOW_OMP_BIN`。WebView 不提供任意命令执行入口。Agent 功能仅连接本机 Orca；缺少运行环境不会影响普通对话功能。
+
 ## 验证
 
 ```bash
@@ -90,6 +106,7 @@ npm run test:fixtures
 npm run test:e2e
 npm run test:native
 npm run test:webview
+npm run test:webview:agents
 
 cd src-tauri
 cargo fmt --all -- --check
@@ -98,6 +115,10 @@ cargo test --all-targets
 ```
 
 `npm run test:webview` 会构建独立标识符、独立数据目录且仅测试构建启用 WebDriver 的 macOS 应用，然后在真实 WKWebView 中执行冒烟和三进程重启旅程。旅程覆盖活动叶切换与重开、运行中断恢复、摘要失败/取消、checkpoint 提交后 IPC 响应前崩溃，以及同一 operation ID 的幂等重放。测试专用驱动、审计捕获和故障注入均受 `webview-e2e` feature 限制，不进入普通 production build。
+
+`npm run test:webview:agents` 在真实 WKWebView 中走 Agent 表单、Tauri IPC、SQLite 和 CLI 子进程，使用隔离的模拟 Orca 可执行程序验证创建、派发、提问回复、输出、释放和页面重载恢复，不联系真实模型。它与本机 Orca 控制链路核查分别记录，不能作为真实 OMP 模型任务已完成的证据。
+
+真实 OMP 验证是独立的显式 opt-in：设置 `TF_AGENT_LIVE=1` 和从 `orca repo list --json` 取得的 `TF_AGENT_LIVE_REPO_ID` 后运行 `npm run test:webview:agents:live`。该测试会使用现有 OMP 模型配置，在 Orca 独立工作区创建一个带随机标记的验证文件，读取结果并释放已结算执行器；保留临时应用数据库与回执路径以便失败后核查，不会在普通测试中自动运行，也不会在超时后自动重派。
 
 本机 OpenAI-compatible 端点可以用固定、无项目数据的提示做显式 opt-in 探针：
 
@@ -130,7 +151,7 @@ Context Tree 的设计参考固定在 oh-my-pi commit [`d16c6168`](https://githu
 
 - 当前运行 dialect 为 OpenAI-compatible Chat Completions、Ollama native、Anthropic Messages 与 Google Gemini `streamGenerateContent`；Azure OpenAI 尚不可运行；
 - Google 的 `thoughtSignature` 会被识别为不透明协议元数据且不会误显示为 reasoning，但当前不持久化或回送；纯文本多轮通常仍可调用，复杂推理质量可能受影响，工具调用所要求的签名连续性也不在本轮范围内；
-- 没有登录、云同步、多人协作、移动端、Agent/MCP、工具执行、RAG、附件或完整知识库；
+- 没有登录、云同步、多人协作、移动端、RAG、附件或完整知识库；Agent、工具和 MCP 执行由本机 Orca/OMP 提供，普通对话仍为纯文本模型请求；
 - Context token 数为保守估算，不是 Provider tokenizer 的精确计数；超限会阻止发送，不做静默截断或摘要；
 - Context pin/exclude 是持久化的“下一次发送”草稿；成功发送后消费，失败不消费，切换路径时原子清空并重基；已锁定 Receipt 永远不变；
 - 会话凭据当前没有 OS Credential Store、OAuth 或远程 Secret broker；退出应用后必须重新提供；
@@ -138,6 +159,8 @@ Context Tree 的设计参考固定在 oh-my-pi commit [`d16c6168`](https://githu
 - 当前只在本仓库的 macOS 环境做原生构建/冒烟，不声称 Windows 或 Linux 已实机验证。
 
 产品定位、架构证据和原型结论分别见 [PRODUCT_BLUEPRINT.md](./PRODUCT_BLUEPRINT.md)、[产品市场定位与切入策略调研.md](./产品市场定位与切入策略调研.md)、[跨平台技术路线与产品技术架构调研.md](./跨平台技术路线与产品技术架构调研.md) 与 [AI分支对话产品需求与架构调研报告.md](./AI分支对话产品需求与架构调研报告.md)。
+
+当前实现与最初构想的逐项对应见 [VISION_ALIGNMENT.md](docs/VISION_ALIGNMENT.md)。工作区异步归属、Agent 回执原子提交与后续证据闭环的设计见 [ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md)。核心推演流程已具备生产实现，但完整全文搜索、可恢复工作区数据包、Agent 结果进入决策和真实用户验证仍是明确的待完成项。
 
 ## 项目级 MCP 配置
 

@@ -1,5 +1,7 @@
 # ThoughsFlow 代码实现审查（修正版）
 
+> 历史报告：以下结论对应 2026-07-22，部分问题已经修复。2026-09-22 的当前实现核查与优化方案见 [原始构想达成度](docs/VISION_ALIGNMENT.md) 和 [架构优化](docs/ARCHITECTURE_EVOLUTION.md)，请勿将历史行号和建议直接当作当前缺陷。
+
 > 审查日期：2026-07-22
 > 范围：当前工作区全部生产代码，对照 `README.md`、`PRODUCT_BLUEPRINT.md` 和 `跨平台技术路线与产品技术架构调研.md` 中描述的预期架构。
 
