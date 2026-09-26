@@ -127,10 +127,12 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 5);
+    assert_eq!(schema.version, 6);
     assert_eq!(
         schema.strict_tables,
         vec![
+            "agent_mission",
+            "agent_operation",
             "branch_checkpoint_inheritance",
             "branch_pointer",
             "branch_revision",
@@ -175,10 +177,12 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
         .await
         .expect("production repository migrator upgrades the legacy file");
     let schema = repository.schema_info().await.expect("schema is readable");
-    assert_eq!(schema.version, 5);
+    assert_eq!(schema.version, 6);
     assert_eq!(
         schema.strict_tables,
         vec![
+            "agent_mission",
+            "agent_operation",
             "branch_checkpoint_inheritance",
             "branch_pointer",
             "branch_revision",
@@ -227,7 +231,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5]
+        vec![1, 2, 3, 4, 5, 6]
     );
     for (version, checksum) in &applied {
         let migration = TEST_MIGRATOR

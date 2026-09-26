@@ -27,6 +27,10 @@ pub struct SqliteRepository {
 }
 
 impl SqliteRepository {
+    pub(crate) fn agent_store(&self) -> crate::agents::store::AgentStore {
+        crate::agents::store::AgentStore::new(self.pool.clone())
+    }
+
     pub async fn connect(path: impl AsRef<Path>) -> RepositoryResult<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)

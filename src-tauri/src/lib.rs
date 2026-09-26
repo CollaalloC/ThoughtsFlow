@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod application;
 pub mod domain;
 pub mod infrastructure;
@@ -7,6 +8,7 @@ pub mod ports;
 
 use std::sync::Arc;
 
+use agents::*;
 use application::{AppState, ApplicationBackend, DefaultApplicationBackend};
 use infrastructure::{
     filesystem::LocalDecisionPacketWriter, provider::ReqwestProviderGateway,
@@ -24,6 +26,17 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
 
 fn register_handlers<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
+        agent_environment,
+        agent_open_runtime,
+        agent_list_missions,
+        agent_create_mission,
+        agent_snapshot,
+        agent_start_task,
+        agent_reply,
+        agent_release_worker,
+        agent_reconnect,
+        agent_operations,
+        agent_read_output,
         list_workspaces,
         create_workspace,
         open_workspace,
@@ -102,8 +115,9 @@ pub fn run() {
         std::fs::create_dir_all(&data_dir)?;
         let database_path = data_dir.join("thoughsflow.sqlite3");
         let export_root = data_dir.join("exports");
-        let backend = tauri::async_runtime::block_on(async move {
+        let (backend, agents) = tauri::async_runtime::block_on(async move {
             let repository = Arc::new(SqliteRepository::connect(database_path).await?);
+            let agents = AgentService::new(&repository).await?;
             let provider = Arc::new(ReqwestProviderGateway::with_defaults()?);
             let exporter = Arc::new(LocalDecisionPacketWriter::new(export_root));
             let backend = DefaultApplicationBackend::new(
@@ -114,9 +128,10 @@ pub fn run() {
                 exporter,
             );
             backend.initialize().await?;
-            Ok::<_, Box<dyn std::error::Error>>(backend)
+            Ok::<_, Box<dyn std::error::Error>>((backend, agents))
         })?;
         app.manage(AppState::new(Arc::new(backend)));
+        app.manage(agents);
         Ok(())
     });
     run_builder(register_handlers(builder));
