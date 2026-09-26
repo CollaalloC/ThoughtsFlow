@@ -1,5 +1,6 @@
 //! Local execution control: Orca owns workers; ThoughsFlow owns intent and receipts.
 mod commands;
+mod executable;
 mod orca;
 mod receipt;
 mod service;

@@ -1,8 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::{process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -10,6 +6,8 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
 };
+
+use super::executable::{self, LaunchPlan, Platform, Tool};
 
 const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 
@@ -40,41 +38,28 @@ pub(crate) trait CommandRunner: Send + Sync {
 }
 
 pub(crate) struct OrcaCli {
-    executable: Option<PathBuf>,
+    executable: Result<LaunchPlan, String>,
 }
 
 impl OrcaCli {
     pub fn discover() -> Self {
-        let executable = match std::env::var_os("THOUGHSFLOW_ORCA_BIN") {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                (path.is_absolute() && path.is_file()).then_some(path)
-            }
-            None => find_executable(if cfg!(target_os = "linux") {
-                "orca-ide"
-            } else {
-                "orca"
-            }),
-        };
+        let executable = executable::discover(Tool::Orca);
         Self { executable }
     }
 }
 
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let defaults = [
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ];
-    defaults
-        .into_iter()
-        .chain(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ))
-        .map(|directory| directory.join(name))
-        .find(|path| path.is_absolute() && path.is_file())
+pub(crate) fn is_identity_environment(key: &str) -> bool {
+    is_identity_environment_for_platform(key, Platform::current())
 }
 
-pub(crate) fn is_identity_environment(key: &str) -> bool {
+fn is_identity_environment_for_platform(key: &str, platform: Platform) -> bool {
+    let normalized;
+    let key = if platform == Platform::Windows {
+        normalized = key.to_ascii_uppercase();
+        normalized.as_str()
+    } else {
+        key
+    };
     matches!(
         key,
         "ORCA_TERMINAL_HANDLE"
@@ -84,6 +69,13 @@ pub(crate) fn is_identity_environment(key: &str) -> bool {
             | "ORCA_ENVIRONMENT"
             | "ORCA_PAIRING_CODE"
             | "ORCA_REMOTE_PAIRING"
+            | "ORCA_USER_DATA_PATH"
+            | "ORCA_WORKSPACE_ID"
+            | "ORCA_WORKTREE_ID"
+            | "ORCA_STRUCTURED_SESSION"
+            | "ORCA_CLI_COMMAND"
+            | "ORCA_DEV_REPO_ROOT"
+            | "ORCA_DEV_CLI_INVOCATION"
     ) || key.starts_with("ORCA_ORCHESTRATION_COMPATIBILITY_")
 }
 
@@ -103,19 +95,25 @@ async fn bounded_read(mut stream: impl AsyncRead + Unpin) -> std::io::Result<Vec
 }
 
 async fn run_process(
-    executable: &Path,
+    executable: &LaunchPlan,
     arguments: &[String],
     seconds: u64,
 ) -> Result<(bool, Vec<u8>), RuntimeFailure> {
+    executable
+        .validate_arguments(Platform::current(), arguments)
+        .map_err(|message| RuntimeFailure::transport(message, false))?;
     // Shell syntax is never evaluated; every user value is one argv element.
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&executable.program);
     command
+        .args(&executable.prefix_arguments)
         .args(arguments)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     for (key, _) in std::env::vars_os() {
         if is_identity_environment(&key.to_string_lossy()) {
             command.env_remove(key);
@@ -213,12 +211,14 @@ pub(crate) fn parse_response(success: bool, stdout: &[u8]) -> Result<Value, Runt
 #[async_trait]
 impl CommandRunner for OrcaCli {
     fn available(&self) -> bool {
-        self.executable.is_some()
+        self.executable.is_ok()
     }
 
     async fn execute(&self, arguments: &[String]) -> Result<Value, RuntimeFailure> {
-        let executable = self.executable.as_ref().ok_or_else(|| RuntimeFailure::transport(
-            "未找到 Orca CLI，请安装 Orca，或设置 THOUGHSFLOW_ORCA_BIN 为可执行文件的绝对路径。", false))?;
+        let executable = self
+            .executable
+            .as_ref()
+            .map_err(|message| RuntimeFailure::transport(message.clone(), false))?;
         let long = arguments.first().is_some_and(|command| command == "open")
             || arguments.get(1).is_some_and(|command| {
                 matches!(
@@ -237,20 +237,15 @@ impl CommandRunner for OrcaCli {
     }
 
     async fn versions(&self) -> (Option<String>, Option<String>) {
-        let orca = version(self.executable.as_deref()).await;
-        let omp_path = match std::env::var_os("THOUGHSFLOW_OMP_BIN") {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                (path.is_absolute() && path.is_file()).then_some(path)
-            }
-            None => find_executable("omp"),
-        };
-        let omp = version(omp_path.as_deref()).await;
-        (orca, omp)
+        let omp = executable::discover(Tool::Omp);
+        tokio::join!(
+            version(self.executable.as_ref().ok()),
+            version(omp.as_ref().ok())
+        )
     }
 }
 
-async fn version(executable: Option<&Path>) -> Option<String> {
+async fn version(executable: Option<&LaunchPlan>) -> Option<String> {
     let executable = executable?;
     run_process(executable, &["--version".into()], 5)
         .await
@@ -262,4 +257,101 @@ async fn version(executable: Option<&Path>) -> Option<String> {
                 .next()
                 .map(|line| line.chars().take(120).collect())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_identity_environment_names_are_case_insensitive() {
+        for key in [
+            "orca_terminal_handle",
+            "Orca_Pane_Key",
+            "orca_pairing_code",
+            "orca_orchestration_compatibility_v1",
+        ] {
+            assert!(is_identity_environment_for_platform(key, Platform::Windows));
+            assert!(!is_identity_environment_for_platform(key, Platform::Linux));
+        }
+        assert!(!is_identity_environment_for_platform(
+            "Path",
+            Platform::Windows
+        ));
+        assert!(!is_identity_environment_for_platform(
+            "THOUGHSFLOW_ORCA_BIN",
+            Platform::Windows
+        ));
+    }
+
+    #[test]
+    fn inherited_runtime_and_workspace_overrides_are_removed_on_every_platform() {
+        for key in [
+            "ORCA_USER_DATA_PATH",
+            "ORCA_WORKSPACE_ID",
+            "ORCA_WORKTREE_ID",
+            "ORCA_STRUCTURED_SESSION",
+            "ORCA_CLI_COMMAND",
+            "ORCA_DEV_REPO_ROOT",
+            "ORCA_DEV_CLI_INVOCATION",
+        ] {
+            for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
+                assert!(is_identity_environment_for_platform(key, platform));
+            }
+            assert!(is_identity_environment_for_platform(
+                &key.to_ascii_lowercase(),
+                Platform::Windows
+            ));
+        }
+        for key in [
+            "PATH",
+            "APPDATA",
+            "XDG_CONFIG_HOME",
+            "HOME",
+            "THOUGHSFLOW_NODE_BIN",
+        ] {
+            assert!(!is_identity_environment_for_platform(
+                key,
+                Platform::Windows
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_node_launch_preserves_arguments_without_evaluating_shell_syntax() {
+        let mut launch =
+            executable::discover(Tool::Node).expect("Node is required by the workspace toolchain");
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("参数 fixture.mjs");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify(process.argv.slice(2)))",
+        )
+        .unwrap();
+        launch.prefix_arguments.push(script.into_os_string());
+        let arguments = vec![
+            "a \"quoted\" path\\".into(),
+            "中文\n$HOME $(echo injected) & echo literal".into(),
+            "".into(),
+        ];
+        let (success, output) = run_process(&launch, &arguments, 5).await.unwrap();
+        assert!(success);
+        assert_eq!(
+            serde_json::from_slice::<Vec<String>>(&output).unwrap(),
+            arguments
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_arguments_fail_unambiguously_before_launch() {
+        let launch = LaunchPlan {
+            program: std::env::temp_dir().join("must-not-be-spawned"),
+            prefix_arguments: vec![],
+        };
+        let error = run_process(&launch, &["invalid\0value".into()], 5)
+            .await
+            .unwrap_err();
+        assert!(!error.ambiguous);
+        assert!(error.message.contains("空字符"));
+    }
 }
