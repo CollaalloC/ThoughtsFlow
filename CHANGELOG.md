@@ -4,9 +4,11 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ## Unreleased
 
-## 0.1.0-beta.1 — 2026-09-26
+## 0.1.0-beta.2 — 2026-09-26
 
 First public beta of ThoughtsFlow, previously developed under the spelling ThoughsFlow.
+
+The earlier `v0.1.0-beta.1` source tag failed clean dependency installation and has no published installer release. Its tag remains unchanged.
 
 ### Added
 
@@ -20,6 +22,9 @@ First public beta of ThoughtsFlow, previously developed under the spelling Thoug
 - Cross-platform runtime discovery, portable Node launchers, three-platform build/test CI and a separate native WebView fixture workflow.
 
 ### Performance and reliability
+
+- Transactionally migrate the mutable default-model configuration marker to its corrected name, preserving values and immutable historical receipts; roll back conflicting or failed upgrades.
+- Repair the WebView test dependency lock so clean `npm ci` agrees with the declared override.
 
 - Overlap independent Agent snapshot reads while retaining Mission serialization and complete-result validation.
 - Coalesce redundant refreshes, pause hidden-page polling and require fresh state before resumed Agent operations.

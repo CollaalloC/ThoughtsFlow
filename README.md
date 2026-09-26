@@ -4,9 +4,9 @@
 
 ThoughtsFlow 是一个本地优先的桌面工作区。你可以从某一次具体回答继续探索，比较不同路线，检查每次请求发送了哪些上下文，再把结论导出为决策文档。需要执行代码任务时，可连接本机 Orca 与 OMP，拆分任务并查看多个 Agent 的进展。
 
-[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.1) · [模型连接](docs/MODEL_CONNECTIONS.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
+[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.2) · [模型连接](docs/MODEL_CONNECTIONS.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
 
-> 当前为 `v0.1.0-beta.1` 早期测试版。请先用于可恢复的测试工作；安装包、平台和已知限制以发布页为准。
+> 当前为 `v0.1.0-beta.2` 早期测试版。请先用于可恢复的测试工作；安装包、平台和已知限制以发布页为准。
 
 ## 能做什么
 
@@ -75,7 +75,7 @@ API Key 在输入时短暂停留于界面状态，提交后仅存于当前 Rust 
 
 异常退出后，未结束的模型请求会标为 `interrupted`，保留已经写入的部分输出，不自动重试。安全边界和漏洞披露方式见 [SECURITY.md](SECURITY.md)。
 
-项目曾使用 ThoughsFlow 拼写。为继续读取早期版本的本地数据，应用标识 `io.thoughsflow.desktop`、数据库名 `thoughsflow.sqlite3` 和既有 `THOUGHSFLOW_*` 环境变量保持兼容；此次名称修正不迁移数据库。
+项目曾使用 ThoughsFlow 拼写。为继续读取早期版本的数据，应用标识 `io.thoughsflow.desktop`、数据库名 `thoughsflow.sqlite3` 和既有 `THOUGHSFLOW_*` 环境变量保持兼容。新版本会在事务中迁移默认模型配置标记，保留原值；历史 Receipt、原始回执和 hash 不变。数据库文件仍在原路径，详见[命名兼容说明](docs/NAME_COMPATIBILITY.md)。
 
 ## 从源码运行
 
