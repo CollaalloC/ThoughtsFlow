@@ -4,7 +4,12 @@
 //! stand-in: every assertion crosses the generated IPC handler and the real
 //! `AppState`, while SQLite is reopened from disk between app instances.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use serde_json::{Value, json};
 use tauri::{
@@ -36,6 +41,10 @@ const WORKSPACE_ID: &str = "native-context-workspace";
 const BRANCH_ID: &str = "native-context-main";
 
 fn invoke(window: &WebviewWindow<MockRuntime>, command: &str, input: Value) -> Value {
+    invoke_body(window, command, json!({ "input": input }))
+}
+
+fn invoke_body(window: &WebviewWindow<MockRuntime>, command: &str, body: Value) -> Value {
     get_ipc_response(
         window,
         InvokeRequest {
@@ -43,7 +52,7 @@ fn invoke(window: &WebviewWindow<MockRuntime>, command: &str, input: Value) -> V
             callback: CallbackFn(0),
             error: CallbackFn(1),
             url: "tauri://localhost".parse().unwrap(),
-            body: InvokeBody::Json(json!({ "input": input })),
+            body: InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.into(),
         },
@@ -205,6 +214,231 @@ async fn finish(repository: &SqliteRepository, run_id: &str, output: &str, at: i
         )
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn native_ipc_legacy_default_profile_survives_upgrade_and_sends_preserved_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("legacy-default.sqlite3");
+    std::fs::write(
+        &database,
+        include_bytes!("fixtures/sqlite/legacy-v7.sqlite"),
+    )
+    .unwrap();
+
+    // A local HTTP server records the real Reqwest request; it never reaches a
+    // model vendor. Every socket operation has a bound even if the test fails.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "provider request did not arrive");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept provider request: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let (header_end, content_length) = loop {
+            let mut chunk = [0; 4096];
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "request ended before its body");
+            request.extend_from_slice(&chunk[..count]);
+            assert!(
+                request.len() < 64 * 1024,
+                "unexpectedly large fixture request"
+            );
+            if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("request Content-Length");
+                break (header_end + 4, content_length);
+            }
+        };
+        assert!(content_length < 64 * 1024);
+        while request.len() < header_end + content_length {
+            let mut chunk = [0; 4096];
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "request body was truncated");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"升级后的请求成功\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+
+    // Redirect the mutable endpoint and create an empty workspace while the
+    // database is still v7. The fixture's historical receipts deliberately use
+    // synthetic hashes for migration tests; leave those evidence rows intact.
+    // The default marker, model and sampling values come from the frozen v7.
+    let old_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&database))
+        .await
+        .unwrap();
+    let old_parameters: String = sqlx::query_scalar(
+        "SELECT parameters_json FROM provider_profile WHERE id = 'provider-upgrade'",
+    )
+    .fetch_one(&old_pool)
+    .await
+    .unwrap();
+    assert!(old_parameters.contains("_thoughsflowIsDefault"));
+    sqlx::query("UPDATE provider_profile SET base_url = ? WHERE id = 'provider-upgrade'")
+        .bind(&base_url)
+        .execute(&old_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO workspace (id, title, goal, system_prompt, created_at, updated_at) \
+         VALUES ('legacy-send-workspace', 'Existing workspace', 'Preserve settings', \
+                 'Use the selected model settings.', 1, 1)",
+    )
+    .execute(&old_pool)
+    .await
+    .unwrap();
+    old_pool.close().await;
+
+    // Use the production migration and startup paths before crossing the
+    // public IPC surface that the desktop frontend uses to select a default.
+    let repository = Arc::new(SqliteRepository::connect(&database).await.unwrap());
+    let backend = backend(repository.clone(), directory.path().join("exports"));
+    backend.initialize().await.unwrap();
+    let app = app(backend);
+    let window = window(&app);
+    let profiles = invoke_body(&window, "list_provider_profiles", json!({}));
+    let defaults: Vec<_> = profiles["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|profile| profile["isDefault"] == true)
+        .collect();
+    assert_eq!(defaults.len(), 1);
+    let selected = defaults[0];
+    assert_eq!(selected["id"], "provider-upgrade");
+    assert_eq!(selected["model"], "legacy-model");
+    assert_eq!(selected["parameters"], json!({ "temperature": 0.25 }));
+    let stored = repository
+        .get_provider_profile("provider-upgrade")
+        .await
+        .unwrap();
+    let parameters: Value = serde_json::from_str(&stored.parameters_json).unwrap();
+    assert_eq!(parameters["_thoughtsflowIsDefault"], "true");
+    assert!(parameters.get("_thoughsflowIsDefault").is_none());
+
+    invoke(
+        &window,
+        "set_session_credential",
+        json!({
+            "providerProfileId": selected["id"],
+            "credentialLabel": "Local migration test",
+            "credential": "local-fixture-only",
+        }),
+    );
+    let workspace = invoke_body(
+        &window,
+        "open_workspace",
+        json!({ "id": "legacy-send-workspace" }),
+    );
+    assert_eq!(workspace["data"]["workspace"]["name"], "Existing workspace");
+    let cursor = &workspace["data"]["contextCursor"];
+    let tree = invoke(
+        &window,
+        "get_context_tree",
+        json!({ "workspaceId": "legacy-send-workspace" }),
+    );
+    let branch_version = tree["data"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["id"] == cursor["branchId"])
+        .map(|branch| branch["version"].clone());
+    let preview = invoke(
+        &window,
+        "inspect_context",
+        json!({
+            "workspaceId": "legacy-send-workspace",
+            "parentRunId": cursor["activeRunId"],
+            "prompt": "验证数据库迁移后仍能发送",
+            "providerProfileId": selected["id"],
+            "branchId": cursor["branchId"],
+        }),
+    );
+    assert_eq!(preview["data"]["blocked"], false);
+    let started = invoke_body(
+        &window,
+        "create_turn_and_start_run",
+        json!({
+            "input": {
+                "workspaceId": "legacy-send-workspace",
+                "parentRunId": cursor["activeRunId"],
+                "prompt": "验证数据库迁移后仍能发送",
+                "providerProfileId": selected["id"],
+                "previewHash": preview["data"]["hash"],
+                "branchId": cursor["branchId"],
+                "expectedCursorVersion": cursor["version"],
+                "expectedBranchVersion": branch_version,
+                "expectedDraftVersion": preview["data"]["draftVersion"],
+            },
+            "onEvent": "__CHANNEL__:1",
+        }),
+    );
+    let run_id = started["data"]["runId"].as_str().unwrap();
+    let run = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let run = repository.get_run(run_id).await.unwrap();
+            if run.finished_at.is_some() {
+                break run;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("migrated profile request completes");
+    assert_eq!(run.status, RunStatusRecord::Completed, "{run:?}");
+    assert_eq!(run.output_markdown, "升级后的请求成功");
+
+    let request = server.join().expect("local provider server succeeds");
+    assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+    let wire: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(wire["model"], "legacy-model");
+    assert_eq!(wire["temperature"], 0.25);
+    assert!(!request.contains("_thoughsflowIsDefault"));
+    assert!(!request.contains("_thoughtsflowIsDefault"));
+    let receipt = invoke_body(&window, "get_run_snapshot", json!({ "runId": run_id }));
+    assert_eq!(receipt["data"]["model"], "legacy-model");
+    assert_eq!(
+        receipt["data"]["parameters"],
+        json!({ "temperature": 0.25 })
+    );
+    let raw_receipt = repository.get_run_receipt(run_id).await.unwrap();
+    for value in [
+        &raw_receipt.snapshot.parameters_json,
+        &raw_receipt.snapshot.request_json,
+    ] {
+        assert!(!value.contains("_thoughsflowIsDefault"));
+        assert!(!value.contains("_thoughtsflowIsDefault"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

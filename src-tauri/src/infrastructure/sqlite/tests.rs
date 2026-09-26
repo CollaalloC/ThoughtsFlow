@@ -127,7 +127,7 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 7);
+    assert_eq!(schema.version, 8);
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -161,6 +161,7 @@ fn legacy_fixture_bytes(schema_version: i64) -> &'static [u8] {
         2 => include_bytes!("../../../tests/fixtures/sqlite/legacy-v2.sqlite"),
         3 => include_bytes!("../../../tests/fixtures/sqlite/legacy-v3.sqlite"),
         4 => include_bytes!("../../../tests/fixtures/sqlite/legacy-v4.sqlite"),
+        7 => include_bytes!("../../../tests/fixtures/sqlite/legacy-v7.sqlite"),
         _ => panic!("no frozen legacy fixture for schema v{schema_version}"),
     }
 }
@@ -173,11 +174,41 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
     std::fs::write(&path, legacy_fixture_bytes(schema_version))
         .expect("frozen legacy fixture is copied without mutation");
 
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .foreign_keys(true);
+    let mut before = options.connect().await.unwrap();
+    let marker = match schema_version {
+        1 => serde_json::json!(true),
+        2 => serde_json::json!(false),
+        3 => serde_json::json!("true"),
+        _ => serde_json::json!("false"),
+    };
+    let parameters = serde_json::json!({
+        "_thoughsflowIsDefault": marker,
+        "temperature": "0.25"
+    });
+    sqlx::query("UPDATE provider_profile SET parameters_json = ? WHERE id = 'provider-upgrade'")
+        .bind(parameters.to_string())
+        .execute(&mut before)
+        .await
+        .unwrap();
+    before.close().await.unwrap();
+
     let repository = SqliteRepository::connect(&path)
         .await
         .expect("production repository migrator upgrades the legacy file");
     let schema = repository.schema_info().await.expect("schema is readable");
-    assert_eq!(schema.version, 7);
+    assert_eq!(schema.version, 8);
+    let migrated = repository
+        .get_provider_profile("provider-upgrade")
+        .await
+        .unwrap();
+    assert_eq!(migrated.default_model, "legacy-model");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&migrated.parameters_json).unwrap(),
+        serde_json::json!({"_thoughtsflowIsDefault": marker, "temperature": "0.25"})
+    );
     assert_eq!(
         schema.strict_tables,
         vec![
@@ -231,7 +262,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
     let index_columns = sqlx::query_scalar::<_, String>(
         "SELECT name FROM pragma_index_info('idx_manifest_item_workspace_content') ORDER BY seqno",
@@ -391,6 +422,317 @@ async fn real_file_v3_database_upgrades_through_the_production_migrator() {
 #[tokio::test]
 async fn real_file_v4_database_upgrades_through_the_production_migrator() {
     assert_real_file_upgrade_from(4).await;
+}
+
+async fn default_marker_upgrade_fixture() -> (tempfile::TempDir, sqlx::SqliteConnection) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upgrade.sqlite");
+    std::fs::write(&path, legacy_fixture_bytes(7)).unwrap();
+    let connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .foreign_keys(true)
+        .connect()
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+async fn marker_history(connection: &mut sqlx::SqliteConnection) -> Vec<String> {
+    // Read the bytes in each evidence column, including deliberately old names.
+    // No JSON parsing or reserialization is allowed to hide history changes.
+    let statements = [
+        "SELECT parameters_json FROM context_snapshot WHERE id = 'snapshot-marker'",
+        "SELECT request_json FROM context_snapshot WHERE id = 'snapshot-marker'",
+        "SELECT canonical_hash FROM context_snapshot WHERE id = 'snapshot-marker'",
+        "SELECT canonical_hash FROM context_manifest WHERE id = 'manifest-marker'",
+        "SELECT provider_snapshot_json FROM model_run WHERE id = 'run-marker'",
+        "SELECT content_hash FROM content_block WHERE id = 'prompt-upgrade'",
+        "SELECT request_json FROM agent_operation WHERE id = 'operation-marker'",
+        "SELECT receipt_json FROM agent_operation WHERE id = 'operation-marker'",
+        "SELECT body_json FROM agent_mission WHERE id = 'mission-marker'",
+    ];
+    let mut evidence = Vec::new();
+    for statement in statements {
+        evidence.push(
+            sqlx::query_scalar(statement)
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+        );
+    }
+    evidence
+}
+
+#[tokio::test]
+async fn default_marker_upgrade_preserves_json_types_values_and_all_historical_evidence() {
+    let (directory, mut connection) = default_marker_upgrade_fixture().await;
+    let history_before = marker_history(&mut connection).await;
+    assert!(history_before[0].contains("_thoughsflowIsDefault"));
+    assert!(history_before[7].contains("ThoughsFlow"));
+    assert_eq!(
+        crate::domain::sha256_hex(history_before[1].as_bytes()),
+        history_before[2]
+    );
+    let values = [
+        serde_json::json!(true),
+        serde_json::json!(false),
+        serde_json::json!("true"),
+        serde_json::json!("false"),
+        serde_json::json!(" true "),
+        serde_json::json!("false\n\"quoted\""),
+        serde_json::json!(null),
+        serde_json::json!(1),
+        serde_json::json!(0.25),
+        serde_json::json!([true, "false"]),
+        serde_json::json!({"nested": "value"}),
+    ];
+    for (index, value) in values.iter().enumerate() {
+        let parameters = serde_json::json!({
+            "_thoughsflowIsDefault": value,
+            "temperature": "0.25",
+            "unrelated": {"_thoughsflowIsDefault": "keep literal historical name"}
+        });
+        sqlx::query(
+            "INSERT INTO provider_profile \
+             (id, provider_id, name, dialect, protocol_dialect, base_url, default_model, \
+              parameters_json, created_at, updated_at) \
+             SELECT ?, provider_id, name, dialect, protocol_dialect, base_url, default_model, \
+                    ?, created_at, updated_at FROM provider_profile WHERE id = 'provider-upgrade'",
+        )
+        .bind(format!("marker-{index}"))
+        .bind(parameters.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+    connection.close().await.unwrap();
+
+    let repository = SqliteRepository::connect(&directory.path().join("upgrade.sqlite"))
+        .await
+        .expect("schema v7 upgrades through the production startup path");
+    assert_eq!(repository.schema_info().await.unwrap().version, 8);
+    for (index, value) in values.iter().enumerate() {
+        let profile = repository
+            .get_provider_profile(&format!("marker-{index}"))
+            .await
+            .unwrap();
+        assert_eq!(profile.default_model, "legacy-model");
+        assert_eq!(profile.created_at, 1);
+        assert_eq!(profile.updated_at, 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&profile.parameters_json).unwrap(),
+            serde_json::json!({
+                "_thoughtsflowIsDefault": value,
+                "temperature": "0.25",
+                "unrelated": {"_thoughsflowIsDefault": "keep literal historical name"}
+            })
+        );
+    }
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    assert_eq!(marker_history(&mut connection).await, history_before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    drop(repository);
+    let reopened = SqliteRepository::connect(&directory.path().join("upgrade.sqlite"))
+        .await
+        .unwrap();
+    let mut connection = reopened.acquire_test_connection().await.unwrap();
+    assert_eq!(marker_history(&mut connection).await, history_before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 8 AND success = 1"
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap(),
+        1,
+        "subsequent startup must not repeat a migration"
+    );
+}
+
+#[tokio::test]
+async fn default_marker_upgrade_accepts_matching_keys_and_leaves_unrelated_profiles_byte_exact() {
+    let cases = [
+        (
+            r#"{ "_thoughsflowIsDefault": "true", "_thoughtsflowIsDefault": "true", "temperature": "0.25" }"#,
+            Some(serde_json::json!({"_thoughtsflowIsDefault": "true", "temperature": "0.25"})),
+        ),
+        (
+            r#"{"_thoughsflowIsDefault":false,"_thoughtsflowIsDefault":false}"#,
+            Some(serde_json::json!({"_thoughtsflowIsDefault": false})),
+        ),
+        (
+            r#"{ "_thoughtsflowIsDefault": "true", "temperature": "0.25" }"#,
+            None,
+        ),
+        (
+            r#"{ "temperature": "0.25", "note": "_thoughsflowIsDefault" }"#,
+            None,
+        ),
+    ];
+    for (parameters, expected) in cases {
+        let (directory, mut connection) = default_marker_upgrade_fixture().await;
+        sqlx::query(
+            "UPDATE provider_profile SET parameters_json = ? WHERE id = 'provider-upgrade'",
+        )
+        .bind(parameters)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        let repository = SqliteRepository::connect(&directory.path().join("upgrade.sqlite"))
+            .await
+            .unwrap();
+        let profile = repository
+            .get_provider_profile("provider-upgrade")
+            .await
+            .unwrap();
+        if let Some(expected) = expected {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&profile.parameters_json).unwrap(),
+                expected
+            );
+        } else {
+            assert_eq!(profile.parameters_json, parameters);
+        }
+    }
+}
+
+#[tokio::test]
+async fn default_marker_upgrade_refuses_conflicting_or_duplicate_keys_without_changing_profiles() {
+    let cases = [
+        r#"{"_thoughsflowIsDefault":true,"_thoughtsflowIsDefault":false}"#,
+        r#"{"_thoughsflowIsDefault":"true","_thoughtsflowIsDefault":true}"#,
+        r#"{"_thoughsflowIsDefault":"false","_thoughtsflowIsDefault":false}"#,
+        r#"{"_thoughsflowIsDefault":true,"_thoughsflowIsDefault":false}"#,
+        r#"{"_thoughtsflowIsDefault":true,"_thoughtsflowIsDefault":true}"#,
+    ];
+    for parameters in cases {
+        let (directory, mut connection) = default_marker_upgrade_fixture().await;
+        sqlx::query(
+            "UPDATE provider_profile SET parameters_json = ? WHERE id = 'provider-upgrade'",
+        )
+        .bind(parameters)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        let history_before = marker_history(&mut connection).await;
+        connection.close().await.unwrap();
+        let path = directory.path().join("upgrade.sqlite");
+        let error = match SqliteRepository::connect(&path).await {
+            Ok(_) => panic!("ambiguous defaults must abort startup migration"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting_provider_default_markers"),
+            "{error}"
+        );
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(path)
+            .connect()
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT parameters_json FROM provider_profile WHERE id = 'provider-upgrade'"
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+            parameters
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap(),
+            7
+        );
+        assert_eq!(marker_history(&mut connection).await, history_before);
+    }
+}
+
+#[tokio::test]
+async fn default_marker_upgrade_rolls_back_profile_writes_if_migration_history_cannot_commit() {
+    let (directory, mut connection) = default_marker_upgrade_fixture().await;
+    let profiles_before = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, parameters_json FROM provider_profile ORDER BY id",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    let history_before = marker_history(&mut connection).await;
+    // Fail after the whole v8 script has updated profiles and dropped its guard.
+    // RAISE(FAIL) itself does not undo prior writes: the production SQLx
+    // transaction must roll them back together with its migration history row.
+    sqlx::raw_sql(
+        "CREATE TRIGGER fail_v8_history BEFORE INSERT ON _sqlx_migrations \
+         WHEN NEW.version = 8 BEGIN SELECT RAISE(FAIL, 'injected migration history failure'); END;",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    let path = directory.path().join("upgrade.sqlite");
+    let error = match SqliteRepository::connect(&path).await {
+        Ok(_) => panic!("injected migration fails"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("injected migration history failure"),
+        "{error}"
+    );
+    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .connect()
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT id, parameters_json FROM provider_profile ORDER BY id"
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap(),
+        profiles_before,
+        "profile updates and migration history must commit or roll back together"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        7
+    );
+    assert_eq!(marker_history(&mut connection).await, history_before);
+    sqlx::query("DROP TRIGGER fail_v8_history")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let repository = SqliteRepository::connect(&path)
+        .await
+        .expect("repair permits a complete retry");
+    assert_eq!(repository.schema_info().await.unwrap().version, 8);
+    let parameters = repository
+        .get_provider_profile("provider-upgrade")
+        .await
+        .unwrap()
+        .parameters_json;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&parameters).unwrap(),
+        serde_json::json!({"_thoughtsflowIsDefault": "true", "temperature": "0.25"})
+    );
 }
 
 #[tokio::test]

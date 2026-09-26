@@ -16,3 +16,36 @@ explicit review event: delete the exact fixture files, verify that migrations
 ```sh
 bash src-tauri/tests/fixtures/sqlite/generate-legacy-fixtures.sh
 ```
+
+## Frozen v7 product-rename baseline
+
+`legacy-v7.sqlite` is a synthetic pre-rename database frozen from the publicly
+tagged `v0.1.0-beta.1` source (`35cfb0ca00eac0b8bd7f11eef42a9ac17b032b47`).
+SHA-256: `aa27cfd708aaa95b987628d347cf350045f039653e956fdfbb4b61b6a64fbdf4`.
+
+It was built by copying `legacy-v4.sqlite`, checking its first four migration
+checksums against that tag, and applying the tag's `0005_context_tree.sql`,
+`0006_agents.sql`, and `0007_workspace_content_lookup.sql`. Its SQLx migration
+rows contain the SHA-384 of those exact tagged SQL files. The v1-v4 fixture
+files and all historical migration SQL remain unchanged.
+
+The added test data consists of the mutable `provider-upgrade` profile with
+`{"_thoughsflowIsDefault":"true","temperature":"0.25"}`, one extra completed
+Run/Context Receipt (`run-marker` / `snapshot-marker`), and synthetic Agent
+mission/operation evidence. Their JSON deliberately includes `ThoughsFlow`
+and `_thoughsflowIsDefault`; the snapshot and manifest hashes equal the
+SHA-256 of that fixture's original raw request bytes. These strings are
+historical evidence to preserve, not migration targets. There are no user
+credentials or live Agent identifiers.
+
+As with v1-v4, older placeholder Receipt/content hashes make this a migration
+fixture, not a complete interactive workspace export. The native IPC test
+inserts a valid empty workspace into a temporary copy before upgrade and
+checks that the old Provider's selected model/settings still drive an actual
+request to a local HTTP fixture afterward. Repository tests compare original
+evidence columns byte for byte, exercise JSON boolean/string values, reject
+conflicting/duplicate markers, and inject a failure after v8's profile writes
+to prove the production SQLx transaction rolls everything back.
+
+Do not regenerate this file from the current production migrator: that would
+erase its independence from the migration being tested.
