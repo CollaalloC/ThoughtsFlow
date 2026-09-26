@@ -4,7 +4,7 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ## Unreleased
 
-## 0.1.0-beta.2 — 2026-09-26
+## 0.1.0-beta.2 — 2026-09-27
 
 First public beta of ThoughtsFlow, previously developed under the spelling ThoughsFlow.
 

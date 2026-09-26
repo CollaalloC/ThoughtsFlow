@@ -51,7 +51,8 @@ fn invoke_body(window: &WebviewWindow<MockRuntime>, command: &str, body: Value) 
             cmd: command.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
+            // Tauri serves its local origin as http://tauri.localhost on Windows.
+            url: window.url().expect("mock window has a local app URL"),
             body: InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.into(),
