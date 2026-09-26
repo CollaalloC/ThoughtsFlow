@@ -37,6 +37,10 @@ export const config: WebdriverIO.Config = {
         embeddedPort: 4_445,
         env: {
           THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR: appDataDir,
+          ...Object.fromEntries(
+            ["THOUGHSFLOW_ORCA_BIN", "THOUGHSFLOW_OMP_BIN", "TF_AGENT_FIXTURE_STATE"]
+              .flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []),
+          ),
         },
         startTimeout: 90_000,
       },
@@ -49,7 +53,7 @@ export const config: WebdriverIO.Config = {
   connectionRetryTimeout: 90_000,
   connectionRetryCount: 1,
   mochaOpts: {
-    timeout: 120_000,
+    timeout: process.env.TF_AGENT_LIVE === "1" ? 600_000 : 120_000,
   },
   onComplete: () => {
     if (!suppliedDataDir) {

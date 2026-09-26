@@ -11,7 +11,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:fixtures": "node --test tests/fixtures/provider-server.test.ts",
+    "test:fixtures": "node --test tests/fixtures/provider-server.test.ts tests/fixtures/orca-cli.test.mjs",
     "test:e2e": "playwright test",
     "test:native": "node scripts/run-native-test.mjs",
     "test:webview:build": "VITE_THOUGHSFLOW_WEBVIEW_E2E=1 CARGO_TARGET_DIR=target/webview-e2e tauri build --debug --no-bundle --features webview-e2e --config src-tauri/tauri.webview.conf.json",
@@ -20,6 +20,8 @@
     "test:webview:restart:run": "node tests/webview/run-restart-journey.ts",
     "test:webview:live-proxy:run": "TF_WEBVIEW_LIVE_PROXY=1 wdio run wdio.webview.conf.ts --spec tests/webview/live-proxy.spec.ts",
     "test:webview": "npm run test:webview:typecheck && npm run test:webview:build && npm run test:webview:smoke && npm run test:webview:restart:run",
+    "test:webview:agents": "npm run test:webview:typecheck && npm run test:webview:build && node tests/webview/run-agent-journey.mjs",
+    "test:webview:agents:live": "npm run test:webview:typecheck && npm run test:webview:build && node tests/webview/run-live-agent-journey.mjs",
     "test:webview:restart": "npm run test:webview:typecheck && npm run test:webview:build && npm run test:webview:restart:run",
     "test:webview:live-proxy": "npm run test:webview:typecheck && npm run test:webview:build && npm run test:webview:live-proxy:run",
     "check": "npm run test:run && npm run test:fixtures && npm run build"
