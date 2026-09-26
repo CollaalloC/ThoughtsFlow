@@ -20,6 +20,13 @@ const MISSION: &str = "a6510d2d-61b1-4ced-aec9-c87715b19244";
 const OP: &str = "b6510d2d-61b1-4ced-aec9-c87715b19244";
 const SECOND_OP: &str = "c6510d2d-61b1-4ced-aec9-c87715b19244";
 
+fn test_repository_path() -> String {
+    std::env::temp_dir()
+        .join("thoughsflow-agent-test-repo")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn ok(result: Value) -> Value {
     json!({"ok":true,"result":result,"_meta":{"runtimeId":"runtime-1"}})
 }
@@ -116,7 +123,7 @@ impl CommandRunner for MockOrca {
                 json!({"runtime":{"reachable":true,"state":"ready","runtimeId":self.runtime.lock().unwrap().clone(),"capabilities":["orchestration.contract.v1"]},"graph":{"state":"ready"},"app":{"running":true}})
             }
             "repo list" => {
-                json!({"repos":[{"id":"repo-1","name":"Test repo","path":"/tmp/agent-test-repo"}]})
+                json!({"repos":[{"id":"repo-1","name":"Test repo","path":test_repository_path()}]})
             }
             "terminal create" => {
                 json!({"terminal":{"handle":"coordinator-1","tabId":"tab-1","leafId":"leaf-1"}})
@@ -181,7 +188,7 @@ async fn ready(store: &AgentStore) {
             id: MISSION.into(),
             workspace_id: "workspace-1".into(),
             repository_id: "repo-1".into(),
-            repository_path: "/tmp/agent-test-repo".into(),
+            repository_path: test_repository_path(),
             objective: "Implement task".into(),
             run_id: Some("run-1".into()),
             coordinator_handle: Some("coordinator-1".into()),
@@ -203,7 +210,7 @@ fn task_input() -> StartTaskInput {
         operation_id: OP.into(),
         mission_id: MISSION.into(),
         title: "Implement feature".into(),
-        spec: "Keep `$HOME` and $(touch /tmp/no-shell) literal; verify output".into(),
+        spec: "Keep `$HOME` and $(echo literal-only) literal; verify output".into(),
     }
 }
 fn worker() -> Value {
@@ -1219,4 +1226,308 @@ async fn missing_active_dispatch_never_guesses_an_unsettled_or_ambiguous_worker(
     let snapshot = service.snapshot(MISSION).await.unwrap();
     assert_eq!(snapshot.tasks[0].dispatch_id, None);
     assert!(!snapshot.tasks[0].can_release);
+}
+
+struct DelayedSnapshotOrca {
+    inner: Arc<MockOrca>,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl CommandRunner for DelayedSnapshotOrca {
+    fn available(&self) -> bool {
+        true
+    }
+    async fn execute(&self, arguments: &[String]) -> Result<Value, RuntimeFailure> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.execute(arguments).await
+    }
+}
+
+/// Run the same harness before/after a scheduling change. The delay is an artificial
+/// CLI latency model, not a measurement of Orca, a model provider, or another OS.
+#[tokio::test]
+#[ignore = "manual controlled CLI-delay benchmark; no live Orca process"]
+async fn benchmark_snapshot_cli_delay_model() {
+    const ROUNDS: usize = 9;
+    const WARMUPS: usize = 2;
+    const DELAY_MS: u64 = 25;
+    let (_repository, store, runner, _) = setup().await;
+    ready(&store).await;
+    *runner.tasks.lock().unwrap() = vec![task()];
+    *runner.workers.lock().unwrap() = vec![worker()];
+    *runner.messages.lock().unwrap() = vec![question()];
+    let service = AgentService::with_runner(
+        store,
+        Arc::new(DelayedSnapshotOrca {
+            inner: runner.clone(),
+            delay: std::time::Duration::from_millis(DELAY_MS),
+        }),
+    )
+    .await
+    .unwrap();
+    for _ in 0..WARMUPS {
+        assert!(service.snapshot(MISSION).await.unwrap().connected);
+    }
+    runner.calls.lock().unwrap().clear();
+    let mut elapsed_ms = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let started = std::time::Instant::now();
+        let snapshot = service.snapshot(MISSION).await.unwrap();
+        elapsed_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(snapshot.connected);
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.messages.len(), 1);
+        assert!(snapshot.tasks[0].can_release);
+        assert!(snapshot.messages[0].requires_reply);
+    }
+    assert_eq!(runner.count_all(), ROUNDS * 5);
+    let counts: std::collections::BTreeMap<_, _> = [
+        "status --json",
+        "orchestration run-current",
+        "orchestration worker-list",
+        "orchestration task-list",
+        "orchestration check",
+    ]
+    .into_iter()
+    .map(|command| {
+        let count = runner.count(command);
+        assert_eq!(count, ROUNDS);
+        (command, count)
+    })
+    .collect();
+    let mut ordered = elapsed_ms.clone();
+    ordered.sort_by(f64::total_cmp);
+    println!(
+        "{}",
+        json!({
+            "benchmark":"snapshot-cli-delay-model", "label":std::env::var("THOUGHSFLOW_BENCH_LABEL").unwrap_or_else(|_|"current".into()),
+            "platform":format!("{}-{}",std::env::consts::OS,std::env::consts::ARCH),
+            "rounds":ROUNDS,"warmups":WARMUPS,"delayPerCliMs":DELAY_MS,"samplesMs":elapsed_ms,
+            "medianMs":ordered[ROUNDS/2],"cliCalls":runner.count_all(),"callsPerSnapshot":5,"commandCounts":counts,
+        })
+    );
+}
+
+fn is_snapshot_read(arguments: &[String]) -> bool {
+    arguments
+        .first()
+        .is_some_and(|command| command == "orchestration")
+        && arguments.get(1).is_some_and(|command| {
+            matches!(command.as_str(), "worker-list" | "task-list" | "check")
+        })
+}
+
+struct GatedSnapshotOrca {
+    inner: Arc<MockOrca>,
+    started: tokio::sync::Barrier,
+    release: tokio::sync::Barrier,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl CommandRunner for GatedSnapshotOrca {
+    fn available(&self) -> bool {
+        true
+    }
+    async fn execute(&self, arguments: &[String]) -> Result<Value, RuntimeFailure> {
+        if is_snapshot_read(arguments) && self.reads.fetch_add(1, Ordering::SeqCst) < 3 {
+            assert_eq!(self.inner.count("status --json"), 1);
+            assert_eq!(self.inner.count("orchestration run-current"), 1);
+            self.started.wait().await;
+            self.release.wait().await;
+        }
+        self.inner.execute(arguments).await
+    }
+}
+
+#[tokio::test]
+async fn snapshot_starts_all_three_reads_after_connection_checks_and_keeps_mission_control_locked()
+{
+    let (_repository, store, runner, _) = setup().await;
+    ready(&store).await;
+    let gate = Arc::new(GatedSnapshotOrca {
+        inner: runner.clone(),
+        started: tokio::sync::Barrier::new(4),
+        release: tokio::sync::Barrier::new(4),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let service = Arc::new(
+        AgentService::with_runner(store.clone(), gate.clone())
+            .await
+            .unwrap(),
+    );
+    let snapshot = tokio::spawn({
+        let service = service.clone();
+        async move { service.snapshot(MISSION).await }
+    });
+    // A watchdog detects deadlocks; barriers establish concurrency without timing comparisons.
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.started.wait())
+        .await
+        .expect("all three independent reads must begin before any is released");
+    assert!(!snapshot.is_finished());
+    assert_eq!(runner.count_all(), 2);
+    let writer_entered = Arc::new(tokio::sync::Notify::new());
+    let writer = tokio::spawn({
+        let service = service.clone();
+        let entered = writer_entered.clone();
+        async move {
+            entered.notify_one();
+            service.start_task(task_input()).await
+        }
+    });
+    writer_entered.notified().await;
+    assert!(!writer.is_finished());
+    assert!(store.operation(OP).await.unwrap().is_none());
+    assert_eq!(runner.count("orchestration worker-start"), 0);
+    gate.release.wait().await;
+    assert!(snapshot.await.unwrap().unwrap().connected);
+    assert_eq!(writer.await.unwrap().unwrap().status, "succeeded");
+    assert_eq!(runner.count("orchestration worker-start"), 1);
+}
+
+#[tokio::test]
+async fn invalid_connection_never_starts_parallel_snapshot_reads() {
+    for changed_runtime in [true, false] {
+        let (_repository, store, runner, service) = setup().await;
+        ready(&store).await;
+        if changed_runtime {
+            *runner.runtime.lock().unwrap() = "runtime-restarted".into();
+        } else {
+            runner.generation.store(2, Ordering::SeqCst);
+        }
+        let snapshot = service.snapshot(MISSION).await.unwrap();
+        assert!(!snapshot.connected);
+        assert!(!snapshot.can_start_tasks);
+        for command in [
+            "orchestration worker-list",
+            "orchestration task-list",
+            "orchestration check",
+            "orchestration run-use",
+        ] {
+            assert_eq!(runner.count(command), 0, "{command}");
+        }
+    }
+}
+
+struct UnfinishedSnapshotRead<'a> {
+    cancelled: &'a std::sync::atomic::AtomicUsize,
+    completed: bool,
+}
+
+impl Drop for UnfinishedSnapshotRead<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+struct FailingSnapshotOrca {
+    inner: Arc<MockOrca>,
+    started: tokio::sync::Barrier,
+    fail: tokio::sync::Notify,
+    failed_command: &'static str,
+    cancelled: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl CommandRunner for FailingSnapshotOrca {
+    fn available(&self) -> bool {
+        true
+    }
+    async fn execute(&self, arguments: &[String]) -> Result<Value, RuntimeFailure> {
+        if !is_snapshot_read(arguments) {
+            return self.inner.execute(arguments).await;
+        }
+        let mut read = UnfinishedSnapshotRead {
+            cancelled: &self.cancelled,
+            completed: false,
+        };
+        self.started.wait().await;
+        if arguments[1] == self.failed_command {
+            self.fail.notified().await;
+            read.completed = true;
+            Err(ambiguous())
+        } else {
+            std::future::pending().await
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_parallel_snapshot_read_cancels_other_reads_and_never_publishes_partial_data() {
+    for failed_command in ["worker-list", "task-list", "check"] {
+        let (_repository, store, runner, _) = setup().await;
+        ready(&store).await;
+        let gate = Arc::new(FailingSnapshotOrca {
+            inner: runner.clone(),
+            started: tokio::sync::Barrier::new(4),
+            fail: tokio::sync::Notify::new(),
+            failed_command,
+            cancelled: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = Arc::new(
+            AgentService::with_runner(store.clone(), gate.clone())
+                .await
+                .unwrap(),
+        );
+        let snapshot = tokio::spawn({
+            let service = service.clone();
+            async move { service.snapshot(MISSION).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), gate.started.wait())
+            .await
+            .expect("all reads reached the barrier");
+        gate.fail.notify_one();
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), snapshot)
+            .await
+            .expect("failed read cancels unfinished reads")
+            .unwrap()
+            .unwrap();
+        assert_eq!(gate.cancelled.load(Ordering::SeqCst), 2);
+        assert!(!snapshot.connected);
+        assert!(!snapshot.can_start_tasks);
+        assert!(snapshot.tasks.is_empty());
+        assert!(snapshot.messages.is_empty());
+        assert_eq!(
+            store.mission(MISSION).await.unwrap().unwrap().status,
+            "needs-attention"
+        );
+        let recovered = AgentService::with_runner(store.clone(), runner)
+            .await
+            .unwrap()
+            .snapshot(MISSION)
+            .await
+            .unwrap();
+        assert!(recovered.connected);
+        assert_eq!(recovered.mission.status, "ready");
+    }
+}
+
+#[tokio::test]
+async fn later_worker_page_failure_discards_the_whole_parallel_snapshot() {
+    let (_repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    *runner.tasks.lock().unwrap() = vec![task()];
+    *runner.messages.lock().unwrap() = vec![question()];
+    runner.override_next(
+        "orchestration worker-list",
+        Ok(ok(
+            json!({"workers":[worker()],"page":{"hasMore":true,"nextCursor":"page-2"}}),
+        )),
+    );
+    let mut foreign = worker();
+    foreign["runId"] = json!("foreign-run");
+    runner.override_next(
+        "orchestration worker-list",
+        Ok(ok(json!({"workers":[foreign],"page":{"hasMore":false}}))),
+    );
+    let snapshot = service.snapshot(MISSION).await.unwrap();
+    assert!(!snapshot.connected);
+    assert!(!snapshot.can_start_tasks);
+    assert!(snapshot.tasks.is_empty());
+    assert!(snapshot.messages.is_empty());
+    assert_eq!(runner.count("orchestration worker-list"), 2);
+    assert_eq!(runner.count("orchestration worker-start"), 0);
 }

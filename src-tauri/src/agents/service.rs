@@ -636,10 +636,13 @@ impl AgentService {
         let mut mission = self.mission(id).await?;
         let result = async {
             self.require_connection(&mission).await?;
-            let workers = self.workers(&mission).await?;
-            let tasks = self.raw_tasks(&mission).await?;
-            let messages = self.raw_messages(&mission).await?;
-            Ok::<_, AppError>((workers, tasks, messages))
+            // These queries are independent and non-consuming. Each worker page still
+            // validates its Run/cursor in order; failure discards the entire snapshot.
+            tokio::try_join!(
+                self.workers(&mission),
+                self.raw_tasks(&mission),
+                self.raw_messages(&mission),
+            )
         }
         .await;
         match result {
