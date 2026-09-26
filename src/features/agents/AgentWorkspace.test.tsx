@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopBridge, type DesktopBridge } from "../../platform/desktop-bridge";
 import type { AgentEnvironment, AgentMission, AgentOperation, AgentSnapshot } from "../../shared/contracts";
@@ -42,8 +43,9 @@ function fixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+  return { promise, resolve, reject };
 }
 
 async function ready() {
@@ -55,7 +57,7 @@ function fillTask() {
   fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "仅修改任务列表，保持现有接口，运行组件测试验证。" } });
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("AgentWorkspace", () => {
   it("rejects a seventy-character Chinese title by UTF-8 size and permits a corrected title", async () => {
@@ -256,6 +258,149 @@ describe("AgentWorkspace", () => {
     rendered.unmount();
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces a refresh after mutation and rejects the older in-flight snapshot", async () => {
+    const olderRead = deferred<AgentSnapshot>();
+    const bridge = fixture({ getAgentSnapshot: vi.fn()
+      .mockResolvedValueOnce(snapshot)
+      .mockReturnValueOnce(olderRead.promise)
+      .mockResolvedValue({ ...snapshot, tasks: [{ id: "task-new", title: "刚提交的任务", spec: "检查结果", status: "running", dispatchId: null, terminalState: null, liveness: "alive", attention: null, canRelease: false }] }),
+    });
+    render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
+    fillTask();
+    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    await screen.findByText("任务已提交。执行进展会自动更新。");
+    fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+    await act(async () => olderRead.resolve({ ...snapshot, warning: "操作前的旧进展" }));
+    expect(await screen.findByRole("article", { name: "任务 刚提交的任务" })).toBeVisible();
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(3);
+    expect(bridge.startAgentTask).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("操作前的旧进展")).not.toBeInTheDocument();
+  });
+
+  it("skips polling during a mutation and drains one queued read after its result", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<AgentOperation>();
+    const bridge = fixture({ startAgentTask: vi.fn().mockReturnValue(pending.promise) });
+    render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
+    await act(async () => { await Promise.resolve(); });
+    fillTask();
+    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve(operation));
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+    expect(bridge.startAgentTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses hidden-window polls and requires fresh state before commands after returning", async () => {
+    vi.useFakeTimers();
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const resumedRead = deferred<AgentSnapshot>();
+    const bridge = fixture({ getAgentSnapshot: vi.fn()
+      .mockResolvedValueOnce(snapshot)
+      .mockReturnValueOnce(resumedRead.promise),
+    });
+    const rendered = render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
+    await act(async () => { await Promise.resolve(); });
+    fillTask();
+    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeEnabled();
+    visibility = "hidden";
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(1);
+    expect(bridge.listAgentOperations).toHaveBeenCalledTimes(1);
+    visibility = "visible";
+    fireEvent(document, new Event("visibilitychange"));
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    await act(async () => resumedRead.resolve(snapshot));
+    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeEnabled();
+    rendered.unmount();
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts a fresh read after StrictMode replays the mount effect", async () => {
+    const discardedRead = deferred<AgentSnapshot>();
+    const bridge = fixture({ getAgentSnapshot: vi.fn()
+      .mockReturnValueOnce(discardedRead.promise)
+      .mockResolvedValue(snapshot),
+    });
+    render(<StrictMode><AgentWorkspace bridge={bridge} workspaceId="workspace-1" /></StrictMode>);
+    await waitFor(() => expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(1));
+    await act(async () => discardedRead.resolve({ ...snapshot, warning: "已清理 effect 的旧响应" }));
+    await ready();
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("已清理 effect 的旧响应")).not.toBeInTheDocument();
+  });
+
+  it("does not unlock commands with a read started before the window became hidden", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const oldRead = deferred<AgentSnapshot>();
+    const resumedRead = deferred<AgentSnapshot>();
+    const bridge = fixture({ getAgentSnapshot: vi.fn()
+      .mockResolvedValueOnce({ ...snapshot, messages: [{ id: "message-1", type: "message", body: "上次确认的进展", taskId: null, dispatchId: null, requiresReply: false }] })
+      .mockReturnValueOnce(oldRead.promise)
+      .mockReturnValueOnce(resumedRead.promise),
+    });
+    render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
+    await ready();
+    fillTask();
+    fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
+    visibility = "hidden";
+    fireEvent(document, new Event("visibilitychange"));
+    visibility = "visible";
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => oldRead.resolve({ ...snapshot, warning: "后台之前的旧响应" }));
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("上次确认的进展")).toBeVisible();
+    expect(screen.queryByText("后台之前的旧响应")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    await act(async () => resumedRead.resolve(snapshot));
+    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeEnabled();
+  });
+
+  it.each(["disconnected", "failed"])("waits for the resumed read before reconnecting when it returns %s", async (outcome) => {
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const disconnected = { ...snapshot, connected: false };
+    const resumedRead = deferred<AgentSnapshot>();
+    const bridge = fixture({ getAgentSnapshot: vi.fn()
+      .mockResolvedValueOnce(disconnected)
+      .mockReturnValueOnce(resumedRead.promise)
+      .mockResolvedValue(snapshot),
+    });
+    render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
+    const reconnect = await screen.findByRole("button", { name: "重新连接协作" });
+    expect(reconnect).toBeEnabled();
+    visibility = "hidden";
+    fireEvent(document, new Event("visibilitychange"));
+    expect(reconnect).toBeDisabled();
+    visibility = "visible";
+    fireEvent(document, new Event("visibilitychange"));
+    expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
+    expect(reconnect).toBeDisabled();
+    fireEvent.click(reconnect);
+    expect(bridge.reconnectAgentMission).not.toHaveBeenCalled();
+    await act(async () => {
+      if (outcome === "failed") resumedRead.reject(new Error("Resume read failed"));
+      else resumedRead.resolve(disconnected);
+    });
+    expect(reconnect).toBeEnabled();
+    fireEvent.click(reconnect);
+    expect(bridge.reconnectAgentMission).toHaveBeenCalledTimes(1);
+    await ready();
   });
 
   it("retains tasks and messages when a disconnected snapshot returns empty collections", async () => {

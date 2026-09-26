@@ -24,6 +24,10 @@ function byteLimitError(label: string, value: string, limit: number) {
   return bytes > limit ? `${label}超过 ${limit} 字节上限（当前 ${bytes} 字节），请缩短后再提交。` : null;
 }
 
+function documentVisible() {
+  return document.visibilityState !== "hidden";
+}
+
 const statusLabels: Record<string, string> = {
   pending: "等待确认", succeeded: "已执行", failed: "失败", unknown: "结果未知",
   creating: "准备中", ready: "就绪", "needs-attention": "需要处理",
@@ -213,62 +217,93 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
   const [spec, setSpec] = useState("");
   const [answered, setAnswered] = useState<string[]>([]);
   const [uncertainTargets, setUncertainTargets] = useState<string[]>([]);
+  const [visible, setVisible] = useState(documentVisible);
+  const [needsFreshRead, setNeedsFreshRead] = useState(true);
   const active = useRef(true);
   const readInFlight = useRef(false);
+  const refreshQueued = useRef(false);
+  const latestRefresh = useRef<() => Promise<void>>(async () => {});
   const mutationInFlight = useRef(false);
   const revision = useRef(0);
-  const connected = snapshot?.connected === true && !readError;
+  const connected = snapshot?.connected === true && !readError && !needsFreshRead;
   const uncertain = operations.some((operation) => operation.status === "pending" || operation.status === "unknown");
   const uncertainStart = operations.some((operation) =>
     (operation.status === "pending" || operation.status === "unknown") &&
     ["create-mission", "start-task"].includes(operation.kind),
   );
-  const canMutate = connected && receiptsLoaded && !busy;
+  const canMutate = connected && receiptsLoaded && !busy && visible;
+  const canReconnect = !busy && visible && !needsFreshRead;
   const titleError = byteLimitError("任务标题", title, 200);
   const specError = byteLimitError("任务说明", spec, 64_000);
   const missionWarning = snapshot ? snapshot.warning ?? snapshot.mission.error : mission.error;
 
   const refresh = useCallback(async () => {
-    if (readInFlight.current) return;
+    if (!active.current) return;
+    // Coalesce explicit refreshes; polling never queues behind reads or commands.
+    if (readInFlight.current || mutationInFlight.current || !documentVisible()) {
+      refreshQueued.current = true;
+      return;
+    }
+    refreshQueued.current = false;
     readInFlight.current = true;
     const readRevision = revision.current;
-    const [nextSnapshot, nextOperations] = await Promise.allSettled([
-      bridge.getAgentSnapshot(mission.id), bridge.listAgentOperations(mission.id),
-    ]);
-    readInFlight.current = false;
-    if (!active.current || readRevision !== revision.current) return;
-    if (nextSnapshot.status === "fulfilled") {
-      const next = nextSnapshot.value;
-      setSnapshot((previous) => !next.connected && previous
-        ? { ...next, tasks: previous.tasks, messages: previous.messages }
-        : next);
-    }
-    if (nextOperations.status === "fulfilled") {
-      setOperations((previous) => [
-        ...nextOperations.value,
-        ...previous.filter((operation) => !nextOperations.value.some((item) => item.id === operation.id)),
+    try {
+      const [nextSnapshot, nextOperations] = await Promise.allSettled([
+        bridge.getAgentSnapshot(mission.id), bridge.listAgentOperations(mission.id),
       ]);
-      setReceiptsLoaded(true);
+      if (!active.current || readRevision !== revision.current) return;
+      if (nextSnapshot.status === "fulfilled") {
+        const next = nextSnapshot.value;
+        setSnapshot((previous) => !next.connected && previous
+          ? { ...next, tasks: previous.tasks, messages: previous.messages }
+          : next);
+      }
+      if (nextOperations.status === "fulfilled") {
+        setOperations((previous) => [
+          ...nextOperations.value,
+          ...previous.filter((operation) => !nextOperations.value.some((item) => item.id === operation.id)),
+        ]);
+        setReceiptsLoaded(true);
+      }
+      const failures = [nextSnapshot, nextOperations].filter((result) => result.status === "rejected");
+      setReadError(failures.length ? failures.map((result) => errorMessage(result.reason)).join(" ") : null);
+      setNeedsFreshRead(false);
+    } finally {
+      readInFlight.current = false;
+      if (active.current && refreshQueued.current && !mutationInFlight.current && documentVisible()) {
+        void latestRefresh.current();
+      }
     }
-    const failures = [nextSnapshot, nextOperations].filter((result) => result.status === "rejected");
-    setReadError(failures.length ? failures.map((result) => errorMessage(result.reason)).join(" ") : null);
   }, [bridge, mission.id]);
+  latestRefresh.current = refresh;
 
   useEffect(() => {
     active.current = true;
+    const onVisibilityChange = () => {
+      revision.current += 1;
+      setVisible(documentVisible());
+      setNeedsFreshRead(true);
+      if (documentVisible()) void refresh();
+    };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 5_000);
+    const timer = window.setInterval(() => {
+      if (documentVisible() && !readInFlight.current && !mutationInFlight.current) void refresh();
+    }, 5_000);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       active.current = false;
       revision.current += 1;
+      refreshQueued.current = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [refresh]);
 
   const mutate = async (kind: string, send: (operationId: string) => Promise<AgentOperation>, onSuccess?: () => void, target?: string) => {
-    if (mutationInFlight.current || (kind !== "reconnect" && !canMutate) || (kind === "start-task" && (uncertainStart || snapshot?.canStartTasks === false)) || (target && uncertainTargets.includes(target))) return;
+    if (mutationInFlight.current || (kind === "reconnect" ? !canReconnect : !canMutate) || (kind === "start-task" && (uncertainStart || snapshot?.canStartTasks === false)) || (target && uncertainTargets.includes(target))) return;
     mutationInFlight.current = true;
     revision.current += 1;
+    setNeedsFreshRead(true);
     setBusy(true);
     setNotice(null);
     const operationId = crypto.randomUUID();
@@ -305,12 +340,12 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
         <button onClick={() => void refresh()} type="button">刷新进展</button>
       </header>
       <p className={connected ? "agent-workspace__connected" : "agent-workspace__notice"} role="status">
-        {connected ? "已连接 · 每 5 秒更新进展" : snapshot || readError ? "连接已断开 · 保留最近一次进展" : "正在连接协作…"}
+        {!visible ? "窗口在后台 · 已暂停自动刷新" : needsFreshRead && snapshot ? "正在更新进展 · 保留最近一次进展" : connected ? "已连接 · 每 5 秒更新进展" : snapshot || readError ? "连接已断开 · 保留最近一次进展" : "正在连接协作…"}
       </p>
       {readError ? <p className="agent-workspace__error" role="alert">{readError}</p> : null}
       {missionWarning ? <p className="agent-workspace__notice">{missionWarning}</p> : null}
       {snapshot && !snapshot.connected ? (
-        <button disabled={busy} onClick={() => void mutate("reconnect", (operationId) => bridge.reconnectAgentMission({ operationId, missionId: mission.id }))} type="button">重新连接协作</button>
+        <button disabled={!canReconnect} onClick={() => void mutate("reconnect", (operationId) => bridge.reconnectAgentMission({ operationId, missionId: mission.id }))} type="button">重新连接协作</button>
       ) : null}
       {notice ? <p className="agent-workspace__notice" role="status">{notice}</p> : null}
       {uncertain ? <p className="agent-workspace__notice">有操作尚未确认，请查看下方回执并核对 Orca。{uncertainStart ? "已暂停新增任务，避免重复启动。" : "请勿重复提交同一操作。"}</p> : null}
