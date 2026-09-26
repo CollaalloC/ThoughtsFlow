@@ -2,6 +2,8 @@
 
 评估日期：2026-09-22。产品达成度见 [VISION_ALIGNMENT.md](VISION_ALIGNMENT.md)，现有 Orca 接入取舍见 [ADR 0001](adr/0001-orca-runtime-omp-workers.md)。本文件区分本轮实现与后续设计，避免把设计图算成功能完成。
 
+2026-09-26 后续优化：在不改变权威数据和公开 Interface 的前提下，Agent 工作面集中管理刷新请求，Context 读取改为工作区引用驱动。架构取舍、可复现基准和验证见 [刷新与存储优化](PERFORMANCE_REFRESH_STORAGE_20260926.md)。
+
 ## 判断与保留项
 
 目前最有价值的内核已经成立：精确 Model Run 分支、不可变 Context Receipt、本地持久化、路线比较、人工判断与 Decision Packet。完整全文搜索、可恢复数据包和真实用户验证尚未完成；Agent 执行也还没有返回决策证据链。
