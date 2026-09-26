@@ -540,7 +540,10 @@ export function FocusWorkspace({
     requestedBranchId?: string | null,
     purpose: "preview" | "send-preview" = "preview",
   ) => {
-    if (!ownsWorkspace() || !detail || !exactProviderProfileId) return null;
+    // A previous render's timer can fire before React runs its effect cleanup.
+    // Workspace ownership alone cannot protect a cursor change within that workspace.
+    const ownsCursor = () => contextCursorIdentityRef.current === contextCursorIdentity;
+    if (!ownsWorkspace() || !ownsCursor() || !detail || !exactProviderProfileId) return null;
     const isCurrentRead = session.read(detail.workspace.id, purpose);
     const parentNode = exactParentRunId
       ? contextTree?.nodes.find((node) => node.runId === exactParentRunId)
@@ -564,13 +567,14 @@ export function FocusWorkspace({
             ...input,
             draftVersion: exactDraftVersion,
           })) as ContextPreviewView;
-      return isCurrentRead() ? result : null;
+      return isCurrentRead() && ownsCursor() ? result : null;
     } catch (reason) {
-      if (isCurrentRead()) throw reason;
+      if (isCurrentRead() && ownsCursor()) throw reason;
       return null;
     }
   }, [
     bridge,
+    contextCursorIdentity,
     contextTree,
     detail,
     draftVersion,

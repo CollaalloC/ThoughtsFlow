@@ -1415,6 +1415,7 @@ describe("FocusWorkspace", () => {
 
   it("atomically rebases a persisted draft when moving to root and sends with the authoritative version", async () => {
     const bridge = bridgeFixture();
+    const persistedDraftPreview = deferred<ContextPreview>();
     const rebasedTree: ContextTreeProjection = {
       ...contextTree,
       draftVersion: 2,
@@ -1452,10 +1453,11 @@ describe("FocusWorkspace", () => {
     vi.mocked(bridge.inspectContext)
       .mockResolvedValueOnce(preview)
       .mockResolvedValue({ ...preview, draftVersion: 2 });
-    vi.mocked(bridge.previewContextTransition).mockImplementation(async (input) => ({
-      ...preview,
-      draftVersion: input.draftVersion,
-    }));
+    vi.mocked(bridge.previewContextTransition).mockImplementation(async (input) => (
+      input.parentRunId === "run-a" && input.draftVersion === 1
+        ? persistedDraftPreview.promise
+        : { ...preview, draftVersion: input.draftVersion }
+    ));
     vi.mocked(bridge.createTurnAndStartRun).mockResolvedValue({
       ...runHandle("run-from-root", "turn-from-root"),
       draftVersion: 3,
@@ -1474,6 +1476,22 @@ describe("FocusWorkspace", () => {
         }),
       ),
     );
+
+    // The persisted-draft scenario starts after the authoritative preview is applied,
+    // not merely after its asynchronous bridge request has begun.
+    await act(async () => {
+      const excludedItems = preview.items.map((item) => ({
+        ...item,
+        included: item.sourceRef.id === "run-a" ? false : item.included,
+      }));
+      persistedDraftPreview.resolve({
+        ...preview,
+        items: excludedItems,
+        rawItems: excludedItems,
+        draftVersion: 1,
+      });
+    });
+    expect(await screen.findByRole("button", { name: "重新纳入 回答 A" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "打开 Context Tree" }));
     fireEvent.click(screen.getByRole("treeitem", { name: /工作区起点/ }));
