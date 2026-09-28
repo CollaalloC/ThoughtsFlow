@@ -1,13 +1,15 @@
 # OMP / Orca 上游兼容跟踪
 
-最后核查：2026-09-26。机器可读基线见 [baseline.json](baseline.json)。已设置本任务的每周一 10:00 跟踪；只有重要变化、兼容性问题、已完成集成或需要决定的事项才通知。
+最后核查：2026-09-28。机器可读基线见 [baseline.json](baseline.json)，本轮契约与回归证据见 [2026-09-28 核查记录](2026-09-28.md)。已设置本任务的每周一 10:00 跟踪；只有重要变化、兼容性问题、已完成集成或需要决定的事项才通知。
 
 | 上游 | 本机已安装 | 核查时最新稳定版 | 官方来源 |
 | --- | --- | --- | --- |
-| OMP | 18.3.2（开始核查时为 18.2.10） | 18.3.2，2026-09-26 | [Release](https://github.com/can1357/oh-my-pi/releases/tag/v18.3.2) |
-| Orca | 1.4.207 | 1.4.212，2026-09-25 | [Release](https://github.com/stablyai/orca/releases/tag/v1.4.212) |
+| OMP | 18.3.2 | 18.3.5，2026-09-27 | [Release](https://github.com/can1357/oh-my-pi/releases/tag/v18.3.5) |
+| Orca | 1.4.212 | 1.4.215，2026-09-27 | [Release](https://github.com/stablyai/orca/releases/tag/v1.4.215) |
 
-此轮没有执行运行时升级命令，也没有读取或改写模型凭据。开始核查时 OMP 为 18.2.10，收尾 CLI 复核时已是 18.3.2；这里保留两次观察，避免使用过期安装状态。上次真实 OMP 单任务验证使用 18.2.8 / Orca 1.4.206，不能替代新版实测。
+此轮没有执行运行时升级命令，也没有读取或改写模型凭据。Orca CLI 可用，运行时未启动，因此未进行在线能力握手。上次真实 OMP 单任务验证使用 18.2.8 / Orca 1.4.206，不能替代新版实测。
+
+当前接入所依赖的 OMP Gateway/RPC 源文件、Orca 编排契约和 worker 输出/观察路径在本轮固定版本比较中没有变化，无需修改适配器。OMP 18.3.5 默认启用会话级缓存预热，可能产生额外后台模型请求；这是上游会话策略，ThoughtsFlow 不代为启用，也不把它计为应用自身的性能提升。
 
 ## 已吸收的能力
 
@@ -22,11 +24,18 @@
 | --- | --- | --- |
 | OMP 18.3.1 `prompt_result`、`session_settled` / `isSettled` | 区分提示词完成与整个会话后台工作结束 | 只有另建 Direct OMP adapter 时才使用；目前生命周期由 Orca 管理，不争用其 RPC 连接 |
 | OMP `open_session`、`set_event_filter`、`--no-ui` | 宿主会话恢复与降低事件传输量 | 记录在下一适配阶段，当前软件没有 Direct OMP adapter |
-| OMP 18.3.2 Windows TEMP、原始输出链接和 compaction 修复 | 提升上游运行可靠性 | 作为升级候选，先验证版本契约和实际回归，再升级兼容基线 |
-| Orca 原生聊天 OMP 模型目录 / 模型切换 | 真实模型选择能力 | 不等同于 supervised worker 的模型覆盖；1.4.212 的 worker-start 仍不支持 OMP `--model` / `--effort`，界面不显示无效选择器 |
+| OMP 18.3.2 Windows TEMP、原始输出链接和 compaction 修复 | 提升上游运行可靠性 | 本机已安装 18.3.2；对应平台的真实运行效果仍需 runner / 实机验证 |
+| OMP 18.3.3 `omp skill list --json`、live steering | 技能发现和运行中引导 | 保留为后续按需集成候选；当前 Mission 由 Orca 管理，继续使用其通信入口 |
+| OMP 18.3.5 `providers.cacheWarming` / `Model.promptCache` | 上游按成本收益估算保持提示词缓存 | 默认 `idle`，策略归 OMP 会话所有；本轮不升级、不改模型配置、不合并到 Model Run 或历史 Receipt |
+| Orca 原生聊天 OMP 模型目录 / 模型切换 | 真实模型选择能力 | 不等同于 supervised worker 的模型覆盖；1.4.215 固定源码及本机 1.4.212 帮助仍未声明 OMP worker `--model` / `--effort`，界面不显示无效选择器 |
+| Orca 1.4.214–1.4.215 profile SQLite 持久化与冲突选择修复 | 上游 profile 保存和恢复可靠性 | 归 Orca 管理，不直接读取或迁移其内部数据库 |
 | Orca WSL relay、Linux 孤儿进程释放、结构化任务状态修复 | 跨平台与恢复可靠性 | 对应平台 runner 执行后才提升验证状态 |
 
-来源：[OMP RPC](https://github.com/can1357/oh-my-pi/blob/v18.3.2/docs/rpc.md)、[OMP Gateway](https://github.com/can1357/oh-my-pi/blob/v18.3.2/packages/coding-agent/src/cli/auth-gateway-cli.ts)、[Orca worker 参数](https://github.com/stablyai/orca/blob/v1.4.212/src/cli/specs/orchestration-worker-specs.ts)、[Orca OMP 原生聊天目录](https://github.com/stablyai/orca/blob/v1.4.212/src/shared/agent-session-option-catalog-omp.ts)。
+来源：[OMP RPC](https://github.com/can1357/oh-my-pi/blob/v18.3.5/docs/rpc.md)、[OMP Gateway](https://github.com/can1357/oh-my-pi/blob/v18.3.5/packages/coding-agent/src/cli/auth-gateway-cli.ts)、[OMP 18.3.3](https://github.com/can1357/oh-my-pi/releases/tag/v18.3.3)、[OMP 18.3.5](https://github.com/can1357/oh-my-pi/releases/tag/v18.3.5)、[Orca worker 参数](https://github.com/stablyai/orca/blob/v1.4.215/src/cli/specs/orchestration-worker-specs.ts)、[Orca OMP 原生聊天目录](https://github.com/stablyai/orca/blob/v1.4.215/src/shared/agent-session-option-catalog-omp.ts)。
+
+## 验证边界
+
+[Desktop CI 三平台运行](https://github.com/CollaalloC/ThoughtsFlow/actions/runs/36253970625)已在提交 `3e24dafa09ece6a84ffef74957604c4f0c5aa280` 成功，覆盖核心检查与原生 MockRuntime IPC。本轮另通过本地 fixture、Agent 契约测试、工具链检查和固定延迟性能基准，并静态检查三平台工作流。Windows/Linux 的真实 Orca + OMP 执行仍未验证；CI 通过不提升这一状态。
 
 ## 每次跟踪的执行顺序
 
