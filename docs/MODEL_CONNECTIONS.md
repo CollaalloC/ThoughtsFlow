@@ -1,5 +1,7 @@
 # 模型连接与 OMP Gateway
 
+> 2026-10-06：本页保留原 Provider 直连兼容入口的配置说明。Agent 工作台主路径沿用 OMP 自身的模型、认证和 harness，不需要重复配置 Provider。本页的 Gateway 指已接入的 HTTP serve；上游新增 stdio Gateway 尚未接入，且不等于完整 Agent。当前方向见 [ADR 0003](adr/0003-agent-workbench-context-handoffs.md)。
+
 核查日期：2026-09-26。本页区分可配置的请求协议、模型目录、实际账号可用性。新增模板复用 ThoughtsFlow 的 OpenAI Chat Completions 适配器；没有将 Agent RPC 当作模型请求，也没有新增供应商 SDK 依赖。
 
 ## 连接方式

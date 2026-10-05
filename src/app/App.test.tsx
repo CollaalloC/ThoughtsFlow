@@ -245,6 +245,11 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     removeSessionCredential: vi.fn().mockResolvedValue([]),
     testProviderConnection: vi.fn().mockResolvedValue({ ok: true, message: "ok" }),
     subscribeToRunEvents: vi.fn().mockReturnValue(() => undefined),
+    agentEnvironment: vi.fn().mockResolvedValue({
+      available: true, running: false, orcaVersion: "1", ompVersion: "1",
+      runtimeId: null, projects: [], message: null,
+    }),
+    listAgentMissions: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -260,27 +265,53 @@ describe("App", () => {
       listAgentMissions: vi.fn().mockResolvedValue([]),
     });
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     await screen.findByRole("heading", { name: workspace.name });
     await user.click(within(screen.getByRole("navigation", { name: "工作区" })).getByRole("button", { name: otherWorkspace.name }));
     await screen.findByRole("heading", { name: otherWorkspace.name });
-    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Agent 协作" }));
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Agent 工作台" }));
     await waitFor(() => expect(bridge.listAgentMissions).toHaveBeenCalledWith(otherWorkspace.id));
   });
 
-  it("opens Agent collaboration for the current workspace without starting a task", async () => {
-    const user = userEvent.setup();
-    const bridge = bridgeFixture({
-      agentEnvironment: vi.fn().mockResolvedValue({ available: true, running: false, orcaVersion: "1", ompVersion: "1", runtimeId: null, projects: [], message: null }),
-      listAgentMissions: vi.fn().mockResolvedValue([]),
-      startAgentTask: vi.fn(),
-    });
+  it("starts in the Agent workbench without reading Provider settings or starting a task", async () => {
+    const bridge = bridgeFixture({ startAgentTask: vi.fn() });
     render(<App bridge={bridge} />);
-    const navigation = screen.getByRole("navigation", { name: "工作面" });
-    await waitFor(() => expect(within(navigation).getByRole("button", { name: "Agent 协作" })).toBeEnabled());
-    await user.click(within(navigation).getByRole("button", { name: "Agent 协作" }));
-    expect(await screen.findByRole("region", { name: "Agent 协作工作面" })).toBeVisible();
-    expect(bridge.listAgentMissions).toHaveBeenCalledWith(workspace.id);
+
+    const workbench = within(screen.getByRole("navigation", { name: "工作面" }))
+      .getByRole("button", { name: "Agent 工作台" });
+    expect(workbench).toHaveAttribute("aria-current", "page");
+    expect(await screen.findByRole("region", { name: "Agent 工作台" })).toBeVisible();
+    await waitFor(() => expect(bridge.listAgentMissions).toHaveBeenCalledWith(workspace.id));
+    expect(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "路线图" })).toBeEnabled();
+    expect(bridge.listProviderProfiles).not.toHaveBeenCalled();
+    expect(bridge.listProviderTemplates).not.toHaveBeenCalled();
+    expect(bridge.listProviderModels).not.toHaveBeenCalled();
     expect(bridge.startAgentTask).not.toHaveBeenCalled();
+  });
+
+  it("creates the first workspace in the Agent entry and opens its graph without a Provider", async () => {
+    const user = userEvent.setup();
+    const bridge = bridgeFixture({ listWorkspaces: vi.fn().mockResolvedValue([]) });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByRole("region", { name: "Agent 工作台" })).toBeVisible();
+    await waitFor(() => expect(bridge.listWorkspaces).toHaveBeenCalled());
+    const navigation = within(screen.getByRole("navigation", { name: "工作面" }));
+    expect(navigation.getByRole("button", { name: "Agent 工作台" })).toBeEnabled();
+    expect(navigation.getByRole("button", { name: "路线图" })).toBeDisabled();
+    expect(navigation.getByRole("button", { name: "决策" })).toBeDisabled();
+    expect(bridge.listProviderProfiles).not.toHaveBeenCalled();
+    expect(bridge.listAgentMissions).not.toHaveBeenCalled();
+
+    await user.type(screen.getByLabelText("工作区名称"), workspace.name);
+    await user.type(screen.getByLabelText("工作区目标"), workspace.goal);
+    await user.click(screen.getByRole("button", { name: "创建工作区" }));
+    await waitFor(() => expect(navigation.getByRole("button", { name: "路线图" })).toBeEnabled());
+    expect(bridge.createWorkspace).toHaveBeenCalledWith({ name: workspace.name, goal: workspace.goal });
+    await user.click(navigation.getByRole("button", { name: "路线图" }));
+    expect(await screen.findByRole("region", { name: "对话路线图" })).toBeVisible();
+    expect(bridge.getRouteProjection).toHaveBeenCalledWith({ workspaceId: workspace.id });
+    expect(bridge.listProviderProfiles).not.toHaveBeenCalled();
   });
 
   it("deep-links credential recovery to the failed Provider and clears it on ordinary navigation", async () => {
@@ -339,6 +370,7 @@ describe("App", () => {
     });
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
 
     expect(await screen.findByText("失败回答仍保留")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "选择备用凭据" }));
@@ -351,9 +383,9 @@ describe("App", () => {
     });
 
     const navigation = screen.getByRole("navigation", { name: "工作面" });
-    await user.click(within(navigation).getByRole("button", { name: "Focus" }));
+    await user.click(within(navigation).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByText("失败回答仍保留")).toBeVisible();
-    await user.click(within(navigation).getByRole("button", { name: "Provider 设置" }));
+    await user.click(within(navigation).getByRole("button", { name: "Provider 设置（高级兼容）" }));
 
     expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
     await waitFor(() => {
@@ -361,11 +393,12 @@ describe("App", () => {
     });
   });
 
-  it("opens the persisted route projection and returns to Focus", async () => {
+  it("opens the persisted route projection and returns to the workbench", async () => {
     const user = userEvent.setup();
     const bridge = bridgeFixture();
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
 
     const navigation = screen.getByRole("navigation", { name: "工作面" });
@@ -378,8 +411,9 @@ describe("App", () => {
     });
     expect(bridge.openWorkspace).toHaveBeenCalledWith(workspace.id);
 
-    await user.click(screen.getByRole("button", { name: "返回 Focus" }));
-    expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "返回工作台" }));
+    expect(await screen.findByRole("region", { name: "Agent 工作台" })).toBeVisible();
+    await waitFor(() => expect(bridge.listAgentMissions).toHaveBeenCalledWith(workspace.id));
   });
 
   it("highlights the exact answer version for every Turn on the active Context path", async () => {
@@ -496,6 +530,7 @@ describe("App", () => {
     });
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
     await user.click(
       within(screen.getByRole("navigation", { name: "工作面" }))
@@ -529,6 +564,7 @@ describe("App", () => {
     });
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "工作面" });
     await user.click(within(navigation).getByRole("button", { name: "决策" }));
@@ -567,6 +603,7 @@ describe("App", () => {
     const bridge = bridgeFixture({ getRouteProjection });
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "工作面" });
     await user.click(within(navigation).getByRole("button", { name: "路线图" }));
@@ -577,18 +614,20 @@ describe("App", () => {
     expect(getRouteProjection).toHaveBeenCalledTimes(2);
   });
 
-  it("opens Provider settings and exposes an accessible return to Focus", async () => {
+  it("opens compatible Provider settings and returns to the workbench", async () => {
     const user = userEvent.setup();
     const bridge = bridgeFixture();
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "工作面" });
-    await user.click(within(navigation).getByRole("button", { name: "Provider 设置" }));
+    await user.click(within(navigation).getByRole("button", { name: "Provider 设置（高级兼容）" }));
 
     expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "返回 Focus" }));
-    expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "返回工作台" }));
+    expect(await screen.findByRole("region", { name: "Agent 工作台" })).toBeVisible();
+    await waitFor(() => expect(bridge.listAgentMissions).toHaveBeenCalledWith(workspace.id));
   });
 
   it("reloads for an exact run selection and persists route view movement", async () => {
@@ -596,6 +635,7 @@ describe("App", () => {
     const bridge = bridgeFixture();
 
     render(<App bridge={bridge} />);
+    await user.click(within(screen.getByRole("navigation", { name: "工作面" })).getByRole("button", { name: "Focus（兼容）" }));
     expect(await screen.findByRole("heading", { name: workspace.name })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "工作面" });
     await user.click(within(navigation).getByRole("button", { name: "路线图" }));

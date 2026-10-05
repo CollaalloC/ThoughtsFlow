@@ -18,6 +18,12 @@ pub(super) enum ExpectedReceipt<'a> {
     Release {
         dispatch_id: &'a str,
     },
+    Output {
+        dispatch_id: &'a str,
+        task_id: &'a str,
+        run_id: &'a str,
+        runtime_id: &'a str,
+    },
 }
 
 fn required<'a>(receipt: &'a Value, pointer: &str) -> Result<&'a str, String> {
@@ -97,6 +103,23 @@ pub(super) fn validate(receipt: &Value, expected: ExpectedReceipt<'_>) -> Result
                 return Err(
                     "Orca 释放回执未确认受支持的处理结果，请检查 Orca；不会自动重发。".into(),
                 );
+            }
+        }
+        ExpectedReceipt::Output {
+            dispatch_id,
+            task_id,
+            run_id,
+            runtime_id,
+        } => {
+            equals(receipt, "/_meta/runtimeId", runtime_id)?;
+            equals(receipt, "/result/dispatchId", dispatch_id)?;
+            if receipt
+                .pointer("/result/projection")
+                .is_some_and(|projection| !projection.is_null())
+            {
+                equals(receipt, "/result/projection/dispatchId", dispatch_id)?;
+                equals(receipt, "/result/projection/taskId", task_id)?;
+                equals(receipt, "/result/projection/runId", run_id)?;
             }
         }
     }

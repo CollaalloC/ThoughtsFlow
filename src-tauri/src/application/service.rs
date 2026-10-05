@@ -2087,7 +2087,7 @@ fn context_source_ref_domain(source: ContextSourceRefView) -> domain::ContextSou
     }
 }
 
-fn context_overrides_from_draft(
+pub(crate) fn context_overrides_from_draft(
     draft: &crate::ports::ContextDraft,
 ) -> AppResult<domain::ContextOverrides> {
     let pinned_sources = draft

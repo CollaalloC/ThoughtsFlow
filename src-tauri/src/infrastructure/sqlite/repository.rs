@@ -124,7 +124,7 @@ pub struct SqliteRepository {
 
 impl SqliteRepository {
     pub(crate) fn agent_store(&self) -> crate::agents::store::AgentStore {
-        crate::agents::store::AgentStore::new(self.pool.clone())
+        crate::agents::store::AgentStore::new(self.pool.clone(), self.clone())
     }
 
     pub async fn connect(path: impl AsRef<Path>) -> RepositoryResult<Self> {
@@ -2195,7 +2195,7 @@ async fn validate_maintenance_guard(
     Ok(())
 }
 
-async fn get_context_cursor_in(
+pub(crate) async fn get_context_cursor_in(
     transaction: &mut Transaction<'_, Sqlite>,
     workspace_id: &str,
 ) -> RepositoryResult<ContextCursorRecord> {

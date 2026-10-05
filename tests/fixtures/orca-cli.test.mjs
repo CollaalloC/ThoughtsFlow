@@ -48,6 +48,8 @@ test("requires opt-in and exercises coordinator, question, completion, and relea
     assert.equal(completedTask.status, "completed");
     assert.equal(completedTask.dispatch_id, null);
     const output = cli("orchestration", "worker-read", "--dispatch", started.dispatchId);
+    assert.equal(output.dispatchId, started.dispatchId);
+    assert.equal(output.sourceExact, true);
     assert.equal(output.transcript.messages[0].blocks[0].text, "OMP fixture output; no model was called");
     cli("orchestration", "worker-release", "--dispatch", started.dispatchId);
     const released = cli("orchestration", "worker-list", "--run", runId).workers[0];

@@ -1,5 +1,6 @@
 //! Local execution control: Orca owns workers; ThoughtsFlow owns intent and receipts.
 mod commands;
+mod context;
 mod executable;
 mod orca;
 mod receipt;
@@ -121,6 +122,102 @@ pub struct StartTaskInput {
     pub mission_id: String,
     pub title: String,
     pub spec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<AgentHandoffConfirmation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextSelection {
+    pub include_active_context: bool,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewAgentHandoffInput {
+    pub mission_id: String,
+    pub title: String,
+    pub spec: String,
+    pub context: AgentContextSelection,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffConfirmation {
+    pub context: AgentContextSelection,
+    pub preview_hash: String,
+    pub expected_cursor_version: u64,
+    pub expected_draft_version: u64,
+    pub expected_branch_id: Option<String>,
+    pub expected_branch_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffSource {
+    pub kind: String,
+    pub id: String,
+    pub role: String,
+    pub content_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffPreview {
+    pub hash: String,
+    #[serde(default)]
+    pub title: String,
+    pub text: String,
+    pub compiler_version: String,
+    pub source_run_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub sources: Vec<AgentHandoffSource>,
+    pub parent_run_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub cursor_version: u64,
+    pub draft_version: u64,
+    pub branch_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoff {
+    pub operation_id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub created_at: String,
+    pub preview: AgentHandoffPreview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureAgentEvidenceInput {
+    pub id: String,
+    pub mission_id: String,
+    pub dispatch_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidence {
+    pub id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub dispatch_id: String,
+    pub handoff_operation_id: Option<String>,
+    pub text: String,
+    pub content_hash: String,
+    pub source: Option<String>,
+    pub request_cursor: Option<String>,
+    pub cursor: Option<String>,
+    pub has_more: bool,
+    pub warning: Option<String>,
+    pub observed_task_status: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

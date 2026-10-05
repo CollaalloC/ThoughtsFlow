@@ -1,6 +1,11 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AgentEnvironment,
+  AgentEvidence,
+  AgentHandoff,
+  AgentHandoffPreview,
+  CaptureAgentEvidenceInput,
+  PreviewAgentHandoffInput,
   AgentMission,
   AgentOperation,
   AgentOutput,
@@ -60,6 +65,10 @@ export interface DesktopBridge {
   reconnectAgentMission(input: ReconnectAgentMissionInput): Promise<AgentOperation>;
   listAgentOperations(missionId: string): Promise<AgentOperation[]>;
   readAgentOutput(input: ReadAgentOutputInput): Promise<AgentOutput>;
+  previewAgentHandoff(input: PreviewAgentHandoffInput): Promise<AgentHandoffPreview>;
+  listAgentHandoffs(missionId: string): Promise<AgentHandoff[]>;
+  captureAgentEvidence(input: CaptureAgentEvidenceInput): Promise<AgentEvidence>;
+  listAgentEvidence(workspaceId: string): Promise<AgentEvidence[]>;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
   createWorkspace(input: {
     name: string;
@@ -257,6 +266,10 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
     reconnectAgentMission: (input) => request("agent_reconnect", { input }),
     listAgentOperations: (missionId) => request("agent_operations", { missionId }),
     readAgentOutput: (input) => request("agent_read_output", { input }),
+    previewAgentHandoff: (input) => request("agent_preview_handoff", { input }),
+    listAgentHandoffs: (missionId) => request("agent_handoffs", { missionId }),
+    captureAgentEvidence: (input) => request("agent_capture_evidence", { input }),
+    listAgentEvidence: (workspaceId) => request("agent_evidence", { workspaceId }),
     listWorkspaces: () => request("list_workspaces"),
     createWorkspace: (input) => request("create_workspace", { input }),
     openWorkspace: (id) => request("open_workspace", { id }),

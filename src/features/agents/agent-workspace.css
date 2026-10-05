@@ -44,3 +44,12 @@
   .agent-workspace__layout { grid-template-columns: minmax(0, 1fr); }
   .agent-workspace__runtime { flex-wrap: wrap; }
 }
+
+.agent-workspace__workspace-picker { display: grid; gap: 12px; border-bottom: 1px solid var(--tf-line); }
+.agent-workspace__workspace-picker > label { max-width: 420px; }
+.agent-workspace__workspace-picker form { max-width: 600px; margin-top: 12px; }
+.agent-workspace__selection { display: grid; gap: 10px; border: 1px solid var(--tf-line); border-radius: 6px; min-width: 0; }
+.agent-workspace__selection > label { display: flex; align-items: center; gap: 8px; }
+.agent-workspace input[type="checkbox"] { width: auto; }
+.agent-workspace__graph { height: 330px; width: 100%; background: var(--tf-ground); }
+.agent-workspace__graph .react-flow__node { background: var(--tf-paper-strong); color: var(--tf-ink); border-color: var(--tf-line); font-size: 11px; overflow-wrap: anywhere; }

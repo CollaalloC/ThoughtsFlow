@@ -1,5 +1,7 @@
 # ThoughtsFlow × Orca × OMP 架构与实施
 
+> 2026-10-06：Agent 工作台已成为产品主路径。新的上下文交接、输出证据与兼容 Provider 边界见 [ADR 0003](adr/0003-agent-workbench-context-handoffs.md)；本轮交付与验收见[工作台计划](AGENT_WORKBENCH_PLAN.md)。下文记录初版 1–4 的控制链路设计，原“对话历史不传给执行器”现在允许通过显式、可预览的 Context Handoff 提交；不会隐式携带全部历史。
+
 本方案依据 `ask-matt` 路由的设计原则：先澄清关键产品选择，建立领域词汇，以少量接口承载复杂行为，再按可独立验证的纵向功能实施。用户已确认接入当前 ThoughtsFlow，并允许依赖 Orca 运行时。采用的取舍见 [ADR 0001](adr/0001-orca-runtime-omp-workers.md)。
 
 ## 产品闭环

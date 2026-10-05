@@ -725,3 +725,35 @@ describe("DesktopBridge errors", () => {
     });
   });
 });
+
+describe("Agent workbench commands", () => {
+  it("sends only source identities and version confirmations across the bridge", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const bridge = createDesktopBridge(async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      calls.push({ command, args });
+      return { apiVersion: 1, data: null } as T;
+    });
+    const context = { includeActiveContext: true, evidenceIds: ["evidence-1"] };
+    await bridge.previewAgentHandoff({ missionId: "mission-1", title: "Review", spec: "Check changes", context });
+    await bridge.listAgentHandoffs("mission-1");
+    await bridge.captureAgentEvidence({ id: "capture-1", missionId: "mission-1", dispatchId: "dispatch-1", cursor: "page-2" });
+    await bridge.listAgentEvidence("workspace-1");
+    await bridge.startAgentTask({ operationId: "start-1", missionId: "mission-1", title: "Review", spec: "Check changes", handoff: {
+      context, previewHash: "hash-1", expectedCursorVersion: 2, expectedDraftVersion: 3,
+      expectedBranchId: "branch-1", expectedBranchVersion: 4,
+    } });
+    expect(calls).toEqual([
+      { command: "agent_preview_handoff", args: { input: { missionId: "mission-1", title: "Review", spec: "Check changes", context } } },
+      { command: "agent_handoffs", args: { missionId: "mission-1" } },
+      { command: "agent_capture_evidence", args: { input: { id: "capture-1", missionId: "mission-1", dispatchId: "dispatch-1", cursor: "page-2" } } },
+      { command: "agent_evidence", args: { workspaceId: "workspace-1" } },
+      { command: "agent_start_task", args: { input: {
+        operationId: "start-1", missionId: "mission-1", title: "Review", spec: "Check changes", handoff: {
+          context, previewHash: "hash-1", expectedCursorVersion: 2, expectedDraftVersion: 3,
+          expectedBranchId: "branch-1", expectedBranchVersion: 4,
+        },
+      } } },
+    ]);
+    expect(calls.map((call) => call.command).some((command) => command.includes("provider"))).toBe(false);
+  });
+});

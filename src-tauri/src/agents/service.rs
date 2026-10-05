@@ -211,6 +211,126 @@ impl AgentService {
         self.store.operations(mission).await
     }
 
+    pub async fn preview_handoff(
+        &self,
+        input: PreviewAgentHandoffInput,
+    ) -> AppResult<AgentHandoffPreview> {
+        bounded("任务标题", &input.title, 200)?;
+        bounded("任务说明", &input.spec, 64_000)?;
+        let mission = self.mission(&input.mission_id).await?;
+        Ok(self.store.prepare_handoff(&mission, &input).await?.preview)
+    }
+
+    pub async fn handoffs(&self, mission: &str) -> AppResult<Vec<AgentHandoff>> {
+        self.mission(mission).await?;
+        self.store.handoffs(mission).await
+    }
+
+    pub async fn evidence(&self, workspace: &str) -> AppResult<Vec<AgentEvidence>> {
+        self.store.evidence_list(workspace).await
+    }
+
+    pub async fn capture_evidence(
+        &self,
+        input: CaptureAgentEvidenceInput,
+    ) -> AppResult<AgentEvidence> {
+        uuid("输出证据 ID", &input.id)?;
+        if let Some(cursor) = &input.cursor {
+            bounded("输出游标", cursor, 16_000)?;
+        }
+        let _guard = self.mission_lock(&input.mission_id)?.lock_owned().await;
+        if let Some((saved, original)) = self.store.evidence(&input.id).await? {
+            if original != input {
+                return Err(invalid("输出证据 ID 已用于不同读取请求。"));
+            }
+            return Ok(saved);
+        }
+        let mission = self.mission(&input.mission_id).await?;
+        self.require_connection(&mission).await?;
+        let workers = self.workers(&mission).await?;
+        let mut matching_workers = workers
+            .iter()
+            .filter(|worker| text(worker, "/dispatchId").as_deref() == Some(&input.dispatch_id));
+        let worker = matching_workers
+            .next()
+            .ok_or_else(|| invalid("此 worker 不属于当前任务。"))?;
+        if matching_workers.next().is_some() {
+            return Err(invalid("Dispatch 清单身份不唯一，未保存证据。"));
+        }
+        let task_id = required(worker, "/taskId")?;
+        let tasks = self.raw_tasks(&mission).await?;
+        let mut matching_tasks = tasks
+            .iter()
+            .filter(|task| text(task, "/id").as_deref() == Some(&task_id));
+        let task = matching_tasks
+            .next()
+            .ok_or_else(|| invalid("无法确认此 Dispatch 的任务身份。"))?;
+        if matching_tasks.next().is_some() {
+            return Err(invalid("任务清单身份不唯一，未保存证据。"));
+        }
+        let read = ReadOutputInput {
+            mission_id: input.mission_id.clone(),
+            dispatch_id: input.dispatch_id.clone(),
+            cursor: input.cursor.clone(),
+        };
+        let receipt = self.read_output_receipt(&read).await?;
+        receipt::validate(
+            &receipt,
+            ExpectedReceipt::Output {
+                dispatch_id: &input.dispatch_id,
+                task_id: &task_id,
+                run_id: mission
+                    .run_id
+                    .as_deref()
+                    .ok_or_else(|| invalid("任务缺少 Orca Run 身份。"))?,
+                runtime_id: mission
+                    .runtime_id
+                    .as_deref()
+                    .ok_or_else(|| invalid("任务缺少运行时身份。"))?,
+            },
+        )
+        .map_err(invalid)?;
+        validate_evidence_source(&receipt)?;
+        let output = project_output(&receipt, &read);
+        bounded("保存的输出观察", &output.text, 256_000)?;
+        let operations = self.store.operations(&mission.id).await?;
+        let handoffs = self.store.handoffs(&mission.id).await?;
+        let handoff_operation_id = operations
+            .iter()
+            .find(|operation| {
+                operation.kind == "start-task"
+                    && operation.status == "succeeded"
+                    && text(&operation.receipt, "/result/dispatchId").as_deref()
+                        == Some(&input.dispatch_id)
+                    && text(&operation.receipt, "/result/taskId").as_deref() == Some(&task_id)
+                    && handoffs
+                        .iter()
+                        .any(|handoff| handoff.operation_id == operation.id)
+            })
+            .map(|operation| operation.id.clone());
+        let evidence = AgentEvidence {
+            id: input.id.clone(),
+            workspace_id: mission.workspace_id,
+            mission_id: mission.id,
+            run_id: mission
+                .run_id
+                .ok_or_else(|| invalid("任务缺少 Orca Run 身份。"))?,
+            task_id,
+            dispatch_id: input.dispatch_id.clone(),
+            handoff_operation_id,
+            content_hash: crate::domain::sha256_hex(output.text.as_bytes()),
+            text: output.text,
+            source: output.source,
+            request_cursor: input.cursor.clone(),
+            cursor: output.cursor,
+            has_more: output.has_more,
+            warning: output.warning,
+            observed_task_status: text(task, "/status").unwrap_or_else(|| "unknown".into()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.store.save_evidence(&input, evidence, &receipt).await
+    }
+
     async fn replay(
         &self,
         id: &str,
@@ -722,6 +842,12 @@ impl AgentService {
         {
             return Ok(operation);
         }
+        let confirmation = input.handoff.as_ref().ok_or_else(|| {
+            AppError::validation(
+                "agent_handoff_required",
+                "请先预览并确认交接内容。尚未派发。",
+            )
+        })?;
         let mission = self.mission(&input.mission_id).await?;
         self.require_connection(&mission).await?;
         if self
@@ -754,10 +880,28 @@ impl AgentService {
         if project.path != mission.repository_path {
             return Err(invalid("任务仓库路径发生变化，请建立新任务。"));
         }
-        let spec = format!(
-            "Mission objective:\n{}\n\nUser task specification (preserve scope and acceptance criteria):\n{}\n\nWork only in the assigned worktree for this task. Follow repository instructions. Verify the requested acceptance criteria and report results and remaining risks. Ask the coordinator when scope or authorization is unclear. Do not merge, push, publish, or modify unrelated work without explicit authorization in the task specification.",
-            mission.objective, input.spec
-        );
+        let prepared = self
+            .store
+            .prepare_handoff(
+                &mission,
+                &PreviewAgentHandoffInput {
+                    mission_id: input.mission_id.clone(),
+                    title: input.title.clone(),
+                    spec: input.spec.clone(),
+                    context: confirmation.context.clone(),
+                },
+            )
+            .await?;
+        let preview = &prepared.preview;
+        if preview.hash != confirmation.preview_hash
+            || preview.cursor_version != confirmation.expected_cursor_version
+            || preview.draft_version != confirmation.expected_draft_version
+            || preview.branch_id != confirmation.expected_branch_id
+            || preview.branch_version != confirmation.expected_branch_version
+        {
+            return Err(super::context::stale());
+        }
+        let spec = prepared.preview.text.clone();
         let name = format!("tf-{}", input.operation_id.replace('-', ""));
         let repository = format!("id:{}", mission.repository_id);
         let arguments = args(&[
@@ -785,17 +929,21 @@ impl AgentService {
             "60000",
             "--json",
         ]);
-        self.journal(
-            &input.operation_id,
-            &mission.id,
-            "start-task",
-            request,
-            arguments,
-            ExpectedReceipt::StartTask {
-                run_id: mission.run_id.as_deref().unwrap(),
-            },
-        )
-        .await
+        let operation = self
+            .store
+            .begin_handoff(&input.operation_id, &mission, &request, prepared)
+            .await?;
+        let operation = self
+            .execute_operation(
+                operation,
+                arguments,
+                ExpectedReceipt::StartTask {
+                    run_id: mission.run_id.as_deref().unwrap(),
+                },
+            )
+            .await?;
+        self.store.finish_operation(&operation, None, None).await?;
+        Ok(operation)
     }
 
     pub async fn reply(&self, input: ReplyInput) -> AppResult<AgentOperation> {
@@ -1042,6 +1190,11 @@ impl AgentService {
         {
             return Err(invalid("此 worker 不属于当前任务。"));
         }
+        let receipt = self.read_output_receipt(&input).await?;
+        Ok(project_output(&receipt, &input))
+    }
+
+    async fn read_output_receipt(&self, input: &ReadOutputInput) -> AppResult<Value> {
         let mut arguments = args(&[
             "orchestration",
             "worker-read",
@@ -1054,44 +1207,70 @@ impl AgentService {
         if let Some(cursor) = &input.cursor {
             arguments.extend(args(&["--cursor", cursor]));
         }
-        let receipt = self
-            .runner
-            .execute(&arguments)
-            .await
-            .map_err(runtime_error)?;
-        let result = &receipt["result"];
-        let cursor = text(result, "/cursor")
-            .or_else(|| result["cursor"].as_u64().map(|number| number.to_string()));
-        let has_more = result["hasMore"]
-            .as_bool()
-            .or_else(|| result["terminal"]["limited"].as_bool())
-            .unwrap_or_else(|| cursor.is_some() && cursor != input.cursor);
-        let text = if let Some(lines) = result.pointer("/terminal/tail").and_then(Value::as_array) {
-            lines
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            result
-                .pointer("/transcript/messages")
-                .and_then(Value::as_array)
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .map(format_transcript)
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                })
-                .unwrap_or_default()
-        };
-        Ok(AgentOutput {
-            text,
-            cursor,
-            has_more,
-            source: text_value(result, "/source"),
-            warning: output_warning(result),
-        })
+        self.runner.execute(&arguments).await.map_err(runtime_error)
+    }
+}
+
+fn project_output(receipt: &Value, input: &ReadOutputInput) -> AgentOutput {
+    let result = &receipt["result"];
+    let cursor = text(result, "/cursor")
+        .or_else(|| result["cursor"].as_u64().map(|number| number.to_string()));
+    let has_more = result["hasMore"]
+        .as_bool()
+        .or_else(|| result["terminal"]["limited"].as_bool())
+        .unwrap_or_else(|| cursor.is_some() && cursor != input.cursor);
+    let terminal_lines = (result["source"].as_str() != Some("transcript"))
+        .then(|| result.pointer("/terminal/tail").and_then(Value::as_array))
+        .flatten();
+    let text = if let Some(lines) = terminal_lines {
+        lines
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        result
+            .pointer("/transcript/messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(format_transcript)
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
+            .unwrap_or_default()
+    };
+    AgentOutput {
+        text,
+        cursor,
+        has_more,
+        source: text_value(result, "/source"),
+        warning: output_warning(result),
+    }
+}
+
+fn validate_evidence_source(receipt: &Value) -> AppResult<()> {
+    let result = &receipt["result"];
+    let valid = match result.get("source") {
+        Some(Value::String(source)) if source == "transcript" => result
+            .pointer("/transcript/messages")
+            .and_then(Value::as_array)
+            .is_some(),
+        Some(Value::String(source)) if source == "terminal" => result
+            .pointer("/terminal/tail")
+            .and_then(Value::as_array)
+            .is_some_and(|lines| lines.iter().all(Value::is_string)),
+        None | Some(Value::Null) => result
+            .pointer("/terminal/tail")
+            .and_then(Value::as_array)
+            .is_some_and(|lines| lines.iter().all(Value::is_string)),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid("Orca 输出来源与内容结构不一致，未保存证据。"))
     }
 }
 

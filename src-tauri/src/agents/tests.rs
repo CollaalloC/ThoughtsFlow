@@ -48,6 +48,7 @@ struct MockOrca {
     messages: Mutex<Vec<Value>>,
     terminals: Mutex<Vec<Value>>,
     pending_observed: AtomicBool,
+    handoff_observed: AtomicBool,
     store: Option<AgentStore>,
 }
 
@@ -108,6 +109,15 @@ impl CommandRunner for MockOrca {
                 .iter()
                 .any(|operation| operation.kind == "start-task" && operation.status == "pending");
             self.pending_observed.store(pending, Ordering::SeqCst);
+            let handoffs = self
+                .store
+                .as_ref()
+                .unwrap()
+                .handoffs(MISSION)
+                .await
+                .unwrap();
+            self.handoff_observed
+                .store(!handoffs.is_empty(), Ordering::SeqCst);
         }
         if let Some(result) = self
             .overrides
@@ -161,7 +171,7 @@ impl CommandRunner for MockOrca {
                 json!({"dispatchId":argument(arguments,"--dispatch"),"state":"released"})
             }
             "orchestration worker-read" => {
-                json!({"source":"terminal","terminal":{"tail":["hello from worker"],"limited":false},"cursor":"opaque:cursor"})
+                json!({"dispatchId":argument(arguments,"--dispatch"),"source":"terminal","terminal":{"tail":["hello from worker"],"limited":false},"cursor":"opaque:cursor"})
             }
             _ => panic!("unexpected command {arguments:?}"),
         };
@@ -205,13 +215,28 @@ async fn ready(store: &AgentStore) {
         .unwrap();
 }
 
-fn task_input() -> StartTaskInput {
+fn legacy_task_input() -> StartTaskInput {
     StartTaskInput {
         operation_id: OP.into(),
         mission_id: MISSION.into(),
         title: "Implement feature".into(),
         spec: "Keep `$HOME` and $(echo literal-only) literal; verify output".into(),
+        handoff: None,
     }
+}
+async fn task_input(service: &AgentService) -> StartTaskInput {
+    let input = legacy_task_input();
+    let request = PreviewAgentHandoffInput {
+        mission_id: input.mission_id,
+        title: input.title,
+        spec: input.spec,
+        context: AgentContextSelection {
+            include_active_context: false,
+            evidence_ids: vec![],
+        },
+    };
+    let preview = service.preview_handoff(request.clone()).await.unwrap();
+    confirmed_task(&request, &preview)
 }
 fn worker() -> Value {
     json!({"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","agentTerminalHandle":"worker-1","workerState":"succeeded","dispatchStatus":"completed","terminalState":"reclaimable","resource":{"ownershipState":"owned","ownerDispatchId":"dispatch-1"},"projection":{"outcome":"succeeded","liveness":{"verdict":"live"},"attention":{"categories":[]}}})
@@ -266,7 +291,7 @@ async fn creates_once_and_validates_repository_and_workspace_before_effects() {
 async fn persists_before_dispatch_and_replays_without_process_or_shell() {
     let (_repository, store, runner, service) = setup().await;
     ready(&store).await;
-    let input = task_input();
+    let input = task_input(&service).await;
     let result = service.start_task(input.clone()).await.unwrap();
     assert_eq!(result.status, "succeeded");
     assert!(runner.pending_observed.load(Ordering::SeqCst));
@@ -303,7 +328,7 @@ async fn unknown_dispatch_is_never_retried_or_replaced_by_new_id() {
     let (_repository, store, runner, service) = setup().await;
     ready(&store).await;
     runner.override_next("orchestration worker-start", Err(ambiguous()));
-    let input = task_input();
+    let input = task_input(&service).await;
     assert_eq!(
         service.start_task(input.clone()).await.unwrap().status,
         "unknown"
@@ -322,7 +347,7 @@ async fn unknown_dispatch_is_never_retried_or_replaced_by_new_id() {
 async fn startup_recovers_pending_without_replaying_and_preserves_run_binding() {
     let (_repository, store, runner, service) = setup().await;
     ready(&store).await;
-    let input = task_input();
+    let input = task_input(&service).await;
     store
         .begin(
             OP,
@@ -460,7 +485,12 @@ async fn stale_runtime_requires_explicit_reconnect_and_uses_replacement_handle_o
     let (_repository, store, runner, service) = setup().await;
     ready(&store).await;
     *runner.runtime.lock().unwrap() = "runtime-2".into();
-    assert!(service.start_task(task_input()).await.is_err());
+    assert!(
+        service
+            .start_task(task_input(&service).await)
+            .await
+            .is_err()
+    );
     assert!(!service.snapshot(MISSION).await.unwrap().connected);
     assert_eq!(runner.count("orchestration run-use"), 0);
     let input = ReconnectInput {
@@ -484,7 +514,7 @@ async fn stale_runtime_requires_explicit_reconnect_and_uses_replacement_handle_o
             .as_deref(),
         Some("coordinator-2")
     );
-    let mut task = task_input();
+    let mut task = task_input(&service).await;
     task.operation_id = SECOND_OP.into();
     service.start_task(task).await.unwrap();
     let calls = runner.calls.lock().unwrap();
@@ -626,7 +656,12 @@ async fn mailbox_capacity_stops_dispatch_but_still_allows_reply() {
     assert!(snapshot.connected);
     assert!(!snapshot.can_start_tasks);
     assert!(snapshot.warning.unwrap().contains("100"));
-    assert!(service.start_task(task_input()).await.is_err());
+    assert!(
+        service
+            .start_task(task_input(&service).await)
+            .await
+            .is_err()
+    );
     assert_eq!(runner.count("orchestration worker-start"), 0);
     assert_eq!(
         service
@@ -809,7 +844,10 @@ async fn successful_envelopes_without_action_identity_remain_unknown() {
         };
         runner.override_next(command, Ok(receipt.clone()));
         let operation = match command {
-            "orchestration worker-start" => service.start_task(task_input()).await.unwrap(),
+            "orchestration worker-start" => service
+                .start_task(task_input(&service).await)
+                .await
+                .unwrap(),
             "orchestration reply" => service
                 .reply(ReplyInput {
                     operation_id: OP.into(),
@@ -972,7 +1010,7 @@ async fn another_mission_can_snapshot_and_reply_while_start_is_pending_without_d
     );
     let first = tokio::spawn({
         let service = service.clone();
-        async move { service.start_task(task_input()).await }
+        async move { service.start_task(task_input(&service).await).await }
     });
     paused.entered.notified().await;
     assert_eq!(
@@ -985,7 +1023,7 @@ async fn another_mission_can_snapshot_and_reply_while_start_is_pending_without_d
         let entered = duplicate_entered.clone();
         async move {
             entered.notify_one();
-            service.start_task(task_input()).await
+            service.start_task(task_input(&service).await).await
         }
     });
     duplicate_entered.notified().await;
@@ -1058,7 +1096,10 @@ async fn foreign_action_receipts_are_unknown_even_when_their_envelope_is_success
         };
         runner.override_next(command, Ok(receipt.clone()));
         let operation = match command {
-            "orchestration worker-start" => service.start_task(task_input()).await.unwrap(),
+            "orchestration worker-start" => service
+                .start_task(task_input(&service).await)
+                .await
+                .unwrap(),
             "orchestration reply" => service
                 .reply(ReplyInput {
                     operation_id: OP.into(),
@@ -1373,7 +1414,7 @@ async fn snapshot_starts_all_three_reads_after_connection_checks_and_keeps_missi
         let entered = writer_entered.clone();
         async move {
             entered.notify_one();
-            service.start_task(task_input()).await
+            service.start_task(task_input(&service).await).await
         }
     });
     writer_entered.notified().await;
@@ -1530,4 +1571,582 @@ async fn later_worker_page_failure_discards_the_whole_parallel_snapshot() {
     assert!(snapshot.messages.is_empty());
     assert_eq!(runner.count("orchestration worker-list"), 2);
     assert_eq!(runner.count("orchestration worker-start"), 0);
+}
+
+fn preview_input(include_active_context: bool) -> PreviewAgentHandoffInput {
+    PreviewAgentHandoffInput {
+        mission_id: MISSION.into(),
+        title: "Review selected context".into(),
+        spec: "Explain the evidence and uncertainties.".into(),
+        context: AgentContextSelection {
+            include_active_context,
+            evidence_ids: vec![],
+        },
+    }
+}
+
+fn confirmed_task(
+    input: &PreviewAgentHandoffInput,
+    preview: &AgentHandoffPreview,
+) -> StartTaskInput {
+    StartTaskInput {
+        operation_id: OP.into(),
+        mission_id: input.mission_id.clone(),
+        title: input.title.clone(),
+        spec: input.spec.clone(),
+        handoff: Some(AgentHandoffConfirmation {
+            context: input.context.clone(),
+            preview_hash: preview.hash.clone(),
+            expected_cursor_version: preview.cursor_version,
+            expected_draft_version: preview.draft_version,
+            expected_branch_id: preview.branch_id.clone(),
+            expected_branch_version: preview.branch_version,
+        }),
+    }
+}
+
+async fn graph_fixture(repository: &SqliteRepository) {
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    for (id, prompt, answer) in [
+        ("selected", "selected-question", "selected-answer"),
+        ("sibling", "sibling-question", "sibling-answer"),
+    ] {
+        sqlx::query("INSERT INTO content_block(id,role,content,content_hash,created_at) VALUES (?,'user',?,?,1)")
+            .bind(format!("block-{id}")).bind(prompt).bind(crate::domain::sha256_hex(prompt.as_bytes()))
+            .execute(&mut *connection).await.unwrap();
+        sqlx::query("INSERT INTO turn(id,workspace_id,prompt_block_id,created_at) VALUES (?,'workspace-1',?,1)")
+            .bind(format!("turn-{id}")).bind(format!("block-{id}")).execute(&mut *connection).await.unwrap();
+        sqlx::query("INSERT INTO model_run(id,turn_id,workspace_id,model,status,output_markdown,provider_snapshot_json,created_at,finished_at) VALUES (?,?,'workspace-1','historical-model','completed',?,'{}',1,2)")
+            .bind(format!("model-{id}")).bind(format!("turn-{id}")).bind(answer).execute(&mut *connection).await.unwrap();
+    }
+    sqlx::query("INSERT INTO branch_pointer(id,workspace_id,name,head_run_id,created_at,updated_at) VALUES ('branch-selected','workspace-1','Selected','model-selected',1,2)")
+        .execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO workspace_context_cursor(workspace_id,active_run_id,branch_pointer_id,version,updated_at) VALUES ('workspace-1','model-selected','branch-selected',1,2)")
+        .execute(&mut *connection).await.unwrap();
+}
+
+#[tokio::test]
+async fn handoff_is_provider_free_persisted_before_dispatch_and_replayed_offline() {
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    let input = preview_input(false);
+    let preview = service.preview_handoff(input.clone()).await.unwrap();
+    assert_eq!(runner.count_all(), 0, "preview never runs CLI or a model");
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM provider_profile")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    assert!(preview.text.contains("Implement task"));
+    assert!(preview.text.contains(&input.title));
+    assert!(preview.sources.is_empty());
+    let task = confirmed_task(&input, &preview);
+    assert_eq!(
+        service.start_task(task.clone()).await.unwrap().status,
+        "succeeded"
+    );
+    assert!(runner.pending_observed.load(Ordering::SeqCst));
+    assert!(runner.handoff_observed.load(Ordering::SeqCst));
+    let handoffs = service.handoffs(MISSION).await.unwrap();
+    assert_eq!(handoffs.len(), 1);
+    assert_eq!(handoffs[0].preview.hash, preview.hash);
+    {
+        let calls = runner.calls.lock().unwrap();
+        let start = calls
+            .iter()
+            .find(|args| args.get(1).map(String::as_str) == Some("worker-start"))
+            .unwrap();
+        assert_eq!(argument(start, "--spec"), Some(preview.text.as_str()));
+    }
+    let before = runner.count_all();
+    *runner.runtime.lock().unwrap() = "offline-runtime".into();
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::query(
+        "UPDATE workspace SET system_prompt='changed after dispatch' WHERE id='workspace-1'",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query("UPDATE agent_handoff SET body_json='{}'")
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    drop(connection);
+    assert_eq!(service.start_task(task).await.unwrap().status, "succeeded");
+    assert_eq!(
+        runner.count_all(),
+        before,
+        "replay must not compile or reconnect"
+    );
+    assert_eq!(
+        service.handoffs(MISSION).await.unwrap()[0].preview.text,
+        preview.text
+    );
+}
+
+#[tokio::test]
+async fn handoff_uses_only_effective_context_and_rejects_stale_preview_before_dispatch() {
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    graph_fixture(&repository).await;
+    let input = preview_input(true);
+    let preview = service.preview_handoff(input.clone()).await.unwrap();
+    assert!(preview.text.contains("selected-answer"));
+    assert!(!preview.text.contains("sibling-answer"));
+    assert_eq!(preview.source_run_ids, vec!["model-selected"]);
+    assert_eq!(preview.branch_version, Some(0));
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::query("INSERT INTO context_draft(workspace_id,parent_run_id,version,updated_at) VALUES ('workspace-1','model-selected',1,3)").execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO context_override_item(workspace_id,position,operation,source_kind,source_id,created_at) VALUES ('workspace-1',0,'exclude','model_run','model-selected',3)")
+        .execute(&mut *connection).await.unwrap();
+    drop(connection);
+    let error = service
+        .start_task(confirmed_task(&input, &preview))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "agent_handoff_stale");
+    assert_eq!(runner.count("orchestration worker-start"), 0);
+    assert!(store.operations(MISSION).await.unwrap().is_empty());
+    let excluded = service.preview_handoff(input.clone()).await.unwrap();
+    assert!(!excluded.text.contains("selected-answer"));
+    assert!(excluded.source_run_ids.is_empty());
+    assert!(excluded.text.contains("selected-question"));
+    let mut changed_title = input.clone();
+    changed_title.title = "Different title".into();
+    assert_ne!(
+        service.preview_handoff(changed_title).await.unwrap().hash,
+        excluded.hash
+    );
+}
+
+#[tokio::test]
+async fn handoff_transaction_rechecks_cursor_draft_branch_and_system_before_any_intent() {
+    for update in [
+        "UPDATE workspace_context_cursor SET version=version+1, updated_at=3 WHERE workspace_id='workspace-1'",
+        "INSERT INTO context_draft(workspace_id,parent_run_id,version,updated_at) VALUES ('workspace-1','model-selected',1,3)",
+        "UPDATE branch_pointer SET name='renamed',version=version+1,updated_at=3 WHERE id='branch-selected'",
+        "UPDATE workspace SET system_prompt='new instruction' WHERE id='workspace-1'",
+    ] {
+        let (repository, store, _, service) = setup().await;
+        ready(&store).await;
+        graph_fixture(&repository).await;
+        let mission = store.mission(MISSION).await.unwrap().unwrap();
+        let prepared = store
+            .prepare_handoff(&mission, &preview_input(true))
+            .await
+            .unwrap();
+        let mut connection = repository.acquire_test_connection().await.unwrap();
+        sqlx::query(update).execute(&mut *connection).await.unwrap();
+        drop(connection);
+        let error = store
+            .begin_handoff(OP, &mission, &json!({}), prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "agent_handoff_stale", "{update}");
+        assert!(service.handoffs(MISSION).await.unwrap().is_empty());
+        assert!(store.operations(MISSION).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn handoff_insert_failure_rolls_back_pending_operation_and_unknown_is_never_replayed() {
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    let input = preview_input(false);
+    let preview = service.preview_handoff(input.clone()).await.unwrap();
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_test_handoff BEFORE INSERT ON agent_handoff BEGIN SELECT RAISE(ABORT,'test failed insert'); END").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    assert!(
+        service
+            .start_task(confirmed_task(&input, &preview))
+            .await
+            .is_err()
+    );
+    assert_eq!(runner.count("orchestration worker-start"), 0);
+    assert!(store.operations(MISSION).await.unwrap().is_empty());
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::query("DROP TRIGGER reject_test_handoff")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    runner.override_next("orchestration worker-start", Err(ambiguous()));
+    let task = confirmed_task(&input, &preview);
+    assert_eq!(
+        service.start_task(task.clone()).await.unwrap().status,
+        "unknown"
+    );
+    assert_eq!(
+        service.start_task(task.clone()).await.unwrap().status,
+        "unknown"
+    );
+    let mut replacement = task;
+    replacement.operation_id = SECOND_OP.into();
+    assert!(service.start_task(replacement).await.is_err());
+    assert_eq!(runner.count("orchestration worker-start"), 1);
+    assert_eq!(service.handoffs(MISSION).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn evidence_capture_is_exact_immutable_idempotent_and_reusable_only_in_its_workspace() {
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    runner.workers.lock().unwrap().push(worker());
+    runner.tasks.lock().unwrap().push(task());
+    let preview_input = preview_input(false);
+    let preview = service
+        .preview_handoff(preview_input.clone())
+        .await
+        .unwrap();
+    service
+        .start_task(confirmed_task(&preview_input, &preview))
+        .await
+        .unwrap();
+    runner.override_next("orchestration worker-read", Ok(ok(json!({
+        "dispatchId":"dispatch-1", "projection":null, "source":"terminal", "terminal":{"tail":["Captured answer"],"limited":true},"cursor":"next-page","hasMore":false,"warnings":["tail only"]
+    }))));
+    let input = CaptureAgentEvidenceInput {
+        id: SECOND_OP.into(),
+        mission_id: MISSION.into(),
+        dispatch_id: "dispatch-1".into(),
+        cursor: Some("previous-page".into()),
+    };
+    let evidence = service.capture_evidence(input.clone()).await.unwrap();
+    assert_eq!(evidence.request_cursor.as_deref(), Some("previous-page"));
+    assert_eq!(evidence.cursor.as_deref(), Some("next-page"));
+    assert!(!evidence.has_more);
+    assert!(evidence.warning.is_some());
+    assert_eq!(evidence.handoff_operation_id.as_deref(), Some(OP));
+    assert_eq!(
+        evidence.content_hash,
+        crate::domain::sha256_hex(evidence.text.as_bytes())
+    );
+    let before = runner.count_all();
+    *runner.runtime.lock().unwrap() = "offline".into();
+    assert_eq!(
+        service.capture_evidence(input.clone()).await.unwrap().text,
+        "Captured answer"
+    );
+    assert_eq!(service.evidence("workspace-1").await.unwrap().len(), 1);
+    assert_eq!(runner.count_all(), before);
+    let mut changed = input.clone();
+    changed.cursor = None;
+    assert!(service.capture_evidence(changed).await.is_err());
+    let mut next = preview_input.clone();
+    next.context.evidence_ids.push(evidence.id.clone());
+    let next_preview = service.preview_handoff(next.clone()).await.unwrap();
+    assert!(next_preview.text.contains("one page; may be partial"));
+    assert!(next_preview.text.contains("Captured answer"));
+    assert!(next_preview.text.contains("dispatch-1"));
+    assert_ne!(next_preview.hash, preview.hash);
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    assert!(
+        sqlx::query("UPDATE agent_evidence SET body_json='{}'")
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM agent_evidence")
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    let raw: String = sqlx::query_scalar("SELECT raw_receipt_json FROM agent_evidence WHERE id=?")
+        .bind(&evidence.id)
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert!(raw.contains("tail only"));
+    sqlx::query("INSERT INTO workspace(id,title,goal,created_at,updated_at) VALUES ('workspace-2','Other','other',1,1)").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    let mut other = store.mission(MISSION).await.unwrap().unwrap();
+    other.id = "d6510d2d-61b1-4ced-aec9-c87715b19244".into();
+    other.workspace_id = "workspace-2".into();
+    store.create_mission(&other).await.unwrap();
+    next.mission_id = other.id;
+    assert!(
+        service
+            .preview_handoff(next)
+            .await
+            .unwrap_err()
+            .message
+            .contains("其他工作区")
+    );
+    assert_eq!(runner.count_all(), before);
+}
+
+#[tokio::test]
+async fn evidence_never_saves_output_without_exact_dispatch_and_optional_projection_identity() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    runner.workers.lock().unwrap().push(worker());
+    runner.tasks.lock().unwrap().push(task());
+    let input = CaptureAgentEvidenceInput {
+        id: SECOND_OP.into(),
+        mission_id: MISSION.into(),
+        dispatch_id: "dispatch-1".into(),
+        cursor: None,
+    };
+    for identity in [
+        json!({}),
+        json!({"dispatchId":null}),
+        json!({"dispatchId":12}),
+        json!({"dispatchId":"foreign"}),
+        json!({"dispatchId":"dispatch-1","projection":{"dispatchId":"other","taskId":"task-1","runId":"run-1"}}),
+        json!({"dispatchId":"dispatch-1","projection":{"dispatchId":"dispatch-1","taskId":"other","runId":"run-1"}}),
+        json!({"dispatchId":"dispatch-1","projection":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"other"}}),
+        json!({"dispatchId":"dispatch-1","projection":{}}),
+    ] {
+        let mut result = identity;
+        result["terminal"] = json!({"tail":["must not be archived"],"limited":false});
+        runner.override_next("orchestration worker-read", Ok(ok(result)));
+        assert!(service.capture_evidence(input.clone()).await.is_err());
+        assert!(service.evidence("workspace-1").await.unwrap().is_empty());
+    }
+    runner.override_next("orchestration worker-read", Ok(ok(json!({"dispatchId":"dispatch-1","projection":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1"},"terminal":{"tail":["verified observation"],"limited":false}}))));
+    assert_eq!(
+        service.capture_evidence(input).await.unwrap().text,
+        "verified observation"
+    );
+}
+
+#[tokio::test]
+async fn evidence_rejects_runtime_identity_and_source_payload_conflicts() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    runner.workers.lock().unwrap().push(worker());
+    runner.tasks.lock().unwrap().push(task());
+    let input = CaptureAgentEvidenceInput {
+        id: SECOND_OP.into(),
+        mission_id: MISSION.into(),
+        dispatch_id: "dispatch-1".into(),
+        cursor: None,
+    };
+    for runtime in [
+        None,
+        Some(Value::Null),
+        Some(json!(12)),
+        Some(json!("foreign-runtime")),
+    ] {
+        let mut response = ok(
+            json!({"dispatchId":"dispatch-1", "source":"terminal", "terminal":{"tail":["wrong runtime"]}}),
+        );
+        match runtime {
+            Some(value) => response["_meta"]["runtimeId"] = value,
+            None => {
+                response.as_object_mut().unwrap().remove("_meta");
+            }
+        }
+        runner.override_next("orchestration worker-read", Ok(response));
+        assert!(service.capture_evidence(input.clone()).await.is_err());
+        assert!(service.evidence("workspace-1").await.unwrap().is_empty());
+    }
+    for payload in [
+        json!({"source":"transcript","terminal":{"tail":["mislabeled"]}}),
+        json!({"source":"terminal","transcript":{"messages":[]}}),
+        json!({"source":"unknown","terminal":{"tail":["unknown source"]}}),
+        json!({"source":9,"terminal":{"tail":["invalid source"]}}),
+    ] {
+        let mut result = payload;
+        result["dispatchId"] = json!("dispatch-1");
+        runner.override_next("orchestration worker-read", Ok(ok(result)));
+        assert!(service.capture_evidence(input.clone()).await.is_err());
+        assert!(service.evidence("workspace-1").await.unwrap().is_empty());
+    }
+    runner.override_next("orchestration worker-read", Ok(ok(json!({
+        "dispatchId":"dispatch-1", "source":"transcript",
+        "terminal":{"tail":["do not mislabel this"]},
+        "transcript":{"messages":[{"role":"assistant","blocks":[{"type":"text","text":"the declared transcript"}]}]},
+    }))));
+    let observation = service.capture_evidence(input).await.unwrap();
+    assert!(observation.text.contains("the declared transcript"));
+    assert!(!observation.text.contains("do not mislabel this"));
+    assert_eq!(observation.source.as_deref(), Some("transcript"));
+}
+
+#[tokio::test]
+async fn new_dispatch_requires_handoff_but_legacy_operations_still_replay_without_effects() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    let input = legacy_task_input();
+    assert_eq!(
+        service.start_task(input.clone()).await.unwrap_err().code,
+        "agent_handoff_required"
+    );
+    assert_eq!(runner.count_all(), 0);
+    assert!(store.operations(MISSION).await.unwrap().is_empty());
+    let mut legacy = store
+        .begin(
+            OP,
+            MISSION,
+            "start-task",
+            &serde_json::to_value(&input).unwrap(),
+        )
+        .await
+        .unwrap();
+    legacy.status = "succeeded".into();
+    legacy.receipt = ok(
+        json!({"dispatchId":"historical-dispatch","taskId":"historical-task","runId":"run-1","state":"ready"}),
+    );
+    store.finish_operation(&legacy, None, None).await.unwrap();
+    assert_eq!(
+        service.start_task(input).await.unwrap().receipt,
+        legacy.receipt
+    );
+    assert_eq!(runner.count_all(), 0);
+    assert!(
+        service.handoffs(MISSION).await.unwrap().is_empty(),
+        "legacy replay must not invent a handoff"
+    );
+}
+
+#[tokio::test]
+async fn pinned_sibling_is_an_explicit_handoff_source_while_excluded_path_answer_is_not() {
+    let (repository, store, _, service) = setup().await;
+    ready(&store).await;
+    graph_fixture(&repository).await;
+    let hash = crate::domain::sha256_hex(b"sibling-answer");
+    let block_id = format!("block-assistant-{hash}");
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::query("INSERT INTO content_block(id,role,content,content_hash,created_at) VALUES (?,'assistant','sibling-answer',?,3)").bind(&block_id).bind(&hash).execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO context_draft(workspace_id,parent_run_id,version,updated_at) VALUES ('workspace-1','model-selected',1,3)").execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO context_override_item(workspace_id,position,operation,source_kind,source_id,created_at) VALUES ('workspace-1',0,'exclude','model_run','model-selected',3)").execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO context_override_item(workspace_id,position,operation,source_kind,source_id,content_block_id,content_hash,created_at) VALUES ('workspace-1',1,'pin','model_run','model-sibling',?,?,3)").bind(&block_id).bind(&hash).execute(&mut *connection).await.unwrap();
+    drop(connection);
+    let preview = service.preview_handoff(preview_input(true)).await.unwrap();
+    assert!(preview.text.contains("sibling-answer"));
+    assert!(!preview.text.contains("selected-answer"));
+    assert_eq!(preview.source_run_ids, vec!["model-sibling"]);
+    assert!(
+        preview
+            .sources
+            .iter()
+            .any(|source| source.content_hash == hash)
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_publication_without_cursor_or_branch_change_invalidates_atomic_handoff() {
+    use crate::infrastructure::sqlite::{
+        ContentBlockRecord, ContextCheckpointRecord, ContextMaintenanceRunRecord,
+        MaintenanceContextGuardRecord,
+    };
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    graph_fixture(&repository).await;
+    let mission = store.mission(MISSION).await.unwrap().unwrap();
+    let input = preview_input(true);
+    let prepared = store.prepare_handoff(&mission, &input).await.unwrap();
+    let original_preview = prepared.preview.clone();
+    let summary_hash = crate::domain::sha256_hex(b"A manual checkpoint");
+    let summary = ContentBlockRecord {
+        id: format!("block-system-{summary_hash}"),
+        role: "system".into(),
+        content: "A manual checkpoint".into(),
+        content_hash: summary_hash,
+        created_at: 4,
+    };
+    let running = ContextMaintenanceRunRecord {
+        id: "manual-checkpoint".into(),
+        workspace_id: "workspace-1".into(),
+        kind: "compaction".into(),
+        status: "running".into(),
+        branch_pointer_id: Some("branch-selected".into()),
+        branch_revision: Some(0),
+        anchor_run_id: "model-selected".into(),
+        first_kept_run_id: Some("model-selected".into()),
+        source_run_ids_json: "[\"model-selected\"]".into(),
+        source_hash: "source-checkpoint".into(),
+        provider_snapshot_json: None,
+        request_json: "{}".into(),
+        summary_block_id: None,
+        summary: None,
+        error_json: None,
+        created_at: 3,
+        started_at: Some(3),
+        finished_at: None,
+    };
+    let guard = MaintenanceContextGuardRecord {
+        workspace_id: "workspace-1".into(),
+        expected_cursor_version: 1,
+        expected_draft_version: None,
+        branch_pointer_id: Some("branch-selected".into()),
+        expected_branch_version: Some(0),
+    };
+    repository
+        .start_context_maintenance(&running, &guard)
+        .await
+        .unwrap();
+    let checkpoint = ContextCheckpointRecord {
+        id: "manual-checkpoint".into(),
+        workspace_id: running.workspace_id.clone(),
+        maintenance_run_id: running.id.clone(),
+        kind: running.kind.clone(),
+        branch_pointer_id: running.branch_pointer_id.clone(),
+        branch_revision: running.branch_revision,
+        anchor_run_id: running.anchor_run_id.clone(),
+        first_kept_run_id: running.first_kept_run_id.clone(),
+        summary_block_id: summary.id.clone(),
+        summary: summary.content.clone(),
+        summary_content_hash: summary.content_hash.clone(),
+        source_run_ids_json: running.source_run_ids_json.clone(),
+        source_hash: running.source_hash.clone(),
+        provider_snapshot_json: None,
+        created_at: 4,
+    };
+    let completed = ContextMaintenanceRunRecord {
+        status: "completed".into(),
+        summary_block_id: Some(summary.id.clone()),
+        summary: Some(summary.content.clone()),
+        finished_at: Some(4),
+        ..running
+    };
+    repository
+        .finish_context_maintenance(&completed, Some(&checkpoint), Some(&summary), &guard, None)
+        .await
+        .unwrap();
+    let fresh = service.preview_handoff(input).await.unwrap();
+    assert_eq!(fresh.cursor_version, original_preview.cursor_version);
+    assert_eq!(fresh.draft_version, original_preview.draft_version);
+    assert_eq!(fresh.branch_version, original_preview.branch_version);
+    assert_ne!(fresh.hash, original_preview.hash);
+    assert_eq!(
+        store
+            .begin_handoff(OP, &mission, &json!({}), prepared)
+            .await
+            .unwrap_err()
+            .code,
+        "agent_handoff_stale"
+    );
+    assert!(service.handoffs(MISSION).await.unwrap().is_empty());
+    assert!(store.operations(MISSION).await.unwrap().is_empty());
+    assert_eq!(runner.count_all(), 0);
+}
+
+#[tokio::test]
+async fn evidence_rejects_ambiguous_worker_or_task_rows_without_reading_output() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    let input = CaptureAgentEvidenceInput {
+        id: SECOND_OP.into(),
+        mission_id: MISSION.into(),
+        dispatch_id: "dispatch-1".into(),
+        cursor: None,
+    };
+    runner.workers.lock().unwrap().extend([worker(), worker()]);
+    runner.tasks.lock().unwrap().push(task());
+    assert!(service.capture_evidence(input.clone()).await.is_err());
+    runner.workers.lock().unwrap().pop();
+    runner.tasks.lock().unwrap().push(task());
+    assert!(service.capture_evidence(input).await.is_err());
+    assert_eq!(runner.count("orchestration worker-read"), 0);
+    assert!(service.evidence("workspace-1").await.unwrap().is_empty());
 }

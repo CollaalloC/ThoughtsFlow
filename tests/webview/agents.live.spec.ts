@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { $, browser, expect } from "@wdio/globals";
-import { button, controlByLabel, pinMainWindow, selectOptionByText, waitForBodyText } from "./support";
+import { button, controlByLabel, createAgentWorkspace, pinMainWindow, selectOptionByText, waitForBodyText } from "./support";
 
 describe("Explicit opt-in: real Orca and OMP", () => {
   it("runs a bounded file verification task through the real desktop workbench", async () => {
@@ -19,13 +19,7 @@ describe("Explicit opt-in: real Orca and OMP", () => {
     save();
     try {
       await pinMainWindow();
-      await (await button("添加工作区")).click();
-      await (await controlByLabel("工作区名称")).setValue("真实 OMP 验证");
-      await (await controlByLabel("工作区目标")).setValue("验证真实模型、工具执行与 Orca 生命周期");
-      await (await button("确认创建")).click();
-      await waitForBodyText("真实 OMP 验证");
-      await (await button("Agent 协作")).click();
-      await (await $('[aria-label="Agent 协作工作面"]')).waitForDisplayed();
+      await createAgentWorkspace({ name: "真实 OMP 验证", goal: "验证真实模型、工具执行与 Orca 生命周期" });
       const repository = await controlByLabel("代码仓库", "select");
       const option = await repository.$(`option[value="${process.env.TF_AGENT_LIVE_REPO_ID}"]`);
       await option.waitForExist();
@@ -44,6 +38,8 @@ describe("Explicit opt-in: real Orca and OMP", () => {
         "Do not read project source, install dependencies, edit any other file, commit, push, publish, or start subagents. Keep this test short.",
         `Report the exact marker ${marker} and absolute artifact path in the final summary. Follow your live orchestration preamble to report worker_done with outcome succeeded only after validation.`,
       ].join("\n"));
+      await (await button("预览交接内容")).click();
+      await (await $('[aria-label="交接预览"]')).waitForDisplayed();
       await (await button("启动 OMP 任务")).click();
       evidence.status = "dispatch-requested";
       save();

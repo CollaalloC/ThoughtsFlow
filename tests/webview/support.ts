@@ -1,4 +1,6 @@
 import { $, $$, browser, expect } from "@wdio/globals";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "@wdio/native-types";
 import type { ChainablePromiseElement } from "webdriverio";
 
@@ -23,6 +25,42 @@ export async function pinMainWindow() {
   assertNativePlatform();
   await browser.tauri.switchWindow("main");
   await (await $('[aria-label="工作面"]')).waitForDisplayed();
+  // Embedded WebDriver's switch-window command only selects the target; it
+  // does not bring the native window forward. Use Tauri's real window API so
+  // the app's background-polling guard observes actual foreground visibility.
+  const focusError = await browser.executeAsync((done: (error: string | null) => void) => {
+    const invoke = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<void> };
+    }).__TAURI_INTERNALS__.invoke;
+    void invoke("plugin:window|set_focus", { label: "main" })
+      .then(() => done(null), (reason: unknown) => done(String(reason)));
+  });
+  if (focusError) throw new Error(`Unable to focus the native test window: ${focusError}`);
+  try {
+    await browser.waitUntil(() => browser.execute(() => document.visibilityState === "visible"), {
+      timeout: 20_000,
+      timeoutMsg: "The native test window did not become visible after Tauri setFocus; unlock the host desktop and foreground the test window before rerunning",
+    });
+  } catch (reason) {
+    const diagnostics = await browser.executeAsync((done: (result: unknown) => void) => {
+      const invoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+      void Promise.all(["is_visible", "is_minimized", "is_focused"].map(async (name) => {
+        try { return [name, await invoke(`plugin:window|${name}`, { label: "main" })]; }
+        catch (error) { return [name, String(error)]; }
+      })).then((state) => done({ visibility: document.visibilityState, hasFocus: document.hasFocus(),
+        width: window.innerWidth, height: window.innerHeight, nativeWindow: Object.fromEntries(state) }));
+    });
+    const screenshot = join(tmpdir(), "thoughtsflow-workbench-window-focus.png");
+    await browser.saveScreenshot(screenshot);
+    throw new Error(`${String(reason)}\nNative window state: ${JSON.stringify(diagnostics)}\nScreenshot: ${screenshot}`);
+  }
+}
+
+export async function openFocusCompatibility() {
+  await (await button("Focus（兼容）")).click();
+  await (await $('nav[aria-label="工作区"]')).waitForDisplayed();
 }
 
 /** Match the embedded driver's real WebView engine and Rust host OS, not a generic browser. */
@@ -42,6 +80,7 @@ export async function button(name: string) {
   const element = await $(
     `//button[@aria-label=${xpathLiteral(name)} or normalize-space(.)=${xpathLiteral(name)}]`,
   );
+  await element.scrollIntoView({ block: "center" });
   await element.waitForClickable();
   return element;
 }
@@ -129,7 +168,7 @@ export async function configureOpenAiProvider(input: {
   baseUrl: string;
   model: string;
 }) {
-  await (await button("Provider 设置")).click();
+  await (await button("Provider 设置（高级兼容）")).click();
   await (await $('[aria-labelledby="provider-settings-title"]')).waitForDisplayed();
   await (await button("新建 Provider")).click();
   await (await controlByLabel("名称")).setValue(input.name);
@@ -146,7 +185,8 @@ export async function configureOpenAiProvider(input: {
   await (await controlByLabel("模型")).setValue(input.model);
   await (await button("保存 Provider")).click();
   await waitForBodyText("Provider 已保存");
-  await (await button("返回 Focus")).click();
+  await (await button("返回工作台")).click();
+  await openFocusCompatibility();
 }
 
 export async function createWorkspace(input: { name: string; goal: string }) {
@@ -154,6 +194,18 @@ export async function createWorkspace(input: { name: string; goal: string }) {
   await (await controlByLabel("工作区名称")).setValue(input.name);
   await (await controlByLabel("工作区目标")).setValue(input.goal);
   await (await button("确认创建")).click();
+  await waitForBodyText(input.name);
+}
+
+export async function createAgentWorkspace(input: { name: string; goal: string }) {
+  await (await $('[aria-label="Agent 工作台"]')).waitForDisplayed();
+  const name = await $('input[aria-label="工作区名称"]');
+  if (!(await name.isDisplayed())) {
+    await (await $('//summary[normalize-space(.)="创建本地工作区"]')).click();
+  }
+  await name.setValue(input.name);
+  await (await controlByLabel("工作区目标")).setValue(input.goal);
+  await (await button("创建工作区")).click();
   await waitForBodyText(input.name);
 }
 

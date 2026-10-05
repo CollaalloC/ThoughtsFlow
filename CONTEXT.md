@@ -1,8 +1,8 @@
 # ThoughtsFlow Domain Language
 
-This glossary names the concepts that define ThoughtsFlow's local AI reasoning and decision workspace.
+ThoughtsFlow is a local-first Agent workbench for graphical context management and workflow orchestration. Existing Agent harnesses own model connections, tools, Skills and approvals. Provider-based direct inference remains a compatibility path. See [ADR 0003](docs/adr/0003-agent-workbench-context-handoffs.md).
 
-## Provider Configuration
+## Provider Configuration (Compatibility)
 
 **Provider Template**:
 An immutable vendor preset that identifies a model provider and describes its default endpoint and protocol capabilities without containing credentials.
@@ -87,3 +87,15 @@ _Avoid_: Model Run, Task, retry in place
 **Agent Operation**:
 One user request to control collaboration, with a durable identity and evidence of its outcome; command acceptance is separate from task completion.
 _Avoid_: Agent result, inferred success
+
+**Agent Harness**:
+The existing Agent's execution environment, including its model configuration, authentication, tool loop, Skills, MCP and approval policies. ThoughtsFlow delegates work to it without reimplementing these facilities.
+_Avoid_: Provider, model endpoint, ThoughtsFlow tool engine
+
+**Context Handoff**:
+An immutable snapshot of the exact task text and selected context/evidence submitted by ThoughtsFlow to an Agent Harness, with source identities and a hash. It does not claim to contain every internal model request made by the harness.
+_Avoid_: Context Receipt, entire Agent context, model request
+
+**Agent Evidence**:
+A user-requested immutable observation of one bounded page of an exact Dispatch's output, including source, cursor, text hash, observation time and observed task status. It can be explicitly reused in later task handoffs.
+_Avoid_: Final answer, verified success, Model Run, live transcript

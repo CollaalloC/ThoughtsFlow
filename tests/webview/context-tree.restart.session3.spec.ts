@@ -6,6 +6,7 @@ import {
   closeContextTree,
   openContextTree,
   openWorkspace,
+  openFocusCompatibility,
   pinMainWindow,
   requiredEnvironment,
   selectConversationProvider,
@@ -53,6 +54,7 @@ describe("ThoughtsFlow real process restart journey — session 3", () => {
     const postCheckpointPrompt = `Restart post-checkpoint ${journeyId}`;
 
     await pinMainWindow();
+    await openFocusCompatibility();
     await openWorkspace(workspaceName);
     await selectConversationProvider({
       name: providerName,
@@ -125,6 +127,7 @@ describe("ThoughtsFlow real process restart journey — session 3", () => {
     expect(replay.response?.data?.checkpoint?.id).toBe(crashOperationId);
 
     await browser.refresh();
+    await openFocusCompatibility();
     await waitForBodyText(workspaceName);
     await selectConversationProvider({
       name: providerName,

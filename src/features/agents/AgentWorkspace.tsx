@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DesktopBridge } from "../../platform/desktop-bridge";
+import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
   AgentEnvironment,
+  AgentEvidence,
+  WorkspaceSummary,
   AgentMessage,
   AgentMission,
   AgentOperation,
   AgentOutput,
   AgentSnapshot,
 } from "../../shared/contracts";
+import { AgentHandoffPanel } from "./AgentHandoffPanel";
 import "./agent-workspace.css";
 
 interface AgentWorkspaceProps {
   bridge: DesktopBridge;
   workspaceId?: string;
+  onWorkspaceChange?: (id: string) => void;
 }
 
 function errorMessage(reason: unknown) {
@@ -62,8 +66,64 @@ function statusLabel(status: string) {
   return statusLabels[status] ?? status;
 }
 
-export function AgentWorkspace(props: AgentWorkspaceProps) {
-  return <AgentWorkspaceContent key={props.workspaceId ?? "no-workspace"} {...props} />;
+export function AgentWorkspace({ bridge, workspaceId, onWorkspaceChange }: AgentWorkspaceProps) {
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [selectedId, setSelectedId] = useState(workspaceId);
+  const [name, setName] = useState("");
+  const [goal, setGoal] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const alive = useRef(true);
+  const inFlight = useRef(false);
+  const currentId = workspaceId ?? selectedId;
+  const selection = useRef(currentId);
+  selection.current = currentId;
+  const changeCallback = useRef(onWorkspaceChange);
+  changeCallback.current = onWorkspaceChange;
+  useEffect(() => {
+    alive.current = true;
+    let current = true;
+    void bridge.listWorkspaces().then((items) => {
+      if (!current) return;
+      setWorkspaces(items);
+      if (!selection.current) {
+        const first = items.find((item) => !item.archived)?.id;
+        if (first) { setSelectedId(first); changeCallback.current?.(first); }
+      }
+    }).catch((reason: unknown) => { if (current) setError(errorMessage(reason)); });
+    return () => { current = false; alive.current = false; };
+  }, [bridge]);
+  const choose = (id: string) => { setSelectedId(id); onWorkspaceChange?.(id); };
+  const create = async () => {
+    if (inFlight.current || !name.trim()) return;
+    inFlight.current = true;
+    setCreating(true);
+    setError(null);
+    try {
+      const next = await bridge.createWorkspace({ name: name.trim(), goal: goal.trim() });
+      if (!alive.current) return;
+      setWorkspaces((items) => [next, ...items.filter((item) => item.id !== next.id)]);
+      setName(""); setGoal(""); choose(next.id);
+    } catch (reason) { if (alive.current) setError(errorMessage(reason)); }
+    finally { inFlight.current = false; if (alive.current) setCreating(false); }
+  };
+  return <section aria-label="Agent 工作台">
+    <div className="agent-workspace agent-workspace__workspace-picker">
+      <label>本地工作区<select aria-label="本地工作区" value={currentId ?? ""} disabled={creating} onChange={(event) => choose(event.target.value)}>
+        <option value="">选择工作区</option>
+        {currentId && !workspaces.some((item) => item.id === currentId) ? <option value={currentId}>{currentId}</option> : null}
+        {workspaces.filter((item) => !item.archived).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select></label>
+      <details open={!currentId}><summary>创建本地工作区</summary><form onSubmit={(event) => { event.preventDefault(); void create(); }}>
+        <label>工作区名称<input aria-label="工作区名称" required value={name} onChange={(event) => setName(event.target.value)} disabled={creating} /></label>
+        <label>工作区目标<input aria-label="工作区目标" value={goal} onChange={(event) => setGoal(event.target.value)} disabled={creating} /></label>
+        <button type="submit" disabled={creating || !name.trim()}>{creating ? "正在创建工作区…" : "创建工作区"}</button>
+      </form></details>
+      <p>工作区保存上下文与任务证据，无需配置 Provider。</p>
+      {error ? <p role="alert" className="agent-workspace__error">{error}</p> : null}
+    </div>
+    <AgentWorkspaceContent key={currentId ?? "no-workspace"} bridge={bridge} workspaceId={currentId} />
+  </section>;
 }
 
 function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
@@ -149,10 +209,10 @@ function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
     <section className="agent-workspace" aria-label="Agent 协作工作面">
       <header className="agent-workspace__header">
         <span className="agent-workspace__eyebrow">AGENTS</span>
-        <h2>把目标交给协作中的 Agent</h2>
-        <p>Orca 管理并行工作区，OMP 执行任务。每个任务可修改自己的独立 worktree，成果由你审查后合并。</p>
+        <h2>管理上下文，编排现有 Agent</h2>
+        <p>ThoughtsFlow 管理图谱、交接内容与工作流证据；Orca 管理独立工作区，OMP 沿用已有 harness 执行任务。</p>
       </header>
-      {!workspaceId ? <p className="agent-workspace__notice">请先在 Focus 创建或打开工作区。</p> : null}
+      {!workspaceId ? <p className="agent-workspace__notice">请先在上方创建或选择本地工作区。</p> : null}
       <section className="agent-workspace__runtime" aria-label="运行环境">
         <div>
           <strong>本机运行环境</strong>
@@ -213,8 +273,7 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
   const [readError, setReadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [title, setTitle] = useState("");
-  const [spec, setSpec] = useState("");
+  const [evidenceRevision, setEvidenceRevision] = useState(0);
   const [answered, setAnswered] = useState<string[]>([]);
   const [uncertainTargets, setUncertainTargets] = useState<string[]>([]);
   const [visible, setVisible] = useState(documentVisible);
@@ -233,8 +292,6 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
   );
   const canMutate = connected && receiptsLoaded && !busy && visible;
   const canReconnect = !busy && visible && !needsFreshRead;
-  const titleError = byteLimitError("任务标题", title, 200);
-  const specError = byteLimitError("任务说明", spec, 64_000);
   const missionWarning = snapshot ? snapshot.warning ?? snapshot.mission.error : mission.error;
 
   const refresh = useCallback(async () => {
@@ -311,6 +368,12 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
     try {
       operation = await send(operationId);
     } catch (reason) {
+      if (kind === "start-task" && reason instanceof DesktopBridgeError && ["agent_handoff_stale", "agent_handoff_required", "agent_handoff"].includes(reason.code)) {
+        mutationInFlight.current = false;
+        revision.current += 1;
+        if (active.current) { setBusy(false); void refresh(); }
+        throw reason;
+      }
       operation = {
         id: operationId, missionId: mission.id, kind, status: "unknown", receipt: null,
         error: errorMessage(reason), createdAt: new Date().toISOString(),
@@ -331,6 +394,7 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
       setNotice("操作结果尚未确认，请勿重复提交。请检查操作回执和 Orca 中的实际任务。");
     }
     void refresh();
+    return operation;
   };
 
   return (
@@ -349,20 +413,10 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
       ) : null}
       {notice ? <p className="agent-workspace__notice" role="status">{notice}</p> : null}
       {uncertain ? <p className="agent-workspace__notice">有操作尚未确认，请查看下方回执并核对 Orca。{uncertainStart ? "已暂停新增任务，避免重复启动。" : "请勿重复提交同一操作。"}</p> : null}
-      <form className="agent-workspace__panel" onSubmit={(event) => {
-        event.preventDefault();
-        if (!title.trim() || !spec.trim() || titleError || specError) return;
-        void mutate("start-task", (operationId) => bridge.startAgentTask({ operationId, missionId: mission.id, title: title.trim(), spec: spec.trim() }), () => { setTitle(""); setSpec(""); });
-      }}>
-        <h4>分派一个任务</h4>
-        <p>使用本机 OMP 的模型与认证设置。请在任务说明中写清范围、背景和验收标准。</p>
-        <label>任务标题<input aria-label="任务标题" aria-invalid={!!titleError} aria-describedby={titleError ? "agent-title-error" : undefined} required value={title} onChange={(event) => setTitle(event.target.value)} disabled={busy} /></label>
-        {titleError ? <p id="agent-title-error" className="agent-workspace__error" role="alert">{titleError}</p> : null}
-        <label>任务说明<textarea aria-label="任务说明" aria-invalid={!!specError} aria-describedby={specError ? "agent-spec-error" : undefined} required rows={4} value={spec} onChange={(event) => setSpec(event.target.value)} placeholder="这个 Agent 应修改哪些内容、需要遵守什么约束、如何验证完成" disabled={busy} /></label>
-        {specError ? <p id="agent-spec-error" className="agent-workspace__error" role="alert">{specError}</p> : null}
-        <p>启动后，OMP 可在独立 worktree 中读写文件；不会自动合并，也不会使用 ThoughtsFlow 的 Provider 凭据。</p>
-        <button className="agent-workspace__primary" disabled={!canMutate || snapshot?.canStartTasks === false || uncertainStart || !title.trim() || !spec.trim() || !!titleError || !!specError} type="submit">{busy ? "正在提交…" : "启动 OMP 任务"}</button>
-      </form>
+      <AgentHandoffPanel bridge={bridge} mission={mission} busy={busy}
+        canStart={canMutate && snapshot?.canStartTasks !== false && !uncertainStart}
+        evidenceRevision={evidenceRevision}
+        onStart={(input) => mutate("start-task", (operationId) => bridge.startAgentTask({ ...input, operationId }))} />
       <section className="agent-workspace__tasks" aria-label="协作任务">
         <h4>任务进展 <span>{snapshot?.tasks.length ?? 0}</span></h4>
         {!snapshot?.tasks.length ? <p>还没有任务。把可以独立完成的工作分别交给 Agent。</p> : null}
@@ -372,7 +426,7 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
             <p>{task.liveness ? `Agent ${statusLabel(task.liveness)}` : "Agent 存活状态未知"}{task.terminalState ? ` · ${statusLabel(task.terminalState)}` : ""}</p>
             {task.attention ? <p className="agent-workspace__notice">{attentionLabel(task.attention)}</p> : null}
             <details><summary>任务说明</summary><p className="agent-workspace__text">{task.spec}</p></details>
-            {task.dispatchId ? <AgentTaskOutput key={task.dispatchId} bridge={bridge} missionId={mission.id} dispatchId={task.dispatchId} /> : null}
+            {task.dispatchId ? <AgentTaskOutput key={task.dispatchId} bridge={bridge} missionId={mission.id} dispatchId={task.dispatchId} onSaved={() => setEvidenceRevision((value) => value + 1)} /> : null}
             {task.canRelease && task.dispatchId ? <button disabled={!canMutate || uncertainTargets.includes(`release:${task.dispatchId}`)} onClick={() => void mutate("release", (operationId) => bridge.releaseAgentWorker({ operationId, missionId: mission.id, dispatchId: task.dispatchId! }), undefined, `release:${task.dispatchId}`)} type="button">释放已结束的 Agent</button> : null}
           </article>
         ))}
@@ -410,8 +464,11 @@ function AgentReply({ message, disabled, onReply }: { message: AgentMessage; dis
   </form>;
 }
 
-function AgentTaskOutput({ bridge, missionId, dispatchId }: { bridge: DesktopBridge; missionId: string; dispatchId: string }) {
+function AgentTaskOutput({ bridge, missionId, dispatchId, onSaved }: { bridge: DesktopBridge; missionId: string; dispatchId: string; onSaved: () => void }) {
   const [output, setOutput] = useState<AgentOutput | null>(null);
+  const [saved, setSaved] = useState<AgentEvidence | null>(null);
+  const pageCursor = useRef<string | undefined>(undefined);
+  const captureId = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const active = useRef(true);
@@ -423,8 +480,14 @@ function AgentTaskOutput({ bridge, missionId, dispatchId }: { bridge: DesktopBri
     setBusy(true);
     setError(null);
     try {
-      const next = await bridge.readAgentOutput({ missionId, dispatchId, ...(append && output?.cursor ? { cursor: output.cursor } : {}) });
-      if (active.current) setOutput((previous) => ({ ...next, text: append ? (previous?.text ?? "") + next.text : next.text }));
+      const cursor = append && output?.cursor ? output.cursor : undefined;
+      const next = await bridge.readAgentOutput({ missionId, dispatchId, ...(cursor ? { cursor } : {}) });
+      if (active.current) {
+        pageCursor.current = cursor;
+        captureId.current = null;
+        setSaved(null);
+        setOutput((previous) => ({ ...next, text: append ? (previous?.text ?? "") + next.text : next.text }));
+      }
     } catch (reason) {
       if (active.current) setError(errorMessage(reason));
     } finally {
@@ -432,12 +495,26 @@ function AgentTaskOutput({ bridge, missionId, dispatchId }: { bridge: DesktopBri
       if (active.current) setBusy(false);
     }
   };
+  const capture = async () => {
+    if (inFlight.current || saved) return;
+    inFlight.current = true;
+    captureId.current ??= crypto.randomUUID();
+    setBusy(true); setError(null);
+    try {
+      const next = await bridge.captureAgentEvidence({ id: captureId.current, missionId, dispatchId,
+        ...(pageCursor.current ? { cursor: pageCursor.current } : {}) });
+      if (active.current) { setSaved(next); onSaved(); }
+    } catch (reason) { if (active.current) setError(`${errorMessage(reason)} 再次保存会沿用同一请求标识。`); }
+    finally { inFlight.current = false; if (active.current) setBusy(false); }
+  };
   return <details className="agent-workspace__output">
     <summary>Agent 输出</summary>
     <button disabled={busy} onClick={() => void read(false)} type="button">{busy ? "读取中…" : output ? "刷新输出" : "读取输出"}</button>
     {error ? <p className="agent-workspace__error" role="alert">{error}</p> : null}
     {output ? <pre>{output.text || "暂无输出。"}</pre> : null}
     {output?.warning ? <p className="agent-workspace__notice">{output.warning}</p> : null}
+    {output ? <><p>保存会由后端重新读取当前页，记录 Dispatch、来源、游标与 hash；不代表完整回答。</p><button type="button" disabled={busy || !!saved} onClick={() => void capture()}>保存当前页观察（重新读取）</button></> : null}
+    {saved ? <p role="status">输出观察已保存，可在下一任务中选择。{saved.hasMore ? " 还有后续页。" : ""}</p> : null}
     {output?.hasMore && output.cursor ? <button disabled={busy} onClick={() => void read(true)} type="button">读取后续输出</button> : null}
   </details>;
 }

@@ -4,6 +4,18 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ## Unreleased
 
+### Agent workbench
+
+- Make the Agent workbench the default entry point, with workspace creation and context selection independent of Provider setup. Keep direct-model conversations and Provider settings as compatibility features.
+- Preview and freeze explicit context handoffs before dispatch, preserving exact source identities, context revisions and the full submitted task text. Existing model receipts and their hashes remain unchanged.
+- Save immutable, bounded Agent output observations with Dispatch provenance, reuse selected evidence in later tasks, and inspect handoff/evidence relationships offline.
+- Reuse the existing OMP harness through Orca; model, authentication, tools, Skills and approvals remain owned by the Agent. Native general-purpose Agent chat and automatic DAG scheduling remain future work.
+
+### Compatibility
+
+- Isolate Orca's new `ORCA_AGENT_SESSION_ID` from child CLI calls so inherited structured-session identity cannot conflict with the workbench coordinator.
+- Track OMP 18.6.1 and Orca 1.4.220 with fixed-source contract checks. Do not automatically upgrade installed runtimes.
+
 ## 0.1.0-beta.2 — 2026-09-27
 
 First public beta of ThoughtsFlow, previously developed under the spelling ThoughsFlow.

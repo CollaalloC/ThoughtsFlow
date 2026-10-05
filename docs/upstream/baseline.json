@@ -45,7 +45,7 @@
     "windowsRuntime": "not-yet-verified",
     "linuxRuntime": "not-yet-verified",
     "runtimeScope": "Real Orca-supervised OMP execution; fixture, MockRuntime IPC and installer checks do not establish this.",
-    "ci": "passed-on-three-platforms",
+    "ci": "previous-baseline-passed-on-three-platforms",
     "ciEvidence": {
       "runUrl": "https://github.com/CollaalloC/ThoughtsFlow/actions/runs/36253970625",
       "commit": "3e24dafa09ece6a84ffef74957604c4f0c5aa280",
@@ -54,7 +54,7 @@
         "windows-latest",
         "macos-latest"
       ],
-      "scope": "Desktop CI core checks and native MockRuntime IPC; existing successful run, no new run triggered by this review."
+      "scope": "Historical Desktop CI core checks and native MockRuntime IPC for the stated commit; October 6 changes have not run on remote runners."
     },
     "review": "2026-10-06.md"
   }

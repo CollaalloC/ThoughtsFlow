@@ -127,10 +127,12 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 9);
+    assert_eq!(schema.version, 10);
     assert_eq!(
         schema.strict_tables,
         vec![
+            "agent_evidence",
+            "agent_handoff",
             "agent_mission",
             "agent_operation",
             "branch_checkpoint_inheritance",
@@ -242,7 +244,7 @@ async fn development_v5_upgrade_preserves_original_history_and_receipts_across_r
         let repository = SqliteRepository::connect(directory.path().join("development.sqlite"))
             .await
             .expect("the recognized development lineage upgrades and reopens");
-        assert_eq!(repository.schema_info().await.unwrap().version, 9);
+        assert_eq!(repository.schema_info().await.unwrap().version, 10);
         let profile = repository
             .get_provider_profile("provider-upgrade")
             .await
@@ -260,7 +262,7 @@ async fn development_v5_upgrade_preserves_original_history_and_receipts_across_r
             history.as_slice(),
             "the old checksum and every migration metadata field remain original"
         );
-        assert_eq!(upgraded.len(), 9);
+        assert_eq!(upgraded.len(), 10);
         let error = sqlx::query(
             "INSERT INTO context_manifest_item \
              (manifest_id, workspace_id, position, source_kind, role, content_block_id, \
@@ -453,7 +455,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
         .await
         .expect("production repository migrator upgrades the legacy file");
     let schema = repository.schema_info().await.expect("schema is readable");
-    assert_eq!(schema.version, 9);
+    assert_eq!(schema.version, 10);
     let migrated = repository
         .get_provider_profile("provider-upgrade")
         .await
@@ -466,6 +468,8 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
     assert_eq!(
         schema.strict_tables,
         vec![
+            "agent_evidence",
+            "agent_handoff",
             "agent_mission",
             "agent_operation",
             "branch_checkpoint_inheritance",
@@ -516,7 +520,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
     let index_columns = sqlx::query_scalar::<_, String>(
         "SELECT name FROM pragma_index_info('idx_manifest_item_workspace_content') ORDER BY seqno",
@@ -764,7 +768,7 @@ async fn default_marker_upgrade_preserves_json_types_values_and_all_historical_e
     let repository = SqliteRepository::connect(&directory.path().join("upgrade.sqlite"))
         .await
         .expect("schema v7 upgrades through the production startup path");
-    assert_eq!(repository.schema_info().await.unwrap().version, 9);
+    assert_eq!(repository.schema_info().await.unwrap().version, 10);
     for (index, value) in values.iter().enumerate() {
         let profile = repository
             .get_provider_profile(&format!("marker-{index}"))
@@ -977,7 +981,7 @@ async fn default_marker_upgrade_rolls_back_profile_writes_if_migration_history_c
     let repository = SqliteRepository::connect(&path)
         .await
         .expect("repair permits a complete retry");
-    assert_eq!(repository.schema_info().await.unwrap().version, 9);
+    assert_eq!(repository.schema_info().await.unwrap().version, 10);
     let parameters = repository
         .get_provider_profile("provider-upgrade")
         .await
@@ -3796,4 +3800,64 @@ async fn repository_port_round_trips_domain_run_snapshot_and_graph() {
         .unwrap();
     assert_eq!(graph.turn("turn-a"), Some(&turn));
     assert_eq!(graph.run("run-a").unwrap().model, "qwen3");
+}
+
+#[tokio::test]
+async fn agent_workbench_v10_upgrade_preserves_v9_receipts_hashes_and_migration_history() {
+    let (directory, mut connection) = default_marker_upgrade_fixture().await;
+    let schema9 = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            TEST_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 9)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    schema9.run(&mut connection).await.unwrap();
+    let history = development_migration_history(&mut connection).await;
+    assert_eq!(
+        history.len(),
+        9,
+        "fixture is the previously released schema"
+    );
+    let evidence = marker_history(&mut connection).await;
+    let profile: String = sqlx::query_scalar(
+        "SELECT parameters_json FROM provider_profile WHERE id='provider-upgrade'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    let repository = SqliteRepository::connect(directory.path().join("upgrade.sqlite"))
+        .await
+        .unwrap();
+    assert_eq!(repository.schema_info().await.unwrap().version, 10);
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    assert_eq!(
+        marker_history(&mut connection).await,
+        evidence,
+        "historical JSON bytes and hashes are unchanged"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT parameters_json FROM provider_profile WHERE id='provider-upgrade'"
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap(),
+        profile
+    );
+    assert_eq!(
+        development_migration_history(&mut connection).await[..9],
+        history
+    );
+    for table in ["agent_handoff", "agent_evidence"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "upgrade never invents Agent history");
+    }
 }

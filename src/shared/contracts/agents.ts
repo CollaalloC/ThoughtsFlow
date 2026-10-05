@@ -88,6 +88,7 @@ export interface StartAgentTaskInput {
   missionId: string;
   title: string;
   spec: string;
+  handoff?: AgentHandoffConfirmation;
 }
 
 export interface ReplyToAgentInput {
@@ -112,4 +113,81 @@ export interface ReadAgentOutputInput {
   missionId: string;
   dispatchId: string;
   cursor?: string;
+}
+
+export interface AgentContextSelection {
+  includeActiveContext: boolean;
+  evidenceIds: string[];
+}
+
+export interface PreviewAgentHandoffInput {
+  missionId: string;
+  title: string;
+  spec: string;
+  context: AgentContextSelection;
+}
+
+export interface AgentHandoffConfirmation {
+  context: AgentContextSelection;
+  previewHash: string;
+  expectedCursorVersion: number;
+  expectedDraftVersion: number;
+  expectedBranchId: string | null;
+  expectedBranchVersion: number | null;
+}
+
+export interface AgentHandoffSource {
+  kind: string;
+  id: string;
+  role: string;
+  contentHash: string;
+}
+
+export interface AgentHandoffPreview {
+  title?: string;
+  hash: string;
+  text: string;
+  compilerVersion: string;
+  sourceRunIds: string[];
+  evidenceIds: string[];
+  sources: AgentHandoffSource[];
+  parentRunId: string | null;
+  branchId: string | null;
+  cursorVersion: number;
+  draftVersion: number;
+  branchVersion: number | null;
+}
+
+export interface AgentHandoff {
+  operationId: string;
+  workspaceId: string;
+  missionId: string;
+  createdAt: string;
+  preview: AgentHandoffPreview;
+}
+
+export interface CaptureAgentEvidenceInput {
+  id: string;
+  missionId: string;
+  dispatchId: string;
+  cursor?: string;
+}
+
+export interface AgentEvidence {
+  id: string;
+  workspaceId: string;
+  missionId: string;
+  runId: string;
+  taskId: string;
+  dispatchId: string;
+  handoffOperationId: string | null;
+  text: string;
+  contentHash: string;
+  source: string | null;
+  requestCursor: string | null;
+  cursor: string | null;
+  hasMore: boolean;
+  warning: string | null;
+  observedTaskStatus: string;
+  createdAt: string;
 }

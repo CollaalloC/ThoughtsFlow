@@ -9,10 +9,11 @@
       "capabilities": [
         {
           "identifier": "webview-e2e",
-          "description": "Test-only access for the embedded macOS WebDriver server.",
+          "description": "Test-only access for the embedded WebDriver server and real window focus.",
           "windows": ["main"],
           "permissions": [
             "core:default",
+            "core:window:allow-set-focus",
             "wdio-webdriver:default"
           ]
         }
