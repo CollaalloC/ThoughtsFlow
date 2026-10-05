@@ -45,3 +45,5 @@ ThoughtsFlow 管理工作区、可视上下文、用户选择的交接内容和�
 待解锁后的明确命令：`node tests/webview/run-agent-journey.mjs`，随后串行运行 `npm run test:webview:smoke` 和 `npm run test:webview:restart:run`。工作台测试涵盖预览与实际 argv 文本一致、保存输出、证据复用、离线重载 hash 不变及离线零派发；目前只能说明测试已准备，不能宣称这些原生步骤已执行成功。
 
 本轮证据均来自本机 macOS，不提升 Windows/Linux 新版或真实 Agent 验证状态；未运行真实模型。最新已发布安装包仍为 v0.1.0-beta.2，本轮改动没有推送或发布。
+
+最终另通过 `npm run tauri -- build --debug --no-bundle`，生成不含 WebDriver 的本机调试程序 `src-tauri/target/debug/thoughtsflow`；该程序尚未启动，不代表锁屏期间完成了交互验收。测试专用构建也已按最终权限配置重新构建，可在解锁后直接续跑上述旅程。
