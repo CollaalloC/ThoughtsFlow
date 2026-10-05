@@ -73,6 +73,7 @@ fn is_identity_environment_for_platform(key: &str, platform: Platform) -> bool {
             | "ORCA_WORKSPACE_ID"
             | "ORCA_WORKTREE_ID"
             | "ORCA_STRUCTURED_SESSION"
+            | "ORCA_AGENT_SESSION_ID"
             | "ORCA_CLI_COMMAND"
             | "ORCA_DEV_REPO_ROOT"
             | "ORCA_DEV_CLI_INVOCATION"
@@ -268,6 +269,7 @@ mod tests {
         for key in [
             "orca_terminal_handle",
             "Orca_Pane_Key",
+            "Orca_Agent_Session_Id",
             "orca_pairing_code",
             "orca_orchestration_compatibility_v1",
         ] {
@@ -291,6 +293,7 @@ mod tests {
             "ORCA_WORKSPACE_ID",
             "ORCA_WORKTREE_ID",
             "ORCA_STRUCTURED_SESSION",
+            "ORCA_AGENT_SESSION_ID",
             "ORCA_CLI_COMMAND",
             "ORCA_DEV_REPO_ROOT",
             "ORCA_DEV_CLI_INVOCATION",
@@ -325,7 +328,7 @@ mod tests {
         let script = directory.path().join("参数 fixture.mjs");
         std::fs::write(
             &script,
-            "process.stdout.write(JSON.stringify(process.argv.slice(2)))",
+            "process.stdout.write(JSON.stringify({arguments: process.argv.slice(2), sessionId: process.env.ORCA_AGENT_SESSION_ID ?? null}))",
         )
         .unwrap();
         launch.prefix_arguments.push(script.into_os_string());
@@ -336,9 +339,28 @@ mod tests {
         ];
         let (success, output) = run_process(&launch, &arguments, 5).await.unwrap();
         assert!(success);
-        assert_eq!(
-            serde_json::from_slice::<Vec<String>>(&output).unwrap(),
-            arguments
+        let output: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["arguments"], serde_json::json!(arguments));
+        assert_eq!(output["sessionId"], Value::Null);
+    }
+
+    #[test]
+    fn inherited_structured_session_identity_does_not_reach_cli_process() {
+        // Seed a separate test process so parallel tests never share a mutated environment.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::orca::tests::explicit_node_launch_preserves_arguments_without_evaluating_shell_syntax",
+                "--nocapture",
+            ])
+            .env("ORCA_AGENT_SESSION_ID", "inherited-foreign-session")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "CLI environment isolation failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
