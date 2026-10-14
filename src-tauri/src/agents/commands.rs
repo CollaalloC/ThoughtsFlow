@@ -130,3 +130,35 @@ pub async fn agent_evidence(
 ) -> AppResult<ApiResponse<Vec<AgentEvidence>>> {
     state.evidence(&workspace_id).await.map(response)
 }
+
+#[tauri::command]
+pub async fn agent_evidence_page(
+    state: State<'_, AgentService>,
+    input: AgentEvidencePageInput,
+) -> AppResult<ApiResponse<AgentEvidencePage>> {
+    state.evidence_page(input).await.map(response)
+}
+
+#[tauri::command]
+pub async fn agent_handoff_page(
+    state: State<'_, AgentService>,
+    input: AgentHandoffPageInput,
+) -> AppResult<ApiResponse<AgentHandoffPage>> {
+    state.handoff_page(input).await.map(response)
+}
+
+#[tauri::command]
+pub async fn agent_get_evidence(
+    state: State<'_, AgentService>,
+    input: GetAgentEvidenceInput,
+) -> AppResult<ApiResponse<AgentEvidence>> {
+    state.get_evidence(input).await.map(response)
+}
+
+#[tauri::command]
+pub async fn agent_get_handoff(
+    state: State<'_, AgentService>,
+    input: GetAgentHandoffInput,
+) -> AppResult<ApiResponse<AgentHandoff>> {
+    state.get_handoff(input).await.map(response)
+}

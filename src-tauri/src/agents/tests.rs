@@ -2150,3 +2150,256 @@ async fn evidence_rejects_ambiguous_worker_or_task_rows_without_reading_output()
     assert_eq!(runner.count("orchestration worker-read"), 0);
     assert!(service.evidence("workspace-1").await.unwrap().is_empty());
 }
+
+async fn insert_history_fixture(repository: &SqliteRepository, index: usize) {
+    let operation = format!("history-operation-{index}");
+    let evidence = format!("history-evidence-{index}");
+    let mut handoff = json!({
+        "operationId": operation, "workspaceId":"workspace-1", "missionId":MISSION,
+        "createdAt":"2026-10-06T01:00:00Z", "preview":{
+            "hash":format!("handoff-hash-{index}"), "title":format!("Task {index}"), "text":"historical handoff body ".repeat(1024),
+            "compilerVersion":"agent-handoff/1; context/4", "sourceRunIds":["model-selected"], "evidenceIds":["parent-evidence"], "sources":[],
+            "parentRunId":null, "branchId":null, "cursorVersion":0, "draftVersion":0, "branchVersion":null
+        }
+    });
+    // Old handoffs legitimately predate the additive, human-readable title.
+    if index == 0 {
+        handoff["preview"].as_object_mut().unwrap().remove("title");
+    }
+    let record = json!({
+        "id":evidence,"workspaceId":"workspace-1","missionId":MISSION,"runId":"run-1","taskId":format!("task-{index}"),
+        "dispatchId":format!("dispatch-{index}"),"handoffOperationId":operation,"text":"historical output body ".repeat(2048),
+        "contentHash":format!("evidence-hash-{index}"),"source":"terminal","requestCursor":null,"cursor":"opaque-output-cursor",
+        "hasMore":true,"warning":"one page only","observedTaskStatus":"completed","createdAt":"2026-10-06T01:00:00Z"
+    });
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    sqlx::query("INSERT INTO agent_operation(id,mission_id,kind,status,request_json,receipt_json,created_at) VALUES (?,?,'start-task','succeeded','{}',?,'2026-10-06T01:00:00Z')")
+        .bind(&operation).bind(MISSION).bind(ok(json!({"dispatchId":format!("dispatch-{index}"),"taskId":format!("task-{index}"),"runId":"run-1"})).to_string())
+        .execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO agent_handoff(operation_id,workspace_id,mission_id,body_json) VALUES (?,'workspace-1',?,?)")
+        .bind(&operation).bind(MISSION).bind(handoff.to_string()).execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO agent_evidence(id,workspace_id,mission_id,request_json,body_json,raw_receipt_json) VALUES (?,'workspace-1',?,'{}',?,'{}')")
+        .bind(&evidence).bind(MISSION).bind(record.to_string()).execute(&mut *connection).await.unwrap();
+}
+
+#[tokio::test]
+async fn bounded_history_pages_project_summaries_and_keep_keyset_position_after_insertion() {
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    for index in 0..51 {
+        insert_history_fixture(&repository, index).await;
+    }
+    let evidence_page = service
+        .evidence_page(AgentEvidencePageInput {
+            workspace_id: "workspace-1".into(),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let handoff_page = service
+        .handoff_page(AgentHandoffPageInput {
+            mission_id: MISSION.into(),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(evidence_page.items.len(), 50);
+    assert_eq!(handoff_page.items.len(), 50);
+    assert_eq!(evidence_page.items[0].id, "history-evidence-50");
+    assert_eq!(evidence_page.items[0].title.as_deref(), Some("Task 50"));
+    assert!(evidence_page.items[0].has_more);
+    assert_eq!(handoff_page.items[0].title, "Task 50");
+    for page in [
+        serde_json::to_value(&evidence_page).unwrap(),
+        serde_json::to_value(&handoff_page).unwrap(),
+    ] {
+        assert!(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.get("text").is_none()
+                    && item.get("preview").is_none()
+                    && item.get("sources").is_none())
+        );
+        assert!(!page.to_string().contains("historical output body"));
+        assert!(!page.to_string().contains("historical handoff body"));
+        assert!(page.to_string().len() < 40_000);
+    }
+    insert_history_fixture(&repository, 51).await;
+    let evidence_tail = service
+        .evidence_page(AgentEvidencePageInput {
+            workspace_id: "workspace-1".into(),
+            cursor: evidence_page.next_cursor.clone(),
+        })
+        .await
+        .unwrap();
+    let handoff_tail = service
+        .handoff_page(AgentHandoffPageInput {
+            mission_id: MISSION.into(),
+            cursor: handoff_page.next_cursor.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        evidence_tail
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["history-evidence-0"]
+    );
+    assert_eq!(
+        handoff_tail
+            .items
+            .iter()
+            .map(|item| item.operation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["history-operation-0"]
+    );
+    assert!(evidence_tail.next_cursor.is_none());
+    assert!(handoff_tail.next_cursor.is_none());
+    assert!(evidence_tail.items[0].title.is_none());
+    assert!(handoff_tail.items[0].title.is_empty());
+    let restarted = service
+        .evidence_page(AgentEvidencePageInput {
+            workspace_id: "workspace-1".into(),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(restarted.items[0].id, "history-evidence-51");
+    assert_eq!(runner.count_all(), 0, "history is local-only");
+}
+
+#[tokio::test]
+async fn history_cursor_kind_scope_and_detail_ownership_are_checked_without_changing_records() {
+    let (repository, store, runner, service) = setup().await;
+    ready(&store).await;
+    for index in 0..51 {
+        insert_history_fixture(&repository, index).await;
+    }
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    let original: (String,String) = sqlx::query_as("SELECT e.body_json,h.body_json FROM agent_evidence e JOIN agent_handoff h ON h.operation_id=json_extract(e.body_json,'$.handoffOperationId') WHERE e.id='history-evidence-0'")
+        .fetch_one(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO workspace(id,title,goal,created_at,updated_at) VALUES ('workspace-2','Other','other',1,1)").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    let mut mission = store.mission(MISSION).await.unwrap().unwrap();
+    mission.id = SECOND_OP.into();
+    mission.workspace_id = "workspace-2".into();
+    store.create_mission(&mission).await.unwrap();
+    let cursor = service
+        .evidence_page(AgentEvidencePageInput {
+            workspace_id: "workspace-1".into(),
+            cursor: None,
+        })
+        .await
+        .unwrap()
+        .next_cursor
+        .unwrap();
+    for bad in [
+        "not-a-cursor".into(),
+        format!("{cursor}corrupted"),
+        "h1.-1.invalid".into(),
+        "x".repeat(129),
+    ] {
+        assert_eq!(
+            service
+                .evidence_page(AgentEvidencePageInput {
+                    workspace_id: "workspace-1".into(),
+                    cursor: Some(bad)
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "agent_history_cursor"
+        );
+    }
+    for bad in [
+        cursor.clone(),
+        "not-a-cursor".into(),
+        format!("{cursor}corrupted"),
+        "".into(),
+    ] {
+        assert!(
+            service
+                .evidence_page(AgentEvidencePageInput {
+                    workspace_id: "workspace-2".into(),
+                    cursor: Some(bad)
+                })
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        service
+            .handoff_page(AgentHandoffPageInput {
+                mission_id: MISSION.into(),
+                cursor: Some(cursor)
+            })
+            .await
+            .is_err()
+    );
+    let cursor = service
+        .handoff_page(AgentHandoffPageInput {
+            mission_id: MISSION.into(),
+            cursor: None,
+        })
+        .await
+        .unwrap()
+        .next_cursor
+        .unwrap();
+    assert!(
+        service
+            .handoff_page(AgentHandoffPageInput {
+                mission_id: SECOND_OP.into(),
+                cursor: Some(cursor)
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .get_evidence(GetAgentEvidenceInput {
+                workspace_id: "workspace-2".into(),
+                id: "history-evidence-0".into()
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .get_handoff(GetAgentHandoffInput {
+                mission_id: SECOND_OP.into(),
+                operation_id: "history-operation-0".into()
+            })
+            .await
+            .is_err()
+    );
+    let evidence = service
+        .get_evidence(GetAgentEvidenceInput {
+            workspace_id: "workspace-1".into(),
+            id: "history-evidence-0".into(),
+        })
+        .await
+        .unwrap();
+    let handoff = service
+        .get_handoff(GetAgentHandoffInput {
+            mission_id: MISSION.into(),
+            operation_id: "history-operation-0".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(evidence.text, "historical output body ".repeat(2048));
+    assert_eq!(
+        handoff.preview.text,
+        "historical handoff body ".repeat(1024)
+    );
+    assert_eq!(evidence.content_hash, "evidence-hash-0");
+    assert_eq!(handoff.preview.hash, "handoff-hash-0");
+    let mut connection = repository.acquire_test_connection().await.unwrap();
+    let after: (String,String) = sqlx::query_as("SELECT e.body_json,h.body_json FROM agent_evidence e JOIN agent_handoff h ON h.operation_id=json_extract(e.body_json,'$.handoffOperationId') WHERE e.id='history-evidence-0'")
+        .fetch_one(&mut *connection).await.unwrap();
+    assert_eq!(after, original);
+    assert_eq!(runner.count_all(), 0);
+}

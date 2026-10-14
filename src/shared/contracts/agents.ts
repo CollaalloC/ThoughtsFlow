@@ -191,3 +191,28 @@ export interface AgentEvidence {
   observedTaskStatus: string;
   createdAt: string;
 }
+
+export interface AgentEvidenceSummary extends Omit<AgentEvidence, "text"> {
+  title: string | null;
+}
+
+export interface AgentHandoffSummary {
+  operationId: string;
+  workspaceId: string;
+  missionId: string;
+  createdAt: string;
+  title: string;
+  hash: string;
+  sourceRunIds: string[];
+  evidenceIds: string[];
+}
+
+export interface AgentEvidencePage {
+  items: AgentEvidenceSummary[];
+  nextCursor: string | null;
+}
+
+export interface AgentHandoffPage {
+  items: AgentHandoffSummary[];
+  nextCursor: string | null;
+}

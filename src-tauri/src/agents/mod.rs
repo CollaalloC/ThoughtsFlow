@@ -222,6 +222,82 @@ pub struct AgentEvidence {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentEvidencePageInput {
+    pub workspace_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffPageInput {
+    pub mission_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAgentEvidenceInput {
+    pub workspace_id: String,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAgentHandoffInput {
+    pub mission_id: String,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidenceSummary {
+    pub id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub dispatch_id: String,
+    pub handoff_operation_id: Option<String>,
+    pub title: Option<String>,
+    pub content_hash: String,
+    pub source: Option<String>,
+    pub request_cursor: Option<String>,
+    pub cursor: Option<String>,
+    pub has_more: bool,
+    pub warning: Option<String>,
+    pub observed_task_status: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffSummary {
+    pub operation_id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub created_at: String,
+    pub title: String,
+    pub hash: String,
+    pub source_run_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidencePage {
+    pub items: Vec<AgentEvidenceSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffPage {
+    pub items: Vec<AgentHandoffSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReplyInput {
     pub operation_id: String,
     pub mission_id: String,

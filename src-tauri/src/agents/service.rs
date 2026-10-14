@@ -230,6 +230,40 @@ impl AgentService {
         self.store.evidence_list(workspace).await
     }
 
+    pub async fn evidence_page(
+        &self,
+        input: AgentEvidencePageInput,
+    ) -> AppResult<AgentEvidencePage> {
+        bounded("工作区 ID", &input.workspace_id, 200)?;
+        self.store
+            .evidence_page(&input.workspace_id, input.cursor.as_deref())
+            .await
+    }
+
+    pub async fn handoff_page(&self, input: AgentHandoffPageInput) -> AppResult<AgentHandoffPage> {
+        bounded("协作 ID", &input.mission_id, 200)?;
+        self.mission(&input.mission_id).await?;
+        self.store
+            .handoff_page(&input.mission_id, input.cursor.as_deref())
+            .await
+    }
+
+    pub async fn get_evidence(&self, input: GetAgentEvidenceInput) -> AppResult<AgentEvidence> {
+        bounded("工作区 ID", &input.workspace_id, 200)?;
+        bounded("输出证据 ID", &input.id, 200)?;
+        self.store
+            .get_evidence(&input.workspace_id, &input.id)
+            .await
+    }
+
+    pub async fn get_handoff(&self, input: GetAgentHandoffInput) -> AppResult<AgentHandoff> {
+        bounded("协作 ID", &input.mission_id, 200)?;
+        bounded("交接操作 ID", &input.operation_id, 200)?;
+        self.store
+            .get_handoff(&input.mission_id, &input.operation_id)
+            .await
+    }
+
     pub async fn capture_evidence(
         &self,
         input: CaptureAgentEvidenceInput,
@@ -293,21 +327,10 @@ impl AgentService {
         validate_evidence_source(&receipt)?;
         let output = project_output(&receipt, &read);
         bounded("保存的输出观察", &output.text, 256_000)?;
-        let operations = self.store.operations(&mission.id).await?;
-        let handoffs = self.store.handoffs(&mission.id).await?;
-        let handoff_operation_id = operations
-            .iter()
-            .find(|operation| {
-                operation.kind == "start-task"
-                    && operation.status == "succeeded"
-                    && text(&operation.receipt, "/result/dispatchId").as_deref()
-                        == Some(&input.dispatch_id)
-                    && text(&operation.receipt, "/result/taskId").as_deref() == Some(&task_id)
-                    && handoffs
-                        .iter()
-                        .any(|handoff| handoff.operation_id == operation.id)
-            })
-            .map(|operation| operation.id.clone());
+        let handoff_operation_id = self
+            .store
+            .handoff_for_dispatch(&mission.id, &task_id, &input.dispatch_id)
+            .await?;
         let evidence = AgentEvidence {
             id: input.id.clone(),
             workspace_id: mission.workspace_id,

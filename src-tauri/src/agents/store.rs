@@ -1,7 +1,10 @@
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 
-use super::{AgentEvidence, AgentHandoff, AgentMission, AgentOperation, CaptureAgentEvidenceInput};
+use super::{
+    AgentEvidence, AgentEvidencePage, AgentHandoff, AgentHandoffPage, AgentMission, AgentOperation,
+    CaptureAgentEvidenceInput,
+};
 use crate::application::{AppError, AppResult};
 use crate::infrastructure::sqlite::{SqliteRepository, get_context_cursor_in};
 
@@ -13,6 +16,59 @@ pub(crate) struct AgentStore {
 
 fn database(error: impl std::fmt::Display) -> AppError {
     AppError::internal("agent_storage", format!("Agent 工作台存储失败：{error}"))
+}
+
+const HISTORY_PAGE_SIZE: usize = 50;
+
+fn history_cursor(kind: &str, scope: &str, row_id: i64) -> String {
+    // This checksum binds an opaque navigation token to its collection. It is
+    // not authorization: every query independently restricts its stored scope.
+    let identity = serde_json::json!(["agent-history/1", kind, scope, row_id]).to_string();
+    format!(
+        "h1.{row_id}.{}",
+        crate::domain::sha256_hex(identity.as_bytes())
+    )
+}
+
+fn history_upper_bound(kind: &str, scope: &str, cursor: Option<&str>) -> AppResult<i64> {
+    let Some(cursor) = cursor else {
+        return Ok(i64::MAX);
+    };
+    let invalid = || {
+        AppError::validation(
+            "agent_history_cursor",
+            "历史分页游标无效或不属于当前列表，请重新加载。",
+        )
+    };
+    if cursor.len() > 128 {
+        return Err(invalid());
+    }
+    let row_id = cursor
+        .split('.')
+        .nth(1)
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+        .ok_or_else(invalid)?;
+    if cursor != history_cursor(kind, scope, row_id) {
+        return Err(invalid());
+    }
+    Ok(row_id - 1)
+}
+
+fn history_page<T: serde::de::DeserializeOwned>(
+    kind: &str,
+    scope: &str,
+    mut rows: Vec<(i64, String)>,
+) -> AppResult<(Vec<T>, Option<String>)> {
+    let more = rows.len() > HISTORY_PAGE_SIZE;
+    rows.truncate(HISTORY_PAGE_SIZE);
+    let next_cursor =
+        more.then(|| history_cursor(kind, scope, rows.last().expect("nonempty full page").0));
+    let items = rows
+        .into_iter()
+        .map(|(_, summary)| serde_json::from_str(&summary).map_err(database))
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok((items, next_cursor))
 }
 
 impl AgentStore {
@@ -163,6 +219,127 @@ impl AgentStore {
         rows.into_iter()
             .map(|body| serde_json::from_str(&body).map_err(database))
             .collect()
+    }
+
+    pub(super) async fn evidence_page(
+        &self,
+        workspace: &str,
+        cursor: Option<&str>,
+    ) -> AppResult<AgentEvidencePage> {
+        let upper_bound = history_upper_bound("evidence", workspace, cursor)?;
+        // Project before crossing SQLite/Rust: list readers never deserialize output text.
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT e.rowid, json_object(
+                'id',e.id, 'workspaceId',e.workspace_id, 'missionId',e.mission_id,
+                'runId',json_extract(e.body_json,'$.runId'),
+                'taskId',json_extract(e.body_json,'$.taskId'),
+                'dispatchId',json_extract(e.body_json,'$.dispatchId'),
+                'handoffOperationId',json_extract(e.body_json,'$.handoffOperationId'),
+                'title',NULLIF(json_extract(h.body_json,'$.preview.title'),''),
+                'contentHash',json_extract(e.body_json,'$.contentHash'),
+                'source',json_extract(e.body_json,'$.source'),
+                'requestCursor',json_extract(e.body_json,'$.requestCursor'),
+                'cursor',json_extract(e.body_json,'$.cursor'),
+                'hasMore',json(CASE json_extract(e.body_json,'$.hasMore') WHEN 1 THEN 'true' ELSE 'false' END),
+                'warning',json_extract(e.body_json,'$.warning'),
+                'observedTaskStatus',json_extract(e.body_json,'$.observedTaskStatus'),
+                'createdAt',json_extract(e.body_json,'$.createdAt'))
+             FROM agent_evidence e
+             LEFT JOIN agent_handoff h ON h.operation_id=json_extract(e.body_json,'$.handoffOperationId')
+                AND h.workspace_id=e.workspace_id AND h.mission_id=e.mission_id
+             WHERE e.workspace_id=? AND e.rowid<=? ORDER BY e.rowid DESC LIMIT 51"
+        ).bind(workspace).bind(upper_bound).fetch_all(&self.pool).await.map_err(database)?;
+        let (items, next_cursor) = history_page("evidence", workspace, rows)?;
+        Ok(AgentEvidencePage { items, next_cursor })
+    }
+
+    pub(super) async fn handoff_page(
+        &self,
+        mission: &str,
+        cursor: Option<&str>,
+    ) -> AppResult<AgentHandoffPage> {
+        let upper_bound = history_upper_bound("handoff", mission, cursor)?;
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT rowid, json_object(
+                'operationId',operation_id, 'workspaceId',workspace_id, 'missionId',mission_id,
+                'createdAt',json_extract(body_json,'$.createdAt'),
+                'title',COALESCE(json_extract(body_json,'$.preview.title'),''),
+                'hash',json_extract(body_json,'$.preview.hash'),
+                'sourceRunIds',json_extract(body_json,'$.preview.sourceRunIds'),
+                'evidenceIds',json_extract(body_json,'$.preview.evidenceIds'))
+             FROM agent_handoff WHERE mission_id=? AND rowid<=? ORDER BY rowid DESC LIMIT 51",
+        )
+        .bind(mission)
+        .bind(upper_bound)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        let (items, next_cursor) = history_page("handoff", mission, rows)?;
+        Ok(AgentHandoffPage { items, next_cursor })
+    }
+
+    pub(super) async fn get_evidence(&self, workspace: &str, id: &str) -> AppResult<AgentEvidence> {
+        let body: Option<String> = sqlx::query_scalar(
+            "SELECT body_json FROM agent_evidence WHERE workspace_id=? AND id=?",
+        )
+        .bind(workspace)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?;
+        let missing =
+            || AppError::validation("agent_history_not_found", "此工作区中没有该输出证据。");
+        let evidence: AgentEvidence =
+            serde_json::from_str(&body.ok_or_else(missing)?).map_err(database)?;
+        if evidence.workspace_id != workspace || evidence.id != id {
+            return Err(missing());
+        }
+        Ok(evidence)
+    }
+
+    pub(super) async fn get_handoff(
+        &self,
+        mission: &str,
+        operation: &str,
+    ) -> AppResult<AgentHandoff> {
+        let body: Option<String> = sqlx::query_scalar(
+            "SELECT body_json FROM agent_handoff WHERE mission_id=? AND operation_id=?",
+        )
+        .bind(mission)
+        .bind(operation)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?;
+        let missing =
+            || AppError::validation("agent_history_not_found", "此协作中没有该交接记录。");
+        let handoff: AgentHandoff =
+            serde_json::from_str(&body.ok_or_else(missing)?).map_err(database)?;
+        if handoff.mission_id != mission || handoff.operation_id != operation {
+            return Err(missing());
+        }
+        Ok(handoff)
+    }
+
+    pub(super) async fn handoff_for_dispatch(
+        &self,
+        mission: &str,
+        task: &str,
+        dispatch: &str,
+    ) -> AppResult<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT o.id FROM agent_operation o
+            JOIN agent_handoff h ON h.operation_id=o.id AND h.mission_id=o.mission_id
+            WHERE o.mission_id=? AND o.kind='start-task' AND o.status='succeeded'
+                AND json_extract(o.receipt_json,'$.result.dispatchId')=?
+                AND json_extract(o.receipt_json,'$.result.taskId')=?
+            ORDER BY o.rowid DESC LIMIT 1",
+        )
+        .bind(mission)
+        .bind(dispatch)
+        .bind(task)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)
     }
 
     pub(super) async fn save_evidence(

@@ -757,3 +757,23 @@ describe("Agent workbench commands", () => {
     expect(calls.map((call) => call.command).some((command) => command.includes("provider"))).toBe(false);
   });
 });
+
+describe("Agent history summaries and details", () => {
+  it("passes opaque pagination cursors and exact ownership to the four read commands", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const bridge = createDesktopBridge(async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      calls.push({ command, args });
+      return { apiVersion: 1, data: null } as T;
+    });
+    await bridge.listAgentEvidencePage({ workspaceId: "workspace-1", cursor: "opaque-evidence-cursor" });
+    await bridge.listAgentHandoffPage({ missionId: "mission-1", cursor: "opaque-handoff-cursor" });
+    await bridge.getAgentEvidence({ workspaceId: "workspace-1", id: "evidence-1" });
+    await bridge.getAgentHandoff({ missionId: "mission-1", operationId: "operation-1" });
+    expect(calls).toEqual([
+      { command: "agent_evidence_page", args: { input: { workspaceId: "workspace-1", cursor: "opaque-evidence-cursor" } } },
+      { command: "agent_handoff_page", args: { input: { missionId: "mission-1", cursor: "opaque-handoff-cursor" } } },
+      { command: "agent_get_evidence", args: { input: { workspaceId: "workspace-1", id: "evidence-1" } } },
+      { command: "agent_get_handoff", args: { input: { missionId: "mission-1", operationId: "operation-1" } } },
+    ]);
+  });
+});
