@@ -53,3 +53,8 @@
 .agent-workspace input[type="checkbox"] { width: auto; }
 .agent-workspace__graph { height: 330px; width: 100%; background: var(--tf-ground); }
 .agent-workspace__graph .react-flow__node { background: var(--tf-paper-strong); color: var(--tf-ink); border-color: var(--tf-line); font-size: 11px; overflow-wrap: anywhere; }
+
+.agent-workspace__graph .react-flow__controls-button { width: 32px; height: 32px; min-height: 32px; padding: 5px; border-radius: 0; color: var(--tf-ink); background: var(--tf-paper-strong); }
+.agent-workspace__graph .react-flow__controls-button svg { display: block; width: 14px; height: 14px; max-width: 14px; max-height: 14px; fill: currentColor; }
+.agent-workspace__selected-evidence { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.agent-workspace__selection section > label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }

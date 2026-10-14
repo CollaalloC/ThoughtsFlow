@@ -6,6 +6,11 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ### Agent workbench
 
+- Page Agent history in groups of 50 summaries and fetch immutable bodies only when expanded, with explicit navigation back to the newest records and selection retained across pages.
+- Preserve unsent tasks and selected Missions while navigating. Confirmed dispatches clear only their unchanged draft, including after a view is reopened; newer edits remain intact.
+- Prevent delayed initialization responses from overwriting newly created workspaces, Missions or newer environment checks.
+- Improve source-graph direction arrows and zoom controls, and keep unused context trees collapsed.
+
 - Make the Agent workbench the default entry point, with workspace creation and context selection independent of Provider setup. Keep direct-model conversations and Provider settings as compatibility features.
 - Preview and freeze explicit context handoffs before dispatch, preserving exact source identities, context revisions and the full submitted task text. Existing model receipts and their hashes remain unchanged.
 - Save immutable, bounded Agent output observations with Dispatch provenance, reuse selected evidence in later tasks, and inspect handoff/evidence relationships offline.

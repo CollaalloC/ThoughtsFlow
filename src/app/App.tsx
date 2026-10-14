@@ -1,6 +1,7 @@
-import { ArrowLeft, Bot, GitCompareArrows, Map, MessageSquareText, Settings2 } from "lucide-react";
+import { ArrowLeft, Bot, GitCompareArrows, Map as MapIcon, MessageSquareText, Settings2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { DecisionRunOption } from "../features/decision";
+import { AgentTaskDrafts } from "../features/agents/agent-drafts";
 import { FocusWorkspace } from "../features/conversation";
 import { resolveContextBranchId } from "../features/context-tree";
 import { createDesktopBridge, type DesktopBridge } from "../platform/desktop-bridge";
@@ -53,6 +54,8 @@ export function App({ bridge: providedBridge }: AppProps) {
   const bridgeRef = useRef<DesktopBridge | null>(null);
   if (!bridgeRef.current) bridgeRef.current = providedBridge ?? createDesktopBridge();
   const bridge = bridgeRef.current;
+  const agentDrafts = useRef(new AgentTaskDrafts());
+  const agentMissionSelections = useRef(new Map<string, string>());
 
   const [view, setView] = useState<AppView>("agents");
   const [workspaceId, setWorkspaceId] = useState<string>();
@@ -229,7 +232,7 @@ export function App({ bridge: providedBridge }: AppProps) {
             onClick={() => openWorkspaceView("route")}
             type="button"
           >
-            <Map aria-hidden="true" size={14} /> 路线图
+            <MapIcon aria-hidden="true" size={14} /> 路线图
           </button>
           <button
             aria-current={view === "decision" ? "page" : undefined}
@@ -276,7 +279,8 @@ export function App({ bridge: providedBridge }: AppProps) {
             </header>
 
             <Suspense fallback={<LoadingState label="正在加载工作面" />}>
-              {view === "agents" ? <AgentWorkspace bridge={bridge} workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId} /> : null}
+              {view === "agents" ? <AgentWorkspace bridge={bridge} workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId}
+                drafts={agentDrafts.current} missionSelections={agentMissionSelections.current} /> : null}
               {view === "settings" ? (
                 <ProviderSettings
                   bridge={bridge}

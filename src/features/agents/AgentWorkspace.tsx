@@ -11,12 +11,15 @@ import type {
   AgentSnapshot,
 } from "../../shared/contracts";
 import { AgentHandoffPanel } from "./AgentHandoffPanel";
+import { AgentTaskDrafts } from "./agent-drafts";
 import "./agent-workspace.css";
 
 interface AgentWorkspaceProps {
   bridge: DesktopBridge;
   workspaceId?: string;
   onWorkspaceChange?: (id: string) => void;
+  drafts?: AgentTaskDrafts;
+  missionSelections?: Map<string, string>;
 }
 
 function errorMessage(reason: unknown) {
@@ -66,7 +69,9 @@ function statusLabel(status: string) {
   return statusLabels[status] ?? status;
 }
 
-export function AgentWorkspace({ bridge, workspaceId, onWorkspaceChange }: AgentWorkspaceProps) {
+export function AgentWorkspace({ bridge, workspaceId, onWorkspaceChange, drafts, missionSelections }: AgentWorkspaceProps) {
+  const localDrafts = useRef(new AgentTaskDrafts());
+  const localMissionSelections = useRef(new Map<string, string>());
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedId, setSelectedId] = useState(workspaceId);
   const [name, setName] = useState("");
@@ -85,7 +90,8 @@ export function AgentWorkspace({ bridge, workspaceId, onWorkspaceChange }: Agent
     let current = true;
     void bridge.listWorkspaces().then((items) => {
       if (!current) return;
-      setWorkspaces(items);
+      // A workspace can be created while this initial list read is still pending.
+      setWorkspaces((previous) => [...previous, ...items.filter((item) => !previous.some((known) => known.id === item.id))]);
       if (!selection.current) {
         const first = items.find((item) => !item.archived)?.id;
         if (first) { setSelectedId(first); changeCallback.current?.(first); }
@@ -122,11 +128,12 @@ export function AgentWorkspace({ bridge, workspaceId, onWorkspaceChange }: Agent
       <p>工作区保存上下文与任务证据，无需配置 Provider。</p>
       {error ? <p role="alert" className="agent-workspace__error">{error}</p> : null}
     </div>
-    <AgentWorkspaceContent key={currentId ?? "no-workspace"} bridge={bridge} workspaceId={currentId} />
+    <AgentWorkspaceContent key={currentId ?? "no-workspace"} bridge={bridge} workspaceId={currentId}
+      drafts={drafts ?? localDrafts.current} missionSelections={missionSelections ?? localMissionSelections.current} />
   </section>;
 }
 
-function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
+function AgentWorkspaceContent({ bridge, workspaceId, drafts, missionSelections }: AgentWorkspaceProps) {
   const [environment, setEnvironment] = useState<AgentEnvironment | null>(null);
   const [missions, setMissions] = useState<AgentMission[]>([]);
   const [missionId, setMissionId] = useState("");
@@ -136,37 +143,45 @@ function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const busyRef = useRef(false);
   const active = useRef(true);
+  const environmentRead = useRef(0);
   const objectiveError = byteLimitError("协作目标", objective, 32_000);
 
   useEffect(() => {
     active.current = true;
     let current = true;
+    const request = ++environmentRead.current;
     void Promise.allSettled([
       bridge.agentEnvironment(),
       workspaceId ? bridge.listAgentMissions(workspaceId) : Promise.resolve([]),
     ]).then(([runtime, history]) => {
       if (!current) return;
-      if (runtime.status === "fulfilled") setEnvironment(runtime.value);
+      if (runtime.status === "fulfilled" && request === environmentRead.current) setEnvironment(runtime.value);
       if (history.status === "fulfilled") {
-        setMissions(history.value);
-        setMissionId(history.value[0]?.id ?? "");
+        setMissions((previous) => [...previous, ...history.value.filter((item) => !previous.some((known) => known.id === item.id))]);
+        setMissionId((previous) => previous || history.value.find((item) => item.id === missionSelections?.get(workspaceId ?? ""))?.id || history.value[0]?.id || "");
       }
-      const failures = [runtime, history].filter((result) => result.status === "rejected");
+      const failures = [history, ...(request === environmentRead.current ? [runtime] : [])].filter((result) => result.status === "rejected");
       if (failures.length) setError(failures.map((result) => errorMessage(result.reason)).join(" "));
     });
     return () => { current = false; active.current = false; };
-  }, [bridge, workspaceId]);
+  }, [bridge, workspaceId, missionSelections]);
+
+  const selectMission = (id: string) => {
+    setMissionId(id);
+    if (workspaceId) missionSelections?.set(workspaceId, id);
+  };
 
   const inspectEnvironment = async (open: boolean) => {
     if (busyRef.current) return;
     busyRef.current = true;
+    const request = ++environmentRead.current;
     setBusy("environment");
     setError(null);
     try {
       const result = await (open ? bridge.openAgentRuntime() : bridge.agentEnvironment());
-      if (active.current) setEnvironment(result);
+      if (active.current && request === environmentRead.current) setEnvironment(result);
     } catch (reason) {
-      if (active.current) setError(errorMessage(reason));
+      if (active.current && request === environmentRead.current) setError(errorMessage(reason));
     } finally {
       busyRef.current = false;
       if (active.current) setBusy(null);
@@ -184,7 +199,7 @@ function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
       });
       if (!active.current) return;
       setMissions((previous) => [mission, ...previous.filter((item) => item.id !== mission.id)]);
-      setMissionId(mission.id);
+      selectMission(mission.id);
       setObjective("");
     } catch (reason) {
       if (!active.current) return;
@@ -233,7 +248,7 @@ function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
         <aside className="agent-workspace__sidebar">
           <label>
             历史协作
-            <select aria-label="历史协作" value={missionId} onChange={(event) => setMissionId(event.target.value)} disabled={!!busy}>
+            <select aria-label="历史协作" value={missionId} onChange={(event) => selectMission(event.target.value)} disabled={!!busy}>
               <option value="">选择协作</option>
               {missions.map((mission) => <option key={mission.id} value={mission.id}>{mission.objective}</option>)}
             </select>
@@ -259,14 +274,14 @@ function AgentWorkspaceContent({ bridge, workspaceId }: AgentWorkspaceProps) {
           </form>
         </aside>
         {selectedMission ? (
-          <AgentMissionView key={selectedMission.id} bridge={bridge} mission={selectedMission} />
+          <AgentMissionView key={selectedMission.id} bridge={bridge} mission={selectedMission} drafts={drafts} />
         ) : <div className="agent-workspace__empty">选择已有协作，或选定仓库开始一个新目标。</div>}
       </div>
     </section>
   );
 }
 
-function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission: AgentMission }) {
+function AgentMissionView({ bridge, mission, drafts }: { bridge: DesktopBridge; mission: AgentMission; drafts?: AgentTaskDrafts }) {
   const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [operations, setOperations] = useState<AgentOperation[]>([]);
   const [receiptsLoaded, setReceiptsLoaded] = useState(false);
@@ -364,6 +379,7 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
     setBusy(true);
     setNotice(null);
     const operationId = crypto.randomUUID();
+    const submittedDraft = kind === "start-task" ? drafts?.get(mission.id) : undefined;
     let operation: AgentOperation;
     try {
       operation = await send(operationId);
@@ -380,6 +396,12 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
       };
     }
     mutationInFlight.current = false;
+    // A confirmed dispatch can finish while this view is unmounted. Remove only
+    // its unchanged draft, never text the user has edited after navigating back.
+    if (kind === "start-task" && operation.status === "succeeded" && submittedDraft
+      && drafts?.get(mission.id) === submittedDraft) {
+      drafts.delete(mission.id);
+    }
     if (!active.current) return;
     revision.current += 1;
     setOperations((previous) => [operation, ...previous.filter((item) => item.id !== operation.id)]);
@@ -413,7 +435,7 @@ function AgentMissionView({ bridge, mission }: { bridge: DesktopBridge; mission:
       ) : null}
       {notice ? <p className="agent-workspace__notice" role="status">{notice}</p> : null}
       {uncertain ? <p className="agent-workspace__notice">有操作尚未确认，请查看下方回执并核对 Orca。{uncertainStart ? "已暂停新增任务，避免重复启动。" : "请勿重复提交同一操作。"}</p> : null}
-      <AgentHandoffPanel bridge={bridge} mission={mission} busy={busy}
+      <AgentHandoffPanel bridge={bridge} mission={mission} busy={busy} drafts={drafts}
         canStart={canMutate && snapshot?.canStartTasks !== false && !uncertainStart}
         evidenceRevision={evidenceRevision}
         onStart={(input) => mutate("start-task", (operationId) => bridge.startAgentTask({ ...input, operationId }))} />

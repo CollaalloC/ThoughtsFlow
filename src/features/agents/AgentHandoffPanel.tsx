@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ContextTree } from "../context-tree";
 import type { DesktopBridge } from "../../platform/desktop-bridge";
-import type { AgentEvidence, AgentHandoff, AgentHandoffPreview, AgentMission, AgentOperation, ContextTreeProjection, StartAgentTaskInput } from "../../shared/contracts";
+import type { AgentHandoffPreview, AgentMission, AgentOperation, ContextTreeProjection, StartAgentTaskInput } from "../../shared/contracts";
 import { AgentWorkflowGraph } from "./AgentWorkflowGraph";
+import { AgentHistory } from "./AgentHistory";
+import { AgentEvidencePicker, MAX_SELECTED_EVIDENCE, type AgentEvidenceChoice } from "./AgentEvidencePicker";
+import { useAgentHistoryPage } from "./useAgentHistoryPage";
+import type { AgentTaskDraft, AgentTaskDrafts } from "./agent-drafts";
 
 interface Props {
   bridge: DesktopBridge;
@@ -10,6 +14,7 @@ interface Props {
   busy: boolean;
   canStart: boolean;
   evidenceRevision: number;
+  drafts?: AgentTaskDrafts;
   onStart: (input: Omit<StartAgentTaskInput, "operationId">) => Promise<AgentOperation | undefined>;
 }
 
@@ -22,22 +27,41 @@ function byteLimit(label: string, value: string, limit: number) {
   return bytes > limit ? `${label}超过 ${limit} 字节上限（当前 ${bytes} 字节），请缩短后再提交。` : null;
 }
 
-export function AgentHandoffPanel({ bridge, mission, busy, canStart, evidenceRevision, onStart }: Props) {
-  const [title, setTitle] = useState("");
-  const [spec, setSpec] = useState("");
-  const [includeActiveContext, setIncludeActiveContext] = useState(false);
-  const [evidenceIds, setEvidenceIds] = useState<string[]>([]);
-  const [evidence, setEvidence] = useState<AgentEvidence[]>([]);
-  const [handoffs, setHandoffs] = useState<AgentHandoff[]>([]);
-  const handoffTitles = useMemo(() => new Map(handoffs.map((item) => [item.operationId, item.preview.title?.trim()])), [handoffs]);
-  const evidenceTitle = (item: AgentEvidence) => (item.handoffOperationId ? handoffTitles.get(item.handoffOperationId) : null) || item.taskId.slice(0, 12);
+export function AgentHandoffPanel(props: Props) {
+  return <AgentHandoffContent key={`${props.mission.workspaceId}:${props.mission.id}`} {...props} />;
+}
+
+function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision, onStart, drafts }: Props) {
+  const initialDraft = useRef<AgentTaskDraft>(drafts?.get(mission.id) ?? { title: "", spec: "", includeActiveContext: false, evidenceIds: [] });
+  const draft = useRef(initialDraft.current);
+  const observedSavedDraft = useRef(drafts?.get(mission.id));
+  const [title, setTitle] = useState(initialDraft.current.title);
+  const [spec, setSpec] = useState(initialDraft.current.spec);
+  const [includeActiveContext, setIncludeActiveContext] = useState(initialDraft.current.includeActiveContext);
+  const [evidenceIds, setEvidenceIds] = useState(initialDraft.current.evidenceIds);
+  const selectedLabels = useRef(new Map<string, AgentEvidenceChoice>());
+  const persistDraft = useCallback((change: Partial<AgentTaskDraft>) => {
+    draft.current = { ...draft.current, ...change };
+    drafts?.set(mission.id, draft.current);
+  }, [drafts, mission.id]);
   const [tree, setTree] = useState<ContextTreeProjection | null>(null);
   const runTitles = useMemo(() => Object.fromEntries((tree?.nodes ?? []).map((node) => [node.runId, node.title?.trim() || node.prompt.trim().slice(0, 60)])), [tree]);
   const [preview, setPreview] = useState<AgentHandoffPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [contextError, setContextError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
   const [reload, setReload] = useState(0);
+  const loadEvidence = useCallback((cursor?: string) => bridge.listAgentEvidencePage({ workspaceId: mission.workspaceId, cursor }), [bridge, mission.workspaceId]);
+  const loadHandoffs = useCallback((cursor?: string) => bridge.listAgentHandoffPage({ missionId: mission.id, cursor }), [bridge, mission.id]);
+  const evidencePage = useAgentHistoryPage(loadEvidence, `${evidenceRevision}:${reload}`);
+  const handoffPage = useAgentHistoryPage(loadHandoffs, `${evidenceRevision}:${reload}`);
+  const evidence = evidencePage.items;
+  const handoffs = handoffPage.items;
+  const selectedEvidence = useMemo(() => evidenceIds.map((id) => evidence.find((item) => item.id === id)
+    ?? selectedLabels.current.get(id) ?? { id, taskId: id, title: null, createdAt: "已选，来源摘要尚未加载" }), [evidenceIds, evidence]);
+  useEffect(() => {
+    evidence.filter((item) => evidenceIds.includes(item.id)).forEach((item) => selectedLabels.current.set(item.id, item));
+  }, [evidence, evidenceIds]);
   const alive = useRef(true);
   const revision = useRef(0);
   const contextRead = useRef(0);
@@ -48,6 +72,23 @@ export function AgentHandoffPanel({ bridge, mission, busy, canStart, evidenceRev
   const invalidate = useCallback(() => { revision.current += 1; setPreview(null); setError(null); }, []);
 
   useEffect(() => {
+    if (!drafts) return;
+    const reconcileDeletion = () => {
+      const saved = drafts.get(mission.id);
+      if (observedSavedDraft.current && !saved) {
+        draft.current = { title: "", spec: "", includeActiveContext: false, evidenceIds: [] };
+        setTitle(""); setSpec(""); setIncludeActiveContext(false); setEvidenceIds([]);
+        selectedLabels.current.clear();
+        invalidate();
+      }
+      observedSavedDraft.current = saved;
+    };
+    const unsubscribe = drafts.subscribe(reconcileDeletion);
+    reconcileDeletion();
+    return unsubscribe;
+  }, [drafts, mission.id, invalidate]);
+
+  useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; revision.current += 1; };
   }, []);
@@ -55,20 +96,26 @@ export function AgentHandoffPanel({ bridge, mission, busy, canStart, evidenceRev
   useEffect(() => {
     let active = true;
     const request = ++contextRead.current;
-    void Promise.allSettled([
-      bridge.getContextTree({ workspaceId: mission.workspaceId }),
-      bridge.listAgentEvidence(mission.workspaceId),
-      bridge.listAgentHandoffs(mission.id),
-    ]).then(([context, saved, history]) => {
-      if (!active) return;
-      if (context.status === "fulfilled" && request === contextRead.current) setTree(context.value);
-      if (saved.status === "fulfilled") setEvidence(saved.value);
-      if (history.status === "fulfilled") setHandoffs(history.value);
-      const failures = [context, saved, history].filter((result) => result.status === "rejected");
-      setHistoryError(failures.length ? failures.map((result) => message(result.reason)).join(" ") : null);
+    void bridge.getContextTree({ workspaceId: mission.workspaceId }).then((context) => {
+      if (!active || request !== contextRead.current) return;
+      setTree(context);
+      setContextError(null);
+    }).catch((reason: unknown) => {
+      if (active && request === contextRead.current) setContextError(message(reason));
     });
     return () => { active = false; };
-  }, [bridge, mission.id, mission.workspaceId, evidenceRevision, reload]);
+  }, [bridge, mission.workspaceId, reload]);
+
+  const toggleEvidence = useCallback((item: AgentEvidenceChoice) => {
+    const ids = draft.current.evidenceIds;
+    const selected = ids.includes(item.id);
+    if (!selected && ids.length >= MAX_SELECTED_EVIDENCE) return;
+    const next = selected ? ids.filter((id) => id !== item.id) : [...ids, item.id];
+    if (selected) selectedLabels.current.delete(item.id); else selectedLabels.current.set(item.id, item);
+    setEvidenceIds(next);
+    persistDraft({ evidenceIds: next });
+    invalidate();
+  }, [persistDraft, invalidate]);
 
   const selectContext = async (runId: string | null, branchId: string | null) => {
     if (!tree || inFlight.current || busy) return;
@@ -122,7 +169,12 @@ export function AgentHandoffPanel({ bridge, mission, busy, canStart, evidenceRev
         expectedBranchId: confirmed.branchId, expectedBranchVersion: confirmed.branchVersion,
       } });
       if (!alive.current) return;
-      if (operation?.status === "succeeded") { setTitle(""); setSpec(""); setEvidenceIds([]); setIncludeActiveContext(false); }
+      if (operation?.status === "succeeded") {
+        setTitle(""); setSpec(""); setEvidenceIds([]); setIncludeActiveContext(false);
+        draft.current = { title: "", spec: "", evidenceIds: [], includeActiveContext: false };
+        selectedLabels.current.clear();
+        drafts?.delete(mission.id);
+      }
       setReload((value) => value + 1);
     } catch (reason) {
       if (alive.current) { setError(`${message(reason)} 请重新预览后再启动。`); setReload((value) => value + 1); }
@@ -136,21 +188,19 @@ export function AgentHandoffPanel({ bridge, mission, busy, canStart, evidenceRev
     <form className="agent-workspace__panel" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <h4>预览上下文，交给 Agent</h4>
       <p>沿用本机 OMP 的模型、认证、工具、Skills 与审批设置。工具批准在 Orca / Agent 中处理；实际使用的模型由 Agent 决定。</p>
-      <label>任务标题<input aria-label="任务标题" aria-invalid={!!titleError} required value={title} onChange={(event) => { setTitle(event.target.value); invalidate(); }} disabled={busy} /></label>
+      <label>任务标题<input aria-label="任务标题" aria-invalid={!!titleError} required value={title} onChange={(event) => { setTitle(event.target.value); persistDraft({ title: event.target.value }); invalidate(); }} disabled={busy} /></label>
       {titleError ? <p className="agent-workspace__error" role="alert">{titleError}</p> : null}
-      <label>任务说明<textarea aria-label="任务说明" aria-invalid={!!specError} required rows={4} value={spec} onChange={(event) => { setSpec(event.target.value); invalidate(); }} placeholder="写清范围、约束和验收标准" disabled={busy} /></label>
+      <label>任务说明<textarea aria-label="任务说明" aria-invalid={!!specError} required rows={4} value={spec} onChange={(event) => { setSpec(event.target.value); persistDraft({ spec: event.target.value }); invalidate(); }} placeholder="写清范围、约束和验收标准" disabled={busy} /></label>
       {specError ? <p className="agent-workspace__error" role="alert">{specError}</p> : null}
       <fieldset disabled={busy} className="agent-workspace__selection">
         <legend>选择本次交接内容</legend>
-        <label><input type="checkbox" checked={includeActiveContext} onChange={(event) => { setIncludeActiveContext(event.target.checked); invalidate(); }} />包含当前图谱路径</label>
+        <label><input type="checkbox" checked={includeActiveContext} onChange={(event) => { setIncludeActiveContext(event.target.checked); persistDraft({ includeActiveContext: event.target.checked }); invalidate(); }} />包含当前图谱路径</label>
         <p>只发送明确勾选的内容。切换路径后请重新预览；新工作区可以只发送任务说明。</p>
-        {tree ? <ContextTree projection={tree} busy={busy || working} onSelect={selectContext} /> : <p>尚未读取图谱路径，可重新加载。</p>}
-        <h4>选择已保存的 Agent 证据</h4>
-        {!evidence.length ? <p>尚无保存的输出观察；任务执行后可以保存一页，作为下一任务输入。</p> : null}
-        {evidence.map((item) => <label key={item.id}>
-          <input type="checkbox" aria-label={`使用证据 ${evidenceTitle(item)}`} data-evidence-id={item.id} checked={evidenceIds.includes(item.id)} onChange={(event) => { setEvidenceIds((ids) => event.target.checked ? [...ids, item.id] : ids.filter((id) => id !== item.id)); invalidate(); }} />
-          {evidenceTitle(item)} · {item.createdAt} · {item.hasMore ? "部分输出，有后续页" : "一页输出观察"}
-        </label>)}
+        {includeActiveContext ? tree?.nodes.length ? <ContextTree projection={tree} busy={busy || working} onSelect={selectContext} />
+          : <p>{tree ? "当前工作区还没有对话路径，将只交接任务说明和已选证据。" : "正在读取图谱路径…"}</p> : null}
+        <AgentEvidencePicker evidence={evidence} selected={selectedEvidence} disabled={busy}
+          loading={evidencePage.loading} pageNumber={evidencePage.pageNumber} hasNext={!!evidencePage.nextCursor}
+          onPrevious={evidencePage.previous} onNext={evidencePage.next} onLatest={evidencePage.latest} onToggle={toggleEvidence} />
       </fieldset>
       {error ? <p className="agent-workspace__error" role="alert">{error}</p> : null}
       <div className="agent-workspace__actions">
@@ -160,22 +210,15 @@ export function AgentHandoffPanel({ bridge, mission, busy, canStart, evidenceRev
       {preview ? <section aria-label="交接预览"><h4>即将提交给 Agent 的文本</h4><pre>{preview.text}</pre><p>来源回答 {preview.sourceRunIds.length} · 输出观察 {preview.evidenceIds.length} · hash <code>{preview.hash}</code></p><p>这是提交给 harness 的交接快照；Agent 的后续工具调用和完整模型请求由现有运行时管理。</p></section> : <p>启动前必须先查看交接预览；编辑任务或所选来源会使预览失效。</p>}
       <p>启动后，OMP 可在独立 worktree 中读写文件；不会自动合并，也不会使用 ThoughtsFlow 的 Provider 凭据。</p>
     </form>
-    {historyError ? <p className="agent-workspace__error" role="alert">读取本地上下文记录失败：{historyError}</p> : null}
+    {[contextError, evidencePage.error, handoffPage.error].filter(Boolean).map((item, index) => <p key={index} className="agent-workspace__error" role="alert">读取本地上下文记录失败：{item}</p>)}
     <button type="button" disabled={busy || working} onClick={() => { invalidate(); setReload((value) => value + 1); }}>重新加载上下文与证据</button>
     <AgentWorkflowGraph handoffs={handoffs} evidence={evidence} runTitles={runTitles} />
-    <section className="agent-workspace__panel" aria-label="已保存的 Agent 证据">
-      <h4>不可变输出观察 · 可离线读取</h4>
-      <p>每条记录只证明某次读取所得的一页；即使没有后续页，也不证明任务完整成功。</p>
-      {evidence.map((item) => <details key={item.id}><summary>{evidenceTitle(item)} · {item.createdAt}</summary>
-        <p>证据 {item.id} · 任务 {item.taskId} · 协作 {item.missionId} · Run {item.runId} · Dispatch {item.dispatchId}</p><p>读取时状态 {item.observedTaskStatus} · 来源 {item.source ?? "未知"} · {item.hasMore ? "还有后续页" : "未报告后续页"}</p>
-        <p>请求游标 {item.requestCursor ?? "首页"} · 返回游标 {item.cursor ?? "无"}</p>
-        {item.warning ? <p className="agent-workspace__notice">{item.warning}</p> : null}<pre>{item.text}</pre><code>{item.contentHash}</code>
-      </details>)}
-    </section>
-    <section className="agent-workspace__panel" aria-label="历史任务交接">
-      <h4>不可变交接历史</h4>
-      <p>保留启动尝试的交接内容；是否实际执行请结合操作回执与任务状态判断。</p>
-      {handoffs.map((item) => <details key={item.operationId}><summary>{item.createdAt} · {item.preview.title?.trim() || item.operationId.slice(0, 12)}</summary><p>操作 {item.operationId}</p><pre>{item.preview.text}</pre><p>来源回答：{item.preview.sourceRunIds.join(", ") || "无"} · 输出观察：{item.preview.evidenceIds.join(", ") || "无"}</p><code>{item.preview.hash}</code></details>)}
-    </section>
+    <AgentHistory bridge={bridge} workspaceId={mission.workspaceId} missionId={mission.id} evidence={evidence} handoffs={handoffs} />
+    <div className="agent-workspace__actions" aria-label="交接摘要分页">
+      <button type="button" disabled={busy || handoffPage.loading} onClick={handoffPage.latest}>查看最新交接</button>
+      <button type="button" disabled={busy || handoffPage.loading || handoffPage.pageNumber === 1} onClick={handoffPage.previous}>上一页交接</button>
+      <span>第 {handoffPage.pageNumber} 页 · 每页最多 50 条</span>
+      <button type="button" disabled={busy || handoffPage.loading || !handoffPage.nextCursor} onClick={handoffPage.next}>下一页交接</button>
+    </div>
   </>;
 }

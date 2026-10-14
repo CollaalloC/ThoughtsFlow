@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { createDesktopBridge, type DesktopBridge } from "../platform/desktop-bridge";
 import type {
+  AgentMission,
+  AgentOperation,
   CompareRunsResult,
   ContextTreeProjection,
   ProviderProfile,
@@ -250,11 +252,103 @@ function bridgeFixture(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
       runtimeId: null, projects: [], message: null,
     }),
     listAgentMissions: vi.fn().mockResolvedValue([]),
+    listAgentEvidencePage: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+    listAgentHandoffPage: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     ...overrides,
   };
 }
 
 describe("App", () => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])("settles a dispatch without clearing a newer draft (edited: %s, visible: %s)", async (edited, settleVisible) => {
+    const user = userEvent.setup();
+    const mission: AgentMission = { id: "mission-pending", workspaceId: workspace.id, repositoryId: "repo-1", repositoryPath: "/project",
+      objective: "异步派发", runId: "orca-run", coordinatorHandle: "coordinator", runtimeId: "runtime", status: "ready", error: null, createdAt: workspace.createdAt };
+    let complete!: () => void;
+    const bridge = bridgeFixture({
+      listAgentMissions: vi.fn().mockResolvedValue([mission]),
+      getAgentSnapshot: vi.fn().mockResolvedValue({ mission, tasks: [], messages: [], connected: true, warning: null }),
+      listAgentOperations: vi.fn().mockResolvedValue([]),
+      previewAgentHandoff: vi.fn().mockResolvedValue({ hash: "preview", text: "确定交接", compilerVersion: "1", sourceRunIds: [], evidenceIds: [], sources: [],
+        parentRunId: "run-root-b", branchId: "branch-main", cursorVersion: 3, draftVersion: 0, branchVersion: 2 }),
+      startAgentTask: vi.fn().mockImplementation((input) => new Promise<AgentOperation>((resolve) => {
+        complete = () => resolve({ id: input.operationId, missionId: mission.id, kind: "start-task", status: "succeeded", receipt: {}, error: null, createdAt: workspace.createdAt });
+      })),
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByRole("heading", { name: mission.objective });
+    await user.type(screen.getByLabelText("任务标题"), "即将派发");
+    await user.type(screen.getByLabelText("任务说明"), "原始说明");
+    await user.click(screen.getByRole("button", { name: "预览交接内容" }));
+    await screen.findByRole("region", { name: "交接预览" });
+    await user.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    await waitFor(() => expect(bridge.startAgentTask).toHaveBeenCalledOnce());
+    const navigation = within(screen.getByRole("navigation", { name: "工作面" }));
+    await user.click(navigation.getByRole("button", { name: "路线图" }));
+    await screen.findByRole("region", { name: "对话路线图" });
+    if (edited) {
+      await user.click(navigation.getByRole("button", { name: "Agent 工作台" }));
+      await screen.findByRole("heading", { name: mission.objective });
+      await user.clear(screen.getByLabelText("任务标题"));
+      await user.type(screen.getByLabelText("任务标题"), "新的未提交任务");
+      await user.click(navigation.getByRole("button", { name: "路线图" }));
+      await screen.findByRole("region", { name: "对话路线图" });
+    }
+    if (settleVisible) {
+      await user.click(navigation.getByRole("button", { name: "Agent 工作台" }));
+      await screen.findByRole("heading", { name: mission.objective });
+    }
+    await act(async () => complete());
+    if (!settleVisible) {
+      await user.click(navigation.getByRole("button", { name: "Agent 工作台" }));
+      await screen.findByRole("heading", { name: mission.objective });
+    }
+    await waitFor(() => expect(screen.getByLabelText("任务标题")).toHaveValue(edited ? "新的未提交任务" : ""));
+    expect(screen.getByLabelText("任务说明")).toHaveValue(edited ? "原始说明" : "");
+    expect(bridge.startAgentTask).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the selected Mission and unsent task when visiting the graph, but requires a new preview", async () => {
+    const user = userEvent.setup();
+    const mission: AgentMission = {
+      id: "mission-first", workspaceId: workspace.id, repositoryId: "repo-1",
+      repositoryPath: "/project", objective: "第一协作", runId: "orca-run-1",
+      coordinatorHandle: "coordinator-1", runtimeId: "runtime-1", status: "ready",
+      error: null, createdAt: workspace.createdAt,
+    };
+    const selected = { ...mission, id: "mission-selected", objective: "保留草稿的协作" };
+    const bridge = bridgeFixture({
+      listAgentMissions: vi.fn().mockResolvedValue([mission, selected]),
+      getAgentSnapshot: vi.fn().mockImplementation(async (id: string) => ({
+        mission: id === selected.id ? selected : mission, tasks: [], messages: [], connected: true, warning: null,
+      })),
+      listAgentOperations: vi.fn().mockResolvedValue([]),
+      listAgentEvidence: vi.fn().mockResolvedValue([]),
+      listAgentHandoffs: vi.fn().mockResolvedValue([]),
+      previewAgentHandoff: vi.fn().mockResolvedValue({ hash: "confirmed-preview", text: "要交给 Agent 的文本", title: "保留这个任务",
+        compilerVersion: "agent-handoff/1", sourceRunIds: [], evidenceIds: [], sources: [], parentRunId: "run-root-b",
+        branchId: "branch-main", cursorVersion: 3, draftVersion: 0, branchVersion: 2 }),
+      startAgentTask: vi.fn(),
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByRole("heading", { name: mission.objective });
+    await user.selectOptions(screen.getByLabelText("历史协作"), selected.id);
+    await screen.findByRole("heading", { name: selected.objective });
+    await user.type(screen.getByLabelText("任务标题"), "保留这个任务");
+    await user.type(screen.getByLabelText("任务说明"), "查看上下文图后继续编辑，不应丢掉内容。");
+    await user.click(screen.getByRole("button", { name: "预览交接内容" }));
+    await screen.findByRole("region", { name: "交接预览" });
+    const navigation = within(screen.getByRole("navigation", { name: "工作面" }));
+    await user.click(navigation.getByRole("button", { name: "路线图" }));
+    await screen.findByRole("region", { name: "对话路线图" });
+    await user.click(navigation.getByRole("button", { name: "Agent 工作台" }));
+    await screen.findByRole("heading", { name: selected.objective });
+    expect(screen.getByLabelText("任务标题")).toHaveValue("保留这个任务");
+    expect(screen.getByLabelText("任务说明")).toHaveValue("查看上下文图后继续编辑，不应丢掉内容。");
+    expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(bridge.startAgentTask).not.toHaveBeenCalled();
+  });
+
   it("binds Agent collaboration to the workspace successfully selected in Focus", async () => {
     const user = userEvent.setup();
     const otherWorkspace = { ...workspace, id: "workspace-2", name: "第二工作区" };

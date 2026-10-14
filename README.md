@@ -12,7 +12,7 @@ ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择
 
 - **复用已有 Agent。** 直接创建工作区并连接 Orca，任务沿用 OMP 已有模型、认证与工具配置。
 - **显式交接上下文。** 在图上选择准确的历史路径，为任务选择当前上下文或已保存的 Agent 证据，预览后再派发。内容或版本变化后需要重新预览。
-- **保存可追溯的输出。** 保存指定 Dispatch 的一页输出观察及 hash，离线查看并用于后续任务。部分输出和任务成功分别标明。
+- **保存可追溯的输出。** 保存指定 Dispatch 的一页输出观察及 hash，分页浏览摘要，展开时读取正文，离线查看并用于后续任务。部分输出和任务成功分别标明。
 - **组织人工工作流。** 查看交接与证据的来源关系，人工决定后续工作；未知派发结果不会自动重试。
 - **保留历史推演能力。** 兼容直连对话中的准确回答分支、固定/排除、摘要检查点、Context Receipt、路线比较和决策文档导出。
 
@@ -128,7 +128,7 @@ Tauri commands → Rust application services → domain + ports
 
 当前还没有通用 Agent 原生聊天界面、云同步、多人协作、附件/RAG、完整全文搜索、可恢复的工作区导入包或自动任务依赖调度。图上的证据关联用于人工编排。完整会话与模型目录接入以 OMP Direct RPC 等已验证接口为后续路线，Agent 工具能力继续来自原生 harness。
 
-进一步阅读：[产品构想](PRODUCT_BLUEPRINT.md) · [构想与实现对照](docs/VISION_ALIGNMENT.md) · [架构路线](docs/PLATFORM_MODEL_ROADMAP.md) · [最近的性能测量](docs/PERFORMANCE_REFRESH_STORAGE_20260926.md) · [变更记录](CHANGELOG.md)
+进一步阅读：[产品构想](PRODUCT_BLUEPRINT.md) · [构想与实现对照](docs/VISION_ALIGNMENT.md) · [架构路线](docs/PLATFORM_MODEL_ROADMAP.md) · [工作台性能测量](docs/PERFORMANCE_AGENT_HISTORY_20261006.md) · [变更记录](CHANGELOG.md)
 
 ## 致谢与许可证
 

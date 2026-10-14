@@ -1,0 +1,62 @@
+{
+  "missionId": "ba57ef1b-1143-4a10-a988-824421b588d7",
+  "evidenceId": "ffa046ca-2d3f-403f-997e-3d15bc2302a9",
+  "evidenceHash": "c322a6f69afd09896d6adfe99d786995afdb9ec12d975507a9fe8de99dad4dac",
+  "handoffHashes": [
+    "0aca647493b24620ac97218ef2fba6d40ba64f8a817501c2151a0a651d4a8c60",
+    "603f25f4a5ea929a31219e6c8a6edb1e73423364db113978ce87a872f84a55e5"
+  ],
+  "dispatchCount": 2,
+  "offlineCommands": [
+    [
+      "--version"
+    ],
+    [
+      "--version"
+    ],
+    [
+      "--version"
+    ],
+    [
+      "--version"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ],
+    [
+      "status",
+      "--json"
+    ]
+  ],
+  "providerConfigured": false,
+  "modelCalled": false,
+  "verifiedOn": "2026-10-14",
+  "platform": "macos-aarch64",
+  "sourceBase": "561a6dc",
+  "scope": "Native WebView with deterministic CLI fixture; no real Agent or model"
+}
