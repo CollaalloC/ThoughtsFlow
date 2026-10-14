@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $, $$, browser, expect } from "@wdio/globals";
-import { button, controlByLabel, createAgentWorkspace, pinMainWindow, selectOptionByText, waitForBodyText } from "./support";
+import { button, controlByLabel, createAgentWorkspace, focusMainWindow, pinMainWindow, selectOptionByText, waitForBodyText } from "./support";
 
 const fixtureOutput = "OMP fixture output; no model was called";
 
@@ -12,7 +12,25 @@ function recordedCommands(path: string): string[][] {
     .map((line) => (JSON.parse(line) as { argv: string[] }).argv);
 }
 
+async function captureRegion(label: string, filename: string) {
+  await focusMainWindow();
+  const region = await $(`[aria-label="${label}"]`);
+  // Embedded WebDriver accepts wheel actions without scrolling this nested
+  // pane. Use the DOM scrolling API and wait for the native WebView to paint.
+  await browser.executeAsync((element: HTMLElement, done: () => void) => {
+    element.scrollIntoView({ block: "center", behavior: "instant" });
+    requestAnimationFrame(() => requestAnimationFrame(() => done()));
+  }, region);
+  await browser.saveScreenshot(join(tmpdir(), filename));
+}
+
 describe("Agent workbench through native IPC and an isolated fixture CLI", () => {
+  afterEach(async function () {
+    if (this.currentTest?.state !== "failed") return;
+    console.log(`TF_AGENT_WORKBENCH_FAILURE ${await $("body").getText()}`);
+    await browser.saveScreenshot(join(tmpdir(), "thoughtsflow-workbench-native-failure.png"));
+  });
+
   it("needs no Provider, reuses saved Agent evidence, and reloads immutable history offline", async () => {
     const statePath = process.env.TF_AGENT_FIXTURE_STATE;
     if (!statePath) throw new Error("This journey requires the isolated fixture runner");
@@ -41,12 +59,14 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
     expect(firstHandoffHash).toMatch(/^[a-f0-9]{64}$/);
     await (await button("启动 OMP 任务")).click();
     await waitForBodyText("任务已提交");
+    await focusMainWindow();
     const firstTask = await $('[aria-label="任务 采集输出证据"]');
     await firstTask.waitForDisplayed();
     const reply = await $('textarea[aria-label^="回复问题 "]');
     await reply.waitForDisplayed();
     await reply.setValue("确认，继续 fixture 验证");
     await (await button("发送回复")).click();
+    await focusMainWindow();
     await browser.waitUntil(async () => (await firstTask.getText()).includes("已完成"));
     await (await firstTask.$("details.agent-workspace__output > summary")).click();
     await (await button("读取输出")).click();
@@ -70,19 +90,22 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
     await (await controlByLabel("任务说明", "textarea")).setValue("仅使用明确勾选的 fixture 观察继续验证；不调用模型，不修改代码。");
     await evidenceChoice.click();
     await (await button("预览交接内容")).click();
-    await preview.waitForDisplayed();
-    await expect(preview).toHaveText(expect.stringContaining("输出观察 1"));
-    await expect(await preview.$("pre")).toHaveText(expect.stringContaining(fixtureOutput));
-    const reusedHandoffText = await (await preview.$("pre")).getProperty("textContent");
-    const reusedHandoffHash = await (await preview.$("code")).getText();
+    const reusedPreview = await $('[aria-label="交接预览"]');
+    await reusedPreview.waitForDisplayed();
+    await expect(reusedPreview).toHaveText(expect.stringContaining("输出观察 1"));
+    await expect(await reusedPreview.$("pre")).toHaveText(expect.stringContaining(fixtureOutput));
+    const reusedHandoffText = await (await reusedPreview.$("pre")).getProperty("textContent");
+    const reusedHandoffHash = await (await reusedPreview.$("code")).getText();
     expect(reusedHandoffHash).not.toBe(firstHandoffHash);
     await (await button("启动 OMP 任务")).click();
+    await focusMainWindow();
     const secondTask = await $('[aria-label="任务 复用已保存证据"]');
     await secondTask.waitForDisplayed();
     const secondReply = await $('textarea[aria-label^="回复问题 "]');
     await secondReply.waitForDisplayed();
     await secondReply.setValue("确认本次输入包含保存的证据");
     await (await button("发送回复")).click();
+    await focusMainWindow();
     await browser.waitUntil(async () => (await secondTask.getText()).includes("已完成"));
     await (await secondTask.$('.//button[normalize-space(.)="释放已结束的 Agent"]')).click();
     await browser.waitUntil(async () => (await secondTask.getText()).includes("已释放"));
@@ -129,10 +152,8 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
     expect(offlineCommands.some((argv) => argv[0] === "status")).toBe(true);
     expect(offlineCommands.some((argv) => argv.slice(0, 2).join(" ") === "orchestration worker-start")).toBe(false);
     expect(recordedCommands(`${statePath}.calls.jsonl`).filter((argv) => argv.slice(0, 2).join(" ") === "orchestration worker-start")).toHaveLength(2);
-    await (await $('[aria-label="已保存的 Agent 证据"]')).scrollIntoView();
-    await browser.saveScreenshot(join(tmpdir(), "thoughtsflow-workbench-native-evidence.png"));
-    await (await $('[aria-label="人工编排来源图"]')).scrollIntoView();
-    await browser.saveScreenshot(join(tmpdir(), "thoughtsflow-workbench-native-graph.png"));
+    await captureRegion("已保存的 Agent 证据", "thoughtsflow-workbench-native-evidence.png");
+    await captureRegion("人工编排来源图", "thoughtsflow-workbench-native-graph.png");
     console.log(`TF_AGENT_WORKBENCH_EVIDENCE ${JSON.stringify({ missionId, evidenceId, evidenceHash, handoffHashes: hashes, dispatchCount: starts.length, offlineCommands, providerConfigured: false, modelCalled: false })}`);
   });
 });

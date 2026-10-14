@@ -25,6 +25,10 @@ export async function pinMainWindow() {
   assertNativePlatform();
   await browser.tauri.switchWindow("main");
   await (await $('[aria-label="工作面"]')).waitForDisplayed();
+  await focusMainWindow();
+}
+
+export async function focusMainWindow() {
   // Embedded WebDriver's switch-window command only selects the target; it
   // does not bring the native window forward. Use Tauri's real window API so
   // the app's background-polling guard observes actual foreground visibility.

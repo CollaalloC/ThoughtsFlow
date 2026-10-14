@@ -255,6 +255,9 @@ async fn assert_upgraded_default_profile_sends_preserved_settings(name: &str, by
                 Err(error) => panic!("accept provider request: {error}"),
             }
         };
+        // Accepted sockets may inherit nonblocking mode on macOS. Timeouts
+        // only bound blocking I/O; otherwise an early read races the client.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
