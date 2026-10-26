@@ -2403,3 +2403,45 @@ async fn history_cursor_kind_scope_and_detail_ownership_are_checked_without_chan
     assert_eq!(after, original);
     assert_eq!(runner.count_all(), 0);
 }
+
+#[tokio::test]
+async fn transcript_pagination_uses_selected_source_limit_and_cursor_progress() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    runner.workers.lock().unwrap().push(worker());
+    for (limited, cursor, request_cursor, top_has_more, expected_more) in [
+        (Some(true), Some("next"), None, None, true),
+        (Some(false), Some("next"), None, None, false),
+        (Some(true), Some("same"), Some("same"), None, false),
+        (Some(true), None, None, None, false),
+        (Some(true), Some(""), None, None, false),
+        (Some(true), Some("next"), None, Some(false), false),
+        (Some(false), Some("next"), None, Some(true), true),
+        (None, Some("next"), None, None, true),
+        (None, Some("same"), Some("same"), Some(true), false),
+    ] {
+        let mut result = json!({"dispatchId":"dispatch-1","source":"transcript","transcript":{"messages":[{"role":"assistant","blocks":[{"type":"text","text":"Output page"}]}]},"terminal":{"tail":["ignore"],"limited":true},"cursor":cursor});
+        if let Some(limited) = limited {
+            result["transcript"]["limited"] = json!(limited);
+        }
+        if let Some(has_more) = top_has_more {
+            result["hasMore"] = json!(has_more);
+        }
+        runner.override_next("orchestration worker-read", Ok(ok(result)));
+        let output = service
+            .read_output(ReadOutputInput {
+                mission_id: MISSION.into(),
+                dispatch_id: "dispatch-1".into(),
+                cursor: request_cursor.map(str::to_owned),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output.has_more, expected_more,
+            "limited={limited:?}, cursor={cursor:?}, request={request_cursor:?}, top={top_has_more:?}"
+        );
+        assert_eq!(output.warning.is_some(), limited == Some(true));
+        assert!(output.text.contains("Output page"));
+        assert!(!output.text.contains("ignore"));
+    }
+}

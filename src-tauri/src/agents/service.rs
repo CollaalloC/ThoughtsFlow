@@ -1238,10 +1238,13 @@ fn project_output(receipt: &Value, input: &ReadOutputInput) -> AgentOutput {
     let result = &receipt["result"];
     let cursor = text(result, "/cursor")
         .or_else(|| result["cursor"].as_u64().map(|number| number.to_string()));
-    let has_more = result["hasMore"]
-        .as_bool()
-        .or_else(|| result["terminal"]["limited"].as_bool())
-        .unwrap_or_else(|| cursor.is_some() && cursor != input.cursor);
+    let cursor_progressed =
+        cursor.as_deref().is_some_and(|value| !value.is_empty()) && cursor != input.cursor;
+    let has_more = cursor_progressed
+        && result["hasMore"]
+            .as_bool()
+            .or_else(|| source_limited(result))
+            .unwrap_or(true);
     let terminal_lines = (result["source"].as_str() != Some("transcript"))
         .then(|| result.pointer("/terminal/tail").and_then(Value::as_array))
         .flatten();
@@ -1321,7 +1324,7 @@ fn output_warning(result: &Value) -> Option<String> {
                 value.as_bool() == Some(true) || value.as_u64().is_some_and(|number| number > 0)
             })
         })
-        || result["terminal"]["limited"].as_bool() == Some(true)
+        || source_limited(result) == Some(true)
         || result["contentComplete"].as_bool() == Some(false);
     if clipped || !warnings.is_empty() {
         let detail: String = warnings.chars().take(500).collect();
@@ -1330,6 +1333,13 @@ fn output_warning(result: &Value) -> Option<String> {
         ))
     } else {
         None
+    }
+}
+
+fn source_limited(result: &Value) -> Option<bool> {
+    match result["source"].as_str() {
+        Some("transcript") => result["transcript"]["limited"].as_bool(),
+        _ => result["terminal"]["limited"].as_bool(),
     }
 }
 

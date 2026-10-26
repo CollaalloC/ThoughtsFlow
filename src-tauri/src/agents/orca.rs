@@ -74,6 +74,7 @@ fn is_identity_environment_for_platform(key: &str, platform: Platform) -> bool {
             | "ORCA_WORKTREE_ID"
             | "ORCA_STRUCTURED_SESSION"
             | "ORCA_AGENT_SESSION_ID"
+            | "ORCA_AGENT_SESSION_SPAWN_TOKEN"
             | "ORCA_CLI_COMMAND"
             | "ORCA_DEV_REPO_ROOT"
             | "ORCA_DEV_CLI_INVOCATION"
@@ -270,6 +271,7 @@ mod tests {
             "orca_terminal_handle",
             "Orca_Pane_Key",
             "Orca_Agent_Session_Id",
+            "Orca_Agent_Session_Spawn_Token",
             "orca_pairing_code",
             "orca_orchestration_compatibility_v1",
         ] {
@@ -294,6 +296,7 @@ mod tests {
             "ORCA_WORKTREE_ID",
             "ORCA_STRUCTURED_SESSION",
             "ORCA_AGENT_SESSION_ID",
+            "ORCA_AGENT_SESSION_SPAWN_TOKEN",
             "ORCA_CLI_COMMAND",
             "ORCA_DEV_REPO_ROOT",
             "ORCA_DEV_CLI_INVOCATION",
@@ -328,7 +331,7 @@ mod tests {
         let script = directory.path().join("参数 fixture.mjs");
         std::fs::write(
             &script,
-            "process.stdout.write(JSON.stringify({arguments: process.argv.slice(2), sessionId: process.env.ORCA_AGENT_SESSION_ID ?? null}))",
+            "process.stdout.write(JSON.stringify({arguments: process.argv.slice(2), sessionId: process.env.ORCA_AGENT_SESSION_ID ?? null, spawnToken: process.env.ORCA_AGENT_SESSION_SPAWN_TOKEN ?? null}))",
         )
         .unwrap();
         launch.prefix_arguments.push(script.into_os_string());
@@ -342,6 +345,7 @@ mod tests {
         let output: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(output["arguments"], serde_json::json!(arguments));
         assert_eq!(output["sessionId"], Value::Null);
+        assert_eq!(output["spawnToken"], Value::Null);
     }
 
     #[test]
@@ -354,6 +358,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("ORCA_AGENT_SESSION_ID", "inherited-foreign-session")
+            .env("ORCA_AGENT_SESSION_SPAWN_TOKEN", "fixture-child-only-token")
             .output()
             .unwrap();
         assert!(
