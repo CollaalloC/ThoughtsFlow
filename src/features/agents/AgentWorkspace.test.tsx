@@ -253,16 +253,23 @@ describe("AgentWorkspace", () => {
     expect(bridge.listAgentMissions).not.toHaveBeenCalled();
   });
 
-  it("does not repeat an in-flight task submission or claim an unknown result succeeded", async () => {
+  it.each([undefined, "@smol"])("does not repeat an in-flight task submission or claim an unknown result succeeded (model %s)", async (requestedModel) => {
     const pending = deferred<AgentOperation>();
-    const bridge = fixture({ startAgentTask: vi.fn().mockReturnValue(pending.promise) });
+    const bridge = fixture({ startAgentTask: vi.fn().mockReturnValue(pending.promise),
+      previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedModel }),
+    });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
+    if (requestedModel !== undefined) {
+      fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
+      fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: requestedModel } });
+    }
     await prepareTask();
     const form = screen.getByRole("button", { name: "启动 OMP 任务" }).closest("form")!;
     fireEvent.submit(form);
     fireEvent.submit(form);
     expect(bridge.startAgentTask).toHaveBeenCalledTimes(1);
+    if (requestedModel !== undefined) expect(bridge.startAgentTask).toHaveBeenCalledWith(expect.objectContaining({ requestedModel }));
     await act(async () => pending.resolve({ ...operation, status: "unknown", error: "Orca timed out" }));
     expect(screen.getByText(/操作结果尚未确认，请勿重复提交/)).toBeVisible();
     expect(screen.queryByText("任务已提交。执行进展会自动更新。")).not.toBeInTheDocument();
@@ -271,6 +278,7 @@ describe("AgentWorkspace", () => {
     await waitFor(() => expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(3));
     expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
     expect(screen.getByLabelText("任务标题")).toHaveValue("实现任务列表");
+    if (requestedModel !== undefined) expect(screen.getByLabelText("请求模型")).toHaveValue(requestedModel);
   });
 
   it("keeps verified replies and ended-worker release available with an unrelated unknown start", async () => {
@@ -578,17 +586,23 @@ describe("AgentWorkspace", () => {
     expect(bridge.startAgentTask).not.toHaveBeenCalled();
   });
 
-  it.each(["agent_handoff_stale", "agent_handoff_required", "agent_handoff"])("requires a fresh preview after pre-dispatch rejection %s without inventing an unknown dispatch", async (code) => {
+  it.each(["agent_handoff_stale", "agent_handoff_required", "agent_handoff", "agent_model", "agent_model_unsupported"])("requires a fresh preview after pre-dispatch rejection %s without inventing an unknown dispatch", async (code) => {
     const bridge = fixture({ startAgentTask: vi.fn()
       .mockRejectedValueOnce(new DesktopBridgeError({ code, message: "上下文需要重新确认" }))
       .mockResolvedValue(operation),
+      previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedModel: "@smol" }),
     });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
-    await ready(); await prepareTask();
+    await ready();
+    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
+    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: "@smol" } });
+    await prepareTask();
     fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
     expect(await screen.findByText("上下文需要重新确认 请重新预览后再启动。")).toBeVisible();
     expect(screen.queryByText(/操作结果尚未确认/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("请求模型")).toHaveValue("@smol");
     await previewTask();
     fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
     await screen.findByText("任务已提交。执行进展会自动更新。");

@@ -221,6 +221,7 @@ fn legacy_task_input() -> StartTaskInput {
         mission_id: MISSION.into(),
         title: "Implement feature".into(),
         spec: "Keep `$HOME` and $(echo literal-only) literal; verify output".into(),
+        requested_model: None,
         handoff: None,
     }
 }
@@ -230,6 +231,7 @@ async fn task_input(service: &AgentService) -> StartTaskInput {
         mission_id: input.mission_id,
         title: input.title,
         spec: input.spec,
+        requested_model: None,
         context: AgentContextSelection {
             include_active_context: false,
             evidence_ids: vec![],
@@ -1578,6 +1580,7 @@ fn preview_input(include_active_context: bool) -> PreviewAgentHandoffInput {
         mission_id: MISSION.into(),
         title: "Review selected context".into(),
         spec: "Explain the evidence and uncertainties.".into(),
+        requested_model: None,
         context: AgentContextSelection {
             include_active_context,
             evidence_ids: vec![],
@@ -1594,6 +1597,7 @@ fn confirmed_task(
         mission_id: input.mission_id.clone(),
         title: input.title.clone(),
         spec: input.spec.clone(),
+        requested_model: input.requested_model.clone(),
         handoff: Some(AgentHandoffConfirmation {
             context: input.context.clone(),
             preview_hash: preview.hash.clone(),
@@ -2402,6 +2406,289 @@ async fn history_cursor_kind_scope_and_detail_ownership_are_checked_without_chan
         .fetch_one(&mut *connection).await.unwrap();
     assert_eq!(after, original);
     assert_eq!(runner.count_all(), 0);
+}
+
+fn model_preview_input(model: &str) -> PreviewAgentHandoffInput {
+    let mut input = serde_json::to_value(preview_input(false)).unwrap();
+    input["requestedModel"] = json!(model);
+    serde_json::from_value(input).unwrap()
+}
+
+fn model_start_input(
+    input: &PreviewAgentHandoffInput,
+    preview: &AgentHandoffPreview,
+    model: &str,
+) -> StartTaskInput {
+    let mut task = serde_json::to_value(confirmed_task(input, preview)).unwrap();
+    task["requestedModel"] = json!(model);
+    serde_json::from_value(task).unwrap()
+}
+
+fn model_runtime(runtime: &str) -> Value {
+    ok(
+        json!({"runtime":{"reachable":true,"state":"ready","runtimeId":runtime,"capabilities":["orchestration.contract.v1","orchestration.worker-launch-preferences.v1"]},"graph":{"state":"ready"}}),
+    )
+}
+
+fn model_start_receipt(model: &str) -> Value {
+    ok(
+        json!({"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","state":"ready","launch":{"requested":{"agent":"omp","model":model,"effort":null},"effective":{"agent":"omp","model":model,"effort":null}}}),
+    )
+}
+
+#[tokio::test]
+async fn model_selection_is_omitted_by_default_and_frozen_in_handoff_hash() {
+    let (_, store, _, service) = setup().await;
+    ready(&store).await;
+    let legacy = legacy_task_input();
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap(),
+        json!({"operationId":OP,"missionId":MISSION,"title":legacy.title,"spec":legacy.spec})
+    );
+    let input = preview_input(false);
+    let default_preview = service.preview_handoff(input.clone()).await.unwrap();
+    assert!(
+        serde_json::to_value(&input)
+            .unwrap()
+            .get("requestedModel")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&default_preview)
+            .unwrap()
+            .get("requestedModel")
+            .is_none()
+    );
+    assert_eq!(
+        default_preview.hash,
+        "13571531395596f5594cb7e2a5b151b075e9de2648f52555c19a3d4132b51f25"
+    );
+    let first = service
+        .preview_handoff(model_preview_input("provider/model-one"))
+        .await
+        .unwrap();
+    let second = service
+        .preview_handoff(model_preview_input("@reviewer"))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&first).unwrap()["requestedModel"],
+        "provider/model-one"
+    );
+    assert_ne!(default_preview.hash, first.hash);
+    assert_ne!(first.hash, second.hash);
+    assert_eq!(default_preview.text, first.text);
+    let mut old_preview = serde_json::to_value(default_preview).unwrap();
+    old_preview["hash"] = json!("historic-hash");
+    let restored: AgentHandoffPreview = serde_json::from_value(old_preview.clone()).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), old_preview);
+}
+
+#[tokio::test]
+async fn model_selection_validation_is_bounded_and_runs_before_runtime_access() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    let valid = service.preview_handoff(preview_input(false)).await.unwrap();
+    for model in [
+        "".to_owned(),
+        " ".into(),
+        " model".into(),
+        "model ".into(),
+        "\u{feff}provider/model".into(),
+        "provider/model\u{feff}".into(),
+        "model\n".into(),
+        "a\u{0085}b".into(),
+        "x".repeat(513),
+        "😀".repeat(257),
+    ] {
+        let input = model_preview_input(&model);
+        assert_eq!(
+            service
+                .preview_handoff(input.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "agent_model"
+        );
+        let task = model_start_input(&input, &valid, &model);
+        assert_eq!(
+            service.start_task(task).await.unwrap_err().code,
+            "agent_model"
+        );
+    }
+    for model in ["provider/model", "@reviewer", &"😀".repeat(256)] {
+        service
+            .preview_handoff(model_preview_input(model))
+            .await
+            .unwrap();
+    }
+    assert_eq!(runner.count_all(), 0);
+    assert!(store.operations(MISSION).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn model_selection_requires_capability_and_same_mission_runtime_before_dispatch() {
+    for status in [None, Some(model_runtime("another-runtime"))] {
+        let (_, store, runner, service) = setup().await;
+        ready(&store).await;
+        let input = model_preview_input("provider/model");
+        let preview = service.preview_handoff(input.clone()).await.unwrap();
+        if let Some(status) = status {
+            runner.override_next("status --json", Ok(status));
+        }
+        assert!(
+            service
+                .start_task(model_start_input(&input, &preview, "provider/model"))
+                .await
+                .is_err()
+        );
+        assert_eq!(runner.count("status --json"), 1);
+        assert_eq!(runner.count("orchestration worker-start"), 0);
+        assert!(store.operations(MISSION).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn model_selection_is_single_native_argument_and_replays_offline() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    let model = "provider/model;$(literal)";
+    let input = model_preview_input(model);
+    let preview = service.preview_handoff(input.clone()).await.unwrap();
+    let task = model_start_input(&input, &preview, model);
+    runner.override_next("status --json", Ok(model_runtime("runtime-1")));
+    let receipt = model_start_receipt(model);
+    runner.override_next("orchestration worker-start", Ok(receipt.clone()));
+    let result = service.start_task(task.clone()).await.unwrap();
+    assert_eq!(result.status, "succeeded");
+    assert_eq!(result.receipt, receipt);
+    let calls = runner.calls.lock().unwrap().clone();
+    let launch = calls
+        .iter()
+        .find(|args| args.get(1).map(String::as_str) == Some("worker-start"))
+        .unwrap();
+    assert_eq!(
+        launch
+            .iter()
+            .filter(|arg| arg.as_str() == "--model")
+            .count(),
+        1
+    );
+    assert_eq!(argument(launch, "--model"), Some(model));
+    assert!(!launch.iter().any(|arg| arg == "--effort"));
+    assert_eq!(runner.count("status --json"), 1);
+    assert!(runner.handoff_observed.load(Ordering::SeqCst));
+    assert_eq!(
+        serde_json::to_value(store.handoffs(MISSION).await.unwrap()).unwrap()[0]["preview"]["requestedModel"],
+        model
+    );
+    let before = runner.count_all();
+    runner.override_next(
+        "status --json",
+        Err(RuntimeFailure {
+            message: "offline".into(),
+            ambiguous: false,
+            receipt: json!({}),
+        }),
+    );
+    assert_eq!(service.start_task(task).await.unwrap().receipt, receipt);
+    assert_eq!(runner.count_all(), before);
+}
+
+#[tokio::test]
+async fn changed_model_invalidates_confirmation_without_dispatch() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    let input = model_preview_input("provider/first");
+    let preview = service.preview_handoff(input.clone()).await.unwrap();
+    runner.override_next("status --json", Ok(model_runtime("runtime-1")));
+    let error = service
+        .start_task(model_start_input(&input, &preview, "provider/second"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "agent_handoff_stale");
+    assert_eq!(runner.count("orchestration worker-start"), 0);
+    assert!(store.operations(MISSION).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn model_selection_refusal_is_recorded_without_fallback() {
+    let (_, store, runner, service) = setup().await;
+    ready(&store).await;
+    let input = model_preview_input("provider/model");
+    let preview = service.preview_handoff(input.clone()).await.unwrap();
+    let task = model_start_input(&input, &preview, "provider/model");
+    runner.override_next("status --json", Ok(model_runtime("runtime-1")));
+    let refusal = json!({"ok":false,"error":{"code":"invalid_argument","message":"This agent does not support --model"}});
+    runner.override_next(
+        "orchestration worker-start",
+        Err(RuntimeFailure {
+            message: "This agent does not support --model".into(),
+            ambiguous: false,
+            receipt: refusal.clone(),
+        }),
+    );
+    let operation = service.start_task(task.clone()).await.unwrap();
+    assert_eq!(operation.status, "failed");
+    assert_eq!(operation.receipt, refusal);
+    assert_eq!(service.start_task(task).await.unwrap().receipt, refusal);
+    assert_eq!(runner.count("orchestration worker-start"), 1);
+}
+
+#[tokio::test]
+async fn missing_or_mismatched_model_launch_receipts_are_unknown_and_block_new_ids() {
+    let model = "provider/model";
+    let mut variants = vec![];
+    let mut missing = model_start_receipt(model);
+    missing["result"].as_object_mut().unwrap().remove("launch");
+    variants.push(missing);
+    for (pointer, value) in [
+        ("/result/launch/effective", Value::Null),
+        ("/result/launch/requested/agent", json!("codex")),
+        ("/result/launch/effective/agent", json!("codex")),
+        ("/result/launch/requested/model", json!("other/model")),
+        ("/result/launch/effective/model", json!("other/model")),
+        ("/result/launch/requested/effort", json!("high")),
+        ("/result/launch/effective/effort", json!("high")),
+        ("/result/runId", json!("foreign-run")),
+        ("/result/taskId", Value::Null),
+        ("/result/dispatchId", Value::Null),
+    ] {
+        let mut receipt = model_start_receipt(model);
+        *receipt.pointer_mut(pointer).unwrap() = value;
+        variants.push(receipt);
+    }
+    for selection in ["requested", "effective"] {
+        let mut missing_effort = model_start_receipt(model);
+        missing_effort["result"]["launch"][selection]
+            .as_object_mut()
+            .unwrap()
+            .remove("effort");
+        variants.push(missing_effort);
+    }
+    for receipt in variants {
+        let (_, store, runner, service) = setup().await;
+        ready(&store).await;
+        let input = model_preview_input(model);
+        let preview = service.preview_handoff(input.clone()).await.unwrap();
+        let task = model_start_input(&input, &preview, model);
+        runner.override_next("status --json", Ok(model_runtime("runtime-1")));
+        runner.override_next("orchestration worker-start", Ok(receipt.clone()));
+        let operation = service.start_task(task.clone()).await.unwrap();
+        assert_eq!(operation.status, "unknown", "{receipt}");
+        assert_eq!(operation.receipt, receipt);
+        let before = runner.count_all();
+        assert_eq!(
+            service.start_task(task.clone()).await.unwrap().status,
+            "unknown"
+        );
+        assert_eq!(runner.count_all(), before);
+        let mut replacement = task;
+        replacement.operation_id = SECOND_OP.into();
+        runner.override_next("status --json", Ok(model_runtime("runtime-1")));
+        assert!(service.start_task(replacement).await.is_err());
+        assert_eq!(runner.count("orchestration worker-start"), 1);
+    }
 }
 
 #[tokio::test]

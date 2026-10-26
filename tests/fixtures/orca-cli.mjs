@@ -8,7 +8,7 @@ import { setTimeout } from "node:timers/promises";
 const argv = process.argv.slice(2);
 const statePath = process.env.TF_AGENT_FIXTURE_STATE;
 const runtimeId = "fixture-runtime";
-const version = "1.4.206-fixture";
+const version = "1.4.237-fixture";
 const repoPath = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workspaceId = `fixture-repo::${repoPath}`;
 const fixtureMarker = "ThoughtsFlow Orca CLI fixture";
@@ -100,7 +100,7 @@ try {
     } else {
       switch (command) {
         case "status":
-          result = { target: { kind: "local" }, app: { running: true, pid: 12345 }, runtime: { state: "ready", reachable: true, runtimeId, appVersion: version, capabilities: ["orchestration.contract.v1"] }, graph: { state: "ready" } };
+          result = { target: { kind: "local" }, app: { running: true, pid: 12345 }, runtime: { state: "ready", reachable: true, runtimeId, appVersion: version, capabilities: ["orchestration.contract.v1", "orchestration.worker-launch-preferences.v1"] }, graph: { state: "ready" } };
           break;
         case "repo list":
           result = { repos: [{ id: "fixture-repo", name: "ThoughtsFlow", path: repoPath, kind: "git", baseRef: "main", defaultBranch: "main" }] };
@@ -141,13 +141,15 @@ try {
         case "orchestration worker-start": {
           const selected = coordinator(required("run"));
           if (required("agent") !== "omp") fail("invalid_argument", "Fixture only supports OMP workers.");
+          if (flag("effort") !== undefined) fail("invalid_argument", "OMP workers do not support effort overrides.");
           const taskId = nextId("task");
           const dispatchId = nextId("dispatch");
           const worker = { dispatchId, taskId, runId: selected.id, workerState: "ready", dispatchStatus: "dispatched", agentTerminalHandle: nextId("worker"), terminalState: "active", worktreeId: workspaceId, resource: { ownerDispatchId: dispatchId, ownershipState: "owned", releaseState: "active" } };
           state.workers.push(worker);
           state.tasks.push({ id: taskId, run_id: selected.id, spec: required("spec"), task_title: flag("task-title") ?? "OMP fixture task", display_name: null, status: "dispatched", assignee_handle: worker.agentTerminalHandle, dispatch_id: dispatchId, deps: "[]", result: null, created_at: now(), updated_at: now() });
           message({ runId: selected.id, from: worker.agentTerminalHandle, to: `run:${selected.id}`, type: "question", subject: "OMP fixture question", body: "是否继续执行这项验证任务？", payload: { taskId, dispatchId, options: ["继续", "说明要求"] } });
-          result = { runId: selected.id, taskId, dispatchId, state: "ready", stage: "input_accepted", turnStart: "observed", setup: { state: "not_applicable" }, effects: [], residualResources: [] };
+          const selection = { agent: "omp", model: flag("model") ?? null, effort: null };
+          result = { runId: selected.id, taskId, dispatchId, state: "ready", stage: "input_accepted", turnStart: "observed", setup: { state: "not_applicable" }, effects: [], residualResources: [], launch: { requested: selection, effective: { ...selection } } };
           break;
         }
         case "orchestration task-list": {

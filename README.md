@@ -33,7 +33,7 @@ ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择
 3. 填写任务范围与验收要求，按需选择当前图谱上下文和已有输出证据，查看交接预览后启动。
 4. 查看任务与执行状态，在需要时回复协作问题。保存输出观察，审阅后选择它作为下一任务的输入。
 
-主路径无需在 ThoughtsFlow 输入 API Key、Base URL 或 Provider。当前 Agent 模型选择沿用 OMP 配置；Orca worker 未支持 OMP 模型覆盖时，工作台不会显示无效选择器。ThoughtsFlow 不附带模型，也不提供调用额度。
+主路径无需在 ThoughtsFlow 输入 API Key、Base URL 或 Provider。模型默认“沿用 OMP 配置”；也可选择“指定本次模型”，填写已有 OMP 原生选择器，例如 `provider/model` 或 `@smol`，再预览交接。该选项需要 Orca 支持 OMP worker 模型参数，不支持时会拒绝请求，不会悄悄改用默认模型。工作台不自动读取原生模型目录，也不提供 effort 覆盖。界面记录的“请求模型”是交给 OMP 的选择器，实际模型解析仍由 OMP 完成。ThoughtsFlow 不附带模型，也不提供调用额度。
 
 ## 兼容入口：直连模型
 
@@ -59,7 +59,7 @@ ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择
 任务由 Orca 在独立工作区中启动 OMP；ThoughtsFlow 查看进度、读取输出并回复协作问题。任务结果由 Orca 的准确 Task/Dispatch 关联确认，执行器退出不等于成功。
 
 - Agent 使用 OMP 自己的配置。普通对话历史和已有证据只有经显式选择、预览后才随任务交接。
-- 交接 hash 覆盖工作台发给 harness 的文本；不声称包含 Agent 内部提示、工具结果或所有模型请求。已保存输出是一页观察，分页末尾也不能单独证明完整或成功。
+- 交接 hash 冻结工作台提交的文本、来源与可选的请求模型；不声称包含 Agent 内部提示、工具结果或所有模型请求。启动回执核对请求参数，不证明实际模型用量。已保存输出是一页观察，分页末尾也不能单独证明完整或成功。
 - 任务由人工拆分和审查；当前不会自动合并代码或把结果自动采纳到 Decision Packet。
 - 工具审批及停止正在运行的任务继续在 Orca/OMP 原生界面处理。
 - Git worktree 提供代码隔离，**不提供操作系统权限沙箱**。
@@ -138,7 +138,7 @@ ThoughtsFlow 是独立项目，与上述项目没有官方隶属或背书关系�
 
 ## English overview
 
-ThoughtsFlow is a local-first Agent workbench for graphical context management and workflow orchestration. The primary workflow reuses separately installed Orca and OMP, including the Agent's existing model configuration, tools, Skills and approvals. Preview exact context handoffs, save immutable output observations, and explicitly reuse evidence in later tasks without setting up another Provider.
+ThoughtsFlow is a local-first Agent workbench for graphical context management and workflow orchestration. The primary workflow reuses separately installed Orca and OMP, including the Agent's existing model configuration, tools, Skills and approvals. Tasks inherit OMP configuration by default; an optional native model selector can be frozen into the handoff when the runtime supports it. This records the requested selector, not the actual model used. Preview exact context handoffs, save immutable output observations, and explicitly reuse evidence in later tasks without setting up another Provider.
 
 Built with Tauri 2, React, TypeScript, Rust and SQLite. Existing direct-model conversations and four streaming protocols remain compatibility features. Historical receipts remain unchanged; a handoff records the input delivered to an Agent harness, not all internal model requests. Saved evidence is a bounded output observation, not proof of success. Native general-purpose Agent chat and automatic DAG scheduling are not implemented. Local databases are not encrypted.
 

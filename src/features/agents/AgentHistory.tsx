@@ -98,6 +98,7 @@ export const AgentHistory = memo(function AgentHistory({ bridge, workspaceId, mi
       >{(detail) => <>
         <p>记录时间 {detail.createdAt}</p>
         <p>操作 {detail.operationId} · 协作 {detail.missionId} · 工作区 {detail.workspaceId}</p>
+        <p>请求模型：{detail.preview.requestedModel ?? "沿用 Agent 配置"}（不代表实际使用的模型）</p>
         <pre>{detail.preview.text}</pre>
         <p>来源回答：{detail.preview.sourceRunIds.join(", ") || "无"} · 输出观察：{detail.preview.evidenceIds.join(", ") || "无"}</p>
         <code>{detail.preview.hash}</code>

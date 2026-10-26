@@ -24,8 +24,10 @@ test("requires opt-in and exercises coordinator, question, completion, and relea
     assert.equal(current.id, runId);
     assert.equal(current.consumer_generation, 1);
     assert.equal(current.coordinator_handle, coordinator);
-    const launchArgs = ["orchestration", "worker-start", "--run", runId, "--from", coordinator, "--agent", "omp", "--spec", "Perform fixture verification", "--retry-request", "fixed-request"];
+    assert.throws(() => cli("orchestration", "worker-start", "--run", runId, "--from", coordinator, "--agent", "omp", "--spec", "Unsupported preference", "--effort", "high"), (error) => JSON.parse(String(error.stdout)).error.code === "invalid_argument");
+    const launchArgs = ["orchestration", "worker-start", "--run", runId, "--from", coordinator, "--agent", "omp", "--model", "@smol", "--spec", "Perform fixture verification", "--retry-request", "fixed-request"];
     const started = cli(...launchArgs);
+    assert.deepEqual(started.launch, { requested: { agent: "omp", model: "@smol", effort: null }, effective: { agent: "omp", model: "@smol", effort: null } });
     assert.equal(cli(...launchArgs).mutation.replayed, true);
     const stateBeforeRead = readFileSync(env.TF_AGENT_FIXTURE_STATE, "utf8");
     const peek = cli("orchestration", "check", "--run", runId, "--terminal", coordinator, "--peek");

@@ -1,6 +1,7 @@
 export interface AgentTaskDraft {
   title: string;
   spec: string;
+  requestedModel?: string;
   includeActiveContext: boolean;
   evidenceIds: string[];
 }

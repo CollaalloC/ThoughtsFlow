@@ -16,7 +16,7 @@ const argv = process.argv.slice(2);
 if (state && existsSync(state + ".offline")) {
   appendFileSync(state + ".offline-calls.jsonl", JSON.stringify({ argv, at: new Date().toISOString() }) + "\\n");
   if (argv.length === 1 && argv[0] === "--version") {
-    process.stdout.write("1.4.206-fixture\\n");
+    process.stdout.write("1.4.237-fixture\\n");
   } else if (argv[0] === "status") {
     process.stdout.write(JSON.stringify({ ok: true, result: { runtime: { state: "not_running", reachable: false, runtimeId: null }, graph: { state: "not_running" } }, _meta: { runtimeId: "none" } }) + "\\n");
   } else {

@@ -112,6 +112,11 @@ impl AgentService {
     }
 
     async fn live_runtime(&self) -> AppResult<String> {
+        runtime_id(&self.live_status().await?)
+            .ok_or_else(|| invalid("Orca 未返回运行时标识，请更新或重新打开 Orca。"))
+    }
+
+    async fn live_status(&self) -> AppResult<Value> {
         let status = self.call(&["status", "--json"]).await?;
         if status
             .pointer("/result/runtime/reachable")
@@ -142,7 +147,7 @@ impl AgentService {
                 "此 Orca 运行时不支持 orchestration.contract.v1，请更新 Orca 后重试。",
             ));
         }
-        runtime_id(&status).ok_or_else(|| invalid("Orca 未返回运行时标识，请更新或重新打开 Orca。"))
+        Ok(status)
     }
 
     async fn projects(&self) -> AppResult<Vec<AgentProject>> {
@@ -632,8 +637,10 @@ impl AgentService {
             .await
     }
 
-    async fn require_connection(&self, mission: &AgentMission) -> AppResult<()> {
-        let runtime = self.live_runtime().await?;
+    async fn require_connection(&self, mission: &AgentMission) -> AppResult<Value> {
+        let status = self.live_status().await?;
+        let runtime = runtime_id(&status)
+            .ok_or_else(|| invalid("Orca 未返回运行时标识，请更新或重新打开 Orca。"))?;
         if mission.runtime_id.as_deref() != Some(&runtime) {
             return Err(invalid(
                 "Orca 已重启，终端句柄已失效。请使用“重新连接”恢复此任务。",
@@ -661,7 +668,7 @@ impl AgentService {
         {
             return Err(invalid("协调终端绑定已改变，请使用“重新连接”确认并恢复。"));
         }
-        Ok(())
+        Ok(status)
     }
 
     async fn workers(&self, mission: &AgentMission) -> AppResult<Vec<Value>> {
@@ -871,8 +878,24 @@ impl AgentService {
                 "请先预览并确认交接内容。尚未派发。",
             )
         })?;
+        super::context::validate_requested_model(input.requested_model.as_deref())?;
         let mission = self.mission(&input.mission_id).await?;
-        self.require_connection(&mission).await?;
+        let status = self.require_connection(&mission).await?;
+        if input.requested_model.is_some()
+            && !status
+                .pointer("/result/runtime/capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|capabilities| {
+                    capabilities.iter().any(|capability| {
+                        capability.as_str() == Some("orchestration.worker-launch-preferences.v1")
+                    })
+                })
+        {
+            return Err(AppError::validation(
+                "agent_model_unsupported",
+                "当前 Orca 运行时未声明模型覆盖能力。尚未派发；可检查 Orca，或重新选择沿用 Agent 配置并预览。",
+            ));
+        }
         if self
             .store
             .operations(&mission.id)
@@ -911,6 +934,7 @@ impl AgentService {
                     mission_id: input.mission_id.clone(),
                     title: input.title.clone(),
                     spec: input.spec.clone(),
+                    requested_model: input.requested_model.clone(),
                     context: confirmation.context.clone(),
                 },
             )
@@ -927,7 +951,7 @@ impl AgentService {
         let spec = prepared.preview.text.clone();
         let name = format!("tf-{}", input.operation_id.replace('-', ""));
         let repository = format!("id:{}", mission.repository_id);
-        let arguments = args(&[
+        let mut arguments = args(&[
             "orchestration",
             "worker-start",
             "--spec",
@@ -952,6 +976,9 @@ impl AgentService {
             "60000",
             "--json",
         ]);
+        if let Some(model) = input.requested_model.as_deref() {
+            arguments.extend(args(&["--model", model]));
+        }
         let operation = self
             .store
             .begin_handoff(&input.operation_id, &mission, &request, prepared)
@@ -962,6 +989,7 @@ impl AgentService {
                 arguments,
                 ExpectedReceipt::StartTask {
                     run_id: mission.run_id.as_deref().unwrap(),
+                    requested_model: input.requested_model.as_deref(),
                 },
             )
             .await?;

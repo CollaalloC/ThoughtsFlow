@@ -39,12 +39,31 @@ fn invalid(message: impl Into<String>) -> AppError {
     AppError::validation("agent_handoff", message)
 }
 
+pub(super) fn validate_requested_model(model: Option<&str>) -> AppResult<()> {
+    if model.is_some_and(|model| {
+        model.is_empty()
+            || model
+                != model.trim_matches(|character: char| {
+                    character.is_whitespace() || character == '\u{feff}'
+                })
+            || model.encode_utf16().count() > 512
+            || model.chars().any(char::is_control)
+    }) {
+        return Err(AppError::validation(
+            "agent_model",
+            "模型选择器须为 1–512 个 UTF-16 单元，不能包含控制字符或首尾空白。",
+        ));
+    }
+    Ok(())
+}
+
 impl store::AgentStore {
     pub(super) async fn prepare_handoff(
         &self,
         mission: &AgentMission,
         input: &PreviewAgentHandoffInput,
     ) -> AppResult<PreparedHandoff> {
+        validate_requested_model(input.requested_model.as_deref())?;
         if input.mission_id != mission.id || input.context.evidence_ids.len() > 32 {
             return Err(invalid("交接任务不匹配，或选择的输出证据超过 32 项。"));
         }
@@ -194,6 +213,7 @@ impl store::AgentStore {
         let mut preview = AgentHandoffPreview {
             hash: String::new(),
             title: input.title.clone(),
+            requested_model: input.requested_model.clone(),
             text,
             compiler_version: format!(
                 "{HANDOFF_VERSION}; context/{}",

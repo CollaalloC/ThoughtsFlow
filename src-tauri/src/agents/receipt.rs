@@ -9,6 +9,7 @@ pub(super) enum ExpectedReceipt<'a> {
     },
     StartTask {
         run_id: &'a str,
+        requested_model: Option<&'a str>,
     },
     Reply {
         question_id: &'a str,
@@ -67,10 +68,26 @@ pub(super) fn validate(receipt: &Value, expected: ExpectedReceipt<'_>) -> Result
                 );
             }
         }
-        ExpectedReceipt::StartTask { run_id } => {
+        ExpectedReceipt::StartTask {
+            run_id,
+            requested_model,
+        } => {
             required(receipt, "/result/dispatchId")?;
             required(receipt, "/result/taskId")?;
             equals(receipt, "/result/runId", run_id)?;
+            if let Some(model) = requested_model {
+                // This proves launch parameters only, not the model actually used by OMP.
+                for selection in ["requested", "effective"] {
+                    let prefix = format!("/result/launch/{selection}");
+                    equals(receipt, &format!("{prefix}/agent"), "omp")?;
+                    equals(receipt, &format!("{prefix}/model"), model)?;
+                    if receipt.pointer(&format!("{prefix}/effort")) != Some(&Value::Null) {
+                        return Err(format!(
+                            "Orca 回执的 {prefix}/effort 未确认无覆盖；已保留原始回执，不会自动重发。"
+                        ));
+                    }
+                }
+            }
         }
         ExpectedReceipt::Reply {
             question_id,

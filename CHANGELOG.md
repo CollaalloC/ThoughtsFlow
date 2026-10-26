@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ### Agent workbench
 
+- Optionally request an existing OMP model selector for one task while inheriting OMP configuration by default. Freeze the selection in the handoff and validate Orca's requested/effective launch parameters; mismatches remain unknown and are never automatically redispatched. Model discovery and effort overrides are not implemented.
 - Page Agent history in groups of 50 summaries and fetch immutable bodies only when expanded, with explicit navigation back to the newest records and selection retained across pages.
 - Preserve unsent tasks and selected Missions while navigating. Confirmed dispatches clear only their unchanged draft, including after a view is reopened; newer edits remain intact.
 - Prevent delayed initialization responses from overwriting newly created workspaces, Missions or newer environment checks.
@@ -18,8 +19,9 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ### Compatibility
 
-- Isolate Orca's new `ORCA_AGENT_SESSION_ID` from child CLI calls so inherited structured-session identity cannot conflict with the workbench coordinator.
-- Track OMP 18.6.1 and Orca 1.4.220 with fixed-source contract checks. Do not automatically upgrade installed runtimes.
+- Isolate Orca's `ORCA_AGENT_SESSION_ID` and child-only `ORCA_AGENT_SESSION_SPAWN_TOKEN` from child CLI calls so inherited session identity and ownership tokens cannot leak into the workbench coordinator.
+- Respect the selected output source's `limited` flag and require an advancing cursor before offering another output page.
+- Track OMP 18.12.6 and Orca 1.4.241 with fixed-source contract checks; installed versions observed were 18.12.5 and 1.4.237. Do not automatically upgrade installed runtimes or run OMP model discovery.
 
 ## 0.1.0-beta.2 — 2026-09-27
 

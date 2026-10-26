@@ -38,7 +38,7 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
     await expect(await $('[aria-label="Agent 工作台"]')).toBeDisplayed();
     await expect(await $('select[aria-label="Provider"]')).not.toExist();
     await createAgentWorkspace({ name: "Agent 原生验证", goal: "管理任务上下文与证据；无需配置 Provider，不调用模型" });
-    await waitForBodyText("1.4.206-fixture");
+    await waitForBodyText("1.4.237-fixture");
     const repository = await controlByLabel("代码仓库", "select");
     const option = await repository.$('option[value="fixture-repo"]');
     await selectOptionByText(repository, await option.getText());
@@ -88,11 +88,14 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
 
     await (await controlByLabel("任务标题")).setValue("复用已保存证据");
     await (await controlByLabel("任务说明", "textarea")).setValue("仅使用明确勾选的 fixture 观察继续验证；不调用模型，不修改代码。");
+    await selectOptionByText(await controlByLabel("模型选择", "select"), "指定本次模型");
+    await (await controlByLabel("请求模型")).setValue("fixture/model-v1");
     await evidenceChoice.click();
     await (await button("预览交接内容")).click();
     const reusedPreview = await $('[aria-label="交接预览"]');
     await reusedPreview.waitForDisplayed();
     await expect(reusedPreview).toHaveText(expect.stringContaining("输出观察 1"));
+    await expect(reusedPreview).toHaveText(expect.stringContaining("请求模型：fixture/model-v1"));
     await expect(await reusedPreview.$("pre")).toHaveText(expect.stringContaining(fixtureOutput));
     const reusedHandoffText = await (await reusedPreview.$("pre")).getProperty("textContent");
     const reusedHandoffHash = await (await reusedPreview.$("code")).getText();
@@ -115,9 +118,10 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
     expect(starts).toHaveLength(2);
     for (const argv of starts) {
       expect(argv[argv.indexOf("--agent") + 1]).toBe("omp");
-      expect(argv).not.toContain("--model");
       expect(argv).not.toContain("--effort");
     }
+    expect(starts[0]).not.toContain("--model");
+    expect(starts[1][starts[1].indexOf("--model") + 1]).toBe("fixture/model-v1");
     expect(starts[1][starts[1].indexOf("--spec") + 1]).toBe(reusedHandoffText);
     writeFileSync(`${statePath}.offline`, "fixture runtime intentionally offline\n");
     // Reload destroys all React state. The runtime wrapper now refuses reads
@@ -141,6 +145,7 @@ describe("Agent workbench through native IPC and an isolated fixture CLI", () =>
     }
     expect(hashes.sort()).toEqual([firstHandoffHash, reusedHandoffHash].sort());
     await expect(await $('[aria-label="历史任务交接"]')).toHaveText(expect.stringContaining(evidenceId));
+    await expect(await $('[aria-label="历史任务交接"]')).toHaveText(expect.stringContaining("fixture/model-v1"));
 
     await (await controlByLabel("任务标题")).setValue("离线准备下一任务");
     await (await controlByLabel("任务说明", "textarea")).setValue("只预览来源，离线时不得启动或重派。");

@@ -88,6 +88,7 @@ export interface StartAgentTaskInput {
   missionId: string;
   title: string;
   spec: string;
+  requestedModel?: string;
   handoff?: AgentHandoffConfirmation;
 }
 
@@ -124,6 +125,7 @@ export interface PreviewAgentHandoffInput {
   missionId: string;
   title: string;
   spec: string;
+  requestedModel?: string;
   context: AgentContextSelection;
 }
 
@@ -145,6 +147,7 @@ export interface AgentHandoffSource {
 
 export interface AgentHandoffPreview {
   title?: string;
+  requestedModel?: string;
   hash: string;
   text: string;
   compilerVersion: string;

@@ -123,6 +123,8 @@ pub struct StartTaskInput {
     pub title: String,
     pub spec: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<AgentHandoffConfirmation>,
 }
 
@@ -139,6 +141,8 @@ pub struct PreviewAgentHandoffInput {
     pub mission_id: String,
     pub title: String,
     pub spec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
     pub context: AgentContextSelection,
 }
 
@@ -168,6 +172,8 @@ pub struct AgentHandoffPreview {
     pub hash: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
     pub text: String,
     pub compiler_version: String,
     pub source_run_ids: Vec<String>,

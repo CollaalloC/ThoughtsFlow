@@ -384,7 +384,7 @@ function AgentMissionView({ bridge, mission, drafts }: { bridge: DesktopBridge; 
     try {
       operation = await send(operationId);
     } catch (reason) {
-      if (kind === "start-task" && reason instanceof DesktopBridgeError && ["agent_handoff_stale", "agent_handoff_required", "agent_handoff"].includes(reason.code)) {
+      if (kind === "start-task" && reason instanceof DesktopBridgeError && ["agent_handoff_stale", "agent_handoff_required", "agent_handoff", "agent_model", "agent_model_unsupported"].includes(reason.code)) {
         mutationInFlight.current = false;
         revision.current += 1;
         if (active.current) { setBusy(false); void refresh(); }
