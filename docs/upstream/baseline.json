@@ -1,37 +1,38 @@
 {
-  "checkedAt": "2026-10-26",
+  "checkedAt": "2026-11-02",
   "scope": "official stable releases, fixed-source contracts and locally installed metadata; no automatic runtime upgrade or model catalog probe",
   "omp": {
     "repository": "https://github.com/can1357/oh-my-pi",
-    "installedVersion": "18.12.5",
-    "latestStableVersion": "18.12.6",
-    "latestPublishedAt": "2026-10-21T21:02:53Z",
-    "latestCommit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
-    "releaseUrl": "https://github.com/can1357/oh-my-pi/releases/tag/v18.12.6",
+    "installedVersion": "18.13.2",
+    "latestStableVersion": "18.15.0",
+    "latestPublishedAt": "2026-11-01T14:17:08Z",
+    "latestCommit": "3fedf8d53267e32a6d7521ce725fdcc4a36fdc67",
+    "releaseUrl": "https://github.com/can1357/oh-my-pi/releases/tag/v18.15.0",
     "directRpcLifecycleSince": "18.3.1",
     "directRpcAdapterImplemented": false,
     "gatewayImplemented": true,
     "gatewayRequiresAuthBroker": true,
     "gatewayUsesLocalAgentCredentialsAutomatically": false,
     "firstObservedInstalledVersion": "18.2.10",
-    "installationNote": "Observed 18.12.5 from installation metadata and executable symlink on 2026-10-26. This review did not invoke omp, upgrade it or probe its model catalog.",
+    "installationNote": "Observed 18.13.2 from Homebrew installation receipt and executable symlink on 2026-11-02. This review did not invoke omp, upgrade it or probe its model catalog.",
     "gatewayImplementation": "http-auth-gateway-serve",
     "stdioGatewaySince": "18.4.12",
     "stdioGatewayImplemented": false,
     "stdioGatewayCanUseExistingAuthentication": true,
     "nativeModelCatalogImplemented": false,
     "nativeModelCatalogProbeReadOnly": false,
-    "nativeModelCatalogNote": "The models CLI can initialize or migrate settings/database state, load extensions and refresh provider authentication. No verified read-only mode; do not run it automatically."
+    "nativeModelCatalogNote": "The models CLI can initialize or migrate settings/database state, load extensions and refresh provider authentication. No verified read-only mode; do not run it automatically.",
+    "sessionLeaseProbeNote": "New lease status probes are candidates for a future Direct OMP adapter only; a free status snapshot does not grant ownership. No probe was executed during this review."
   },
   "orca": {
     "repository": "https://github.com/stablyai/orca",
-    "installedVersion": "1.4.237",
+    "installedVersion": "1.4.243",
     "installedBuild": null,
-    "installationNote": "Observed 1.4.237 on 2026-10-26; build hash unverified. This review did not upgrade or start Orca.",
-    "latestStableVersion": "1.4.241",
-    "latestPublishedAt": "2026-10-26T03:48:28Z",
-    "latestCommit": "041baf356b368d773f333e76375ce860fba2481b",
-    "releaseUrl": "https://github.com/stablyai/orca/releases/tag/v1.4.241",
+    "installationNote": "Observed 1.4.243 from CLI and app metadata on 2026-11-02; build hash unverified. This review did not upgrade or start Orca.",
+    "latestStableVersion": "1.4.245",
+    "latestPublishedAt": "2026-10-30T05:34:13Z",
+    "latestCommit": "1c6ac8c3c4d2c3dec2cb5966d225ca2a0e0471d3",
+    "releaseUrl": "https://github.com/stablyai/orca/releases/tag/v1.4.245",
     "runtimeDuringInspection": "not_running",
     "requiredCapability": "orchestration.contract.v1",
     "runtimeCapabilityVerifiedDuringInspection": false,
@@ -40,7 +41,7 @@
     "isolatedCallerEnvironment": [
       "ORCA_AGENT_SESSION_ID"
     ],
-    "ompWorkerModelOverrideSupportBasis": "Verified installed-version contract and latest stable fixed source; no online capability handshake or real model dispatch during this review.",
+    "ompWorkerModelOverrideSupportBasis": "Installed-version CLI help and latest stable fixed source retain OMP --model only; no online capability handshake or real model dispatch during this review.",
     "ompWorkerEffortOverrideSupported": false,
     "requestedOmpModelSelectorImplemented": true,
     "requiredModelOverrideCapability": "orchestration.worker-launch-preferences.v1",
@@ -66,9 +67,9 @@
         "windows-latest",
         "macos-latest"
       ],
-      "scope": "Historical Desktop CI core checks and native MockRuntime IPC for the stated commit; October 26 changes have not run on remote runners."
+      "scope": "Historical Desktop CI core checks and native MockRuntime IPC for the stated commit. Current code through 3384237 has only local evidence; this review did not trigger remote runners."
     },
-    "review": "2026-10-26.md",
+    "review": "2026-11-02.md",
     "modelOverrideRuntime": "fixture-only; real Orca-supervised model override not yet verified"
   }
 }
