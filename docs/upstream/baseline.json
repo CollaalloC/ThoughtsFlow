@@ -1,6 +1,6 @@
 {
-  "checkedAt": "2026-11-02",
-  "scope": "official stable releases, fixed-source contracts and locally installed metadata; no automatic runtime upgrade or model catalog probe",
+  "checkedAt": "2026-11-04",
+  "scope": "herdr-core 0.1.17 installed binary, official pinned tag and isolated generation-1 RPC; legacy Orca integration retired",
   "omp": {
     "repository": "https://github.com/can1357/oh-my-pi",
     "installedVersion": "18.13.2",
@@ -24,7 +24,31 @@
     "nativeModelCatalogNote": "The models CLI can initialize or migrate settings/database state, load extensions and refresh provider authentication. No verified read-only mode; do not run it automatically.",
     "sessionLeaseProbeNote": "New lease status probes are candidates for a future Direct OMP adapter only; a free status snapshot does not grant ownership. No probe was executed during this review."
   },
-  "orca": {
+  "verification": {
+    "lastRealOmpVersion": "18.2.8",
+    "lastRealOrcaVersion": "1.4.206",
+    "windowsRuntime": "not-yet-verified",
+    "linuxRuntime": "not-yet-verified",
+    "runtimeScope": "Installed herdr-core with isolated config/state and no-model program; model-backed Agent acceptance is not established.",
+    "ci": "previous-baseline-passed-on-three-platforms",
+    "ciEvidence": {
+      "runUrl": "https://github.com/CollaalloC/ThoughtsFlow/actions/runs/36253970625",
+      "commit": "3e24dafa09ece6a84ffef74957604c4f0c5aa280",
+      "platforms": [
+        "ubuntu-24.04",
+        "windows-latest",
+        "macos-latest"
+      ],
+      "scope": "Historical Desktop CI core checks and native MockRuntime IPC for the stated commit. Current code through 3384237 has only local evidence; this review did not trigger remote runners."
+    },
+    "review": "2026-11-04.md",
+    "modelOverrideRuntime": "legacy Orca only; retired from new launches",
+    "legacyRealOmpTest": "2026-09-22",
+    "lastIsolatedHerdrTest": "2026-11-04",
+    "herdrModelCalled": false
+  },
+  "activeRuntime": "herdr-core",
+  "legacyOrca": {
     "repository": "https://github.com/stablyai/orca",
     "installedVersion": "1.4.243",
     "installedBuild": null,
@@ -49,27 +73,24 @@
     "requestedModelIsActualModelEvidence": false,
     "isolatedChildOwnershipEnvironment": [
       "ORCA_AGENT_SESSION_SPAWN_TOKEN"
-    ]
+    ],
+    "activeAdapterImplemented": false
   },
-  "verification": {
-    "lastRealOmpTest": "2026-09-22",
-    "lastRealOmpVersion": "18.2.8",
-    "lastRealOrcaVersion": "1.4.206",
-    "windowsRuntime": "not-yet-verified",
-    "linuxRuntime": "not-yet-verified",
-    "runtimeScope": "Real Orca-supervised OMP execution; fixture, MockRuntime IPC and installer checks do not establish this.",
-    "ci": "previous-baseline-passed-on-three-platforms",
-    "ciEvidence": {
-      "runUrl": "https://github.com/CollaalloC/ThoughtsFlow/actions/runs/36253970625",
-      "commit": "3e24dafa09ece6a84ffef74957604c4f0c5aa280",
-      "platforms": [
-        "ubuntu-24.04",
-        "windows-latest",
-        "macos-latest"
-      ],
-      "scope": "Historical Desktop CI core checks and native MockRuntime IPC for the stated commit. Current code through 3384237 has only local evidence; this review did not trigger remote runners."
-    },
-    "review": "2026-11-02.md",
-    "modelOverrideRuntime": "fixture-only; real Orca-supervised model override not yet verified"
+  "herdr": {
+    "repository": "https://github.com/herdrdev/herdr-core",
+    "installedVersion": "0.1.17",
+    "verifiedTag": "v0.1.17",
+    "verifiedCommit": "ce87721557176f6cddaac1c7aefbf76929923263",
+    "protocolGeneration": 1,
+    "minimumRuntimeVersion": "0.1.17",
+    "transport": "JSON-RPC 2.0 lines over herdr-core connect",
+    "session": "thoughtsflow",
+    "templateCatalogImplemented": true,
+    "nativeModelCatalogImplemented": false,
+    "modelsOwnedByNativeTemplate": true,
+    "automaticWorktrees": false,
+    "automaticTaskAcceptance": false,
+    "installedRuntimeUpgraded": false,
+    "latestReleaseNote": "Official core repository latest-release API returned 404; this baseline pins the installed official tag rather than claiming a latest stable release."
   }
 }

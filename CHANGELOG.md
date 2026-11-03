@@ -6,7 +6,12 @@ Notable user-facing changes are recorded here. Pre-release status and available 
 
 ### Agent workbench
 
-- Optionally request an existing OMP model selector for one task while inheriting OMP configuration by default. Freeze the selection in the handoff and validate Orca's requested/effective launch parameters; mismatches remain unknown and are never automatically redispatched. Model discovery and effort overrides are not implemented.
+- Replace active Orca orchestration with herdr-core generation-1 JSON-RPC and existing native Agent templates. Preserve legacy Orca missions as read-only history.
+- Add schema 11 execution bindings without rewriting receipts, handoffs or hashes. Freeze template selection, confirm first-message delivery, and keep unknown operations from being redispatched.
+- Make working-directory ownership and shared-file behavior explicit; distinguish reported completion and process exit from task acceptance.
+
+
+- Preserve historical Orca handoffs, including their requested OMP model selectors. New launches use Herdr templates and their native configuration.
 - Page Agent history in groups of 50 summaries and fetch immutable bodies only when expanded, with explicit navigation back to the newest records and selection retained across pages.
 - Preserve unsent tasks and selected Missions while navigating. Confirmed dispatches clear only their unchanged draft, including after a view is reopened; newer edits remain intact.
 - Prevent delayed initialization responses from overwriting newly created workspaces, Missions or newer environment checks.

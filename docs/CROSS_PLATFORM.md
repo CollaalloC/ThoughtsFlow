@@ -8,7 +8,7 @@ ThoughtsFlow 的目标平台是 Windows、Linux 和 macOS。当前已准备三�
 
 React 工作台、IPC 数据结构、Rust 业务服务和 SQLite 数据以共用代码实现。操作系统差异集中在 Tauri 系统依赖、原生程序定位和进程启动处。模型厂商由 Provider adapter 处理，不能把模型协议与操作系统绑定。
 
-ThoughtsFlow 的核心推演功能通过自己的 Provider 运行。Agent 协作另依赖本机 Orca/OMP 的实际可用性与协议能力。三平台编译通过不等于 Orca/OMP 在三平台均已可用；运行时诊断必须报告缺失或不兼容，不能将编译目标当成运行能力。
+ThoughtsFlow 的核心推演功能通过自己的 Provider 运行。Agent 协作依赖本机 herdr-core 与用户模板选择的 Agent。三平台编译通过不等于这些运行时在三平台均已实测；运行时诊断必须报告缺失或不兼容，不能将编译目标当成运行能力。
 
 构建和 WebView 测试脚本统一使用 Node 24。`.node-version` 与 `package.json` 的 engines 共同限定该主版本，以直接运行仓库内的 TypeScript 测试入口。`scripts/desktop-toolchain.ts` 构造程序路径、独立 argv 和子进程环境，再由 Node 启动已安装包声明的 JS CLI 入口。它不调用 shell、不执行 `.bin/*.cmd`，路径含空格和参数中的 shell 字符保持原样。
 
@@ -18,6 +18,8 @@ ThoughtsFlow 的核心推演功能通过自己的 Provider 运行。Agent 协作
 - WebView 构建以绝对 `CARGO_TARGET_DIR` 输出到 `src-tauri/target/webview-e2e`，运行配置与构建目录一致。
 - WebView 服务向应用传入可信的 `process.execPath` 作为 `THOUGHSFLOW_NODE_BIN`，避免图形界面启动时 PATH 缺少 Node。
 - `scripts/run-native-test.mjs` 保留原有 Cargo 查找顺序与测试行为。
+
+Windows 上的 Herdr 模板需要 `sh`（例如 Git for Windows）。任务正文通过 JSON-RPC stdin 传输，不进入 Windows shell 命令行；本轮 Windows/Linux 的真实 core/Agent 执行尚未验证。
 
 ## 开发环境
 
@@ -46,7 +48,7 @@ npm run tauri:dev
 2. Cargo fmt、clippy、全部 target/feature 测试。
 3. Tauri debug 构建，不生成安装包、不启用测试 WebDriver。
 
-`.github/workflows/desktop-webview.yml` 仅手动触发，同样使用三平台矩阵。它构建带 `webview-e2e` 功能的独立测试应用，运行本地 Provider smoke、模拟 Orca 双 Agent 旅程和三进程崩溃恢复旅程。Linux 使用 D-Bus session 和 Xvfb；Windows/macOS 使用 runner 的原生桌面环境。测试驱动采用现有 embedded provider，上游说明支持三平台，但本项目的各平台旅程仍需实际跑通。[WDIO 平台说明](https://github.com/webdriverio/desktop-mobile/blob/main/packages/tauri-service/docs/platform-support.md)
+`.github/workflows/desktop-webview.yml` 仅手动触发，同样使用三平台矩阵。它构建带 `webview-e2e` 功能的独立测试应用，运行本地 Provider smoke、herdr-core JSON-RPC 双任务 fixture 旅程和三进程崩溃恢复旅程。Linux 使用 D-Bus session 和 Xvfb；Windows/macOS 使用 runner 的原生桌面环境。测试驱动采用现有 embedded provider，上游说明支持三平台，但本项目的各平台旅程仍需实际跑通。[WDIO 平台说明](https://github.com/webdriverio/desktop-mobile/blob/main/packages/tauri-service/docs/platform-support.md)
 
 原生旅程保留严格的平台真实性检查：macOS 为 `webkit / macos`，Linux 为 `WebKitGTK / linux`，Windows 为 `msedge / windows`。映射依据所安装测试插件的会话响应实现；没有用“任意浏览器均可”替换断言。
 

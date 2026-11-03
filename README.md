@@ -2,17 +2,17 @@
 
 **管理上下文，让现有 Agent 在可追溯的工作流中协作。**
 
-ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择上下文、向 Agent 交接任务、保存输出证据并组织后续工作；模型连接、工具、Skills、MCP 和审批沿用现有 Agent harness。当前执行路径复用本机 Orca 与 OMP，无需在 ThoughtsFlow 再配置 Provider。
+ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择上下文、向 Agent 交接任务、保存输出证据并组织后续工作；模型连接、工具、Skills、MCP 和审批沿用现有 Agent harness。当前执行路径以本机 herdr-core 为基座，复用已有 Agent 模板，无需在 ThoughtsFlow 再配置 Provider。
 
-[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.2) · [工作台架构](docs/adr/0003-agent-workbench-context-handoffs.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
+[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.2) · [工作台架构](docs/adr/0004-herdr-core-workbench.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
 
 > 最新已发布安装包仍为 `v0.1.0-beta.2`。以下 Agent 主入口与上下文交接描述当前源码的未发布改动；旧安装包不包含它们。安装包、平台和已知限制以发布页为准。
 
 ## 能做什么
 
-- **复用已有 Agent。** 直接创建工作区并连接 Orca，任务沿用 OMP 已有模型、认证与工具配置。
+- **复用已有 Agent。** 连接 herdr-core，选择已有模板，继承其中的 Agent、模型、认证与工具配置。
 - **显式交接上下文。** 在图上选择准确的历史路径，为任务选择当前上下文或已保存的 Agent 证据，预览后再派发。内容或版本变化后需要重新预览。
-- **保存可追溯的输出。** 保存指定 Dispatch 的一页输出观察及 hash，分页浏览摘要，展开时读取正文，离线查看并用于后续任务。部分输出和任务成功分别标明。
+- **保存可追溯的输出。** 保存准确执行尝试的屏幕观察及 hash，分页浏览摘要，展开时读取正文，离线查看并用于后续任务。部分输出和任务成功分别标明。
 - **组织人工工作流。** 查看交接与证据的来源关系，人工决定后续工作；未知派发结果不会自动重试。
 - **保留历史推演能力。** 兼容直连对话中的准确回答分支、固定/排除、摘要检查点、Context Receipt、路线比较和决策文档导出。
 
@@ -28,16 +28,16 @@ ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择
 
 早期 macOS/Windows 包未经过正式分发签名，macOS 包也未公证，系统可能提示无法验证开发者。确认下载来源和校验和后，按系统提供的单应用确认流程处理；不要为安装本项目全局关闭系统安全保护。安装包范围、签名状态和构建方式见[发布说明](docs/RELEASING.md)。
 
-1. 安装并配置 [Orca](https://github.com/stablyai/orca) 和 [OMP](https://github.com/can1357/oh-my-pi)，确认 OMP 原生执行可用，在 Orca 登记代码项目。
-2. 打开 ThoughtsFlow 的 **Agent 工作台**，创建或选择本地工作区，再选择项目和协作目标。
-3. 填写任务范围与验收要求，按需选择当前图谱上下文和已有输出证据，查看交接预览后启动。
-4. 查看任务与执行状态，在需要时回复协作问题。保存输出观察，审阅后选择它作为下一任务的输入。
+1. 安装 [herdr-core](https://github.com/herdrdev/herdr-core)，使用其原生模板配置已有 Agent；无需在 ThoughtsFlow 配置 Provider。
+2. 在 **Agent 工作台** 创建本地工作区，点击“连接 herdr-core”，使用 ThoughtsFlow 专用会话。
+3. 填写已有项目或独立 checkout 的绝对工作目录和协作目标。选择 Agent 模板、上下文与已有证据，预览交接后启动。
+4. 查看准确终端的状态，保存屏幕观察，审阅后显式复用到下一任务。权限和信任对话在原生 Agent 终端处理。
 
-主路径无需在 ThoughtsFlow 输入 API Key、Base URL 或 Provider。模型默认“沿用 OMP 配置”；也可选择“指定本次模型”，填写已有 OMP 原生选择器，例如 `provider/model` 或 `@smol`，再预览交接。该选项需要 Orca 支持 OMP worker 模型参数，不支持时会拒绝请求，不会悄悄改用默认模型。工作台不自动读取原生模型目录，也不提供 effort 覆盖。界面记录的“请求模型”是交给 OMP 的选择器，实际模型解析仍由 OMP 完成。ThoughtsFlow 不附带模型，也不提供调用额度。
+模型与启动参数继承 Herdr 模板，不另建模型目录或认证配置。任务在选定目录运行，可能共享文件；herdr-core 不自动创建 Git worktree，需要隔离时请选择独立 checkout。现有 Orca 协作保留为只读历史，原始回执与 hash 不变。
 
 ## 兼容入口：直连模型
 
-已有直连对话与 Provider 设置继续保留，用于原有工作区和明确需要的独立模型请求；它们不承担 Agent harness。此路径可独立于 Orca/OMP 运行，需要配置相应 Provider。
+已有直连对话与 Provider 设置继续保留，用于原有工作区和明确需要的独立模型请求；它们不承担 Agent harness。此路径可独立于 Agent 运行时运行，需要配置相应 Provider。
 
 | 连接方式 | 当前状态 |
 | --- | --- |
@@ -52,20 +52,16 @@ ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择
 
 当前接入的 OMP **HTTP** Gateway 不会自动继承本机 OMP 登录或 `models.yml`，也不代表完整 Agent 执行。通过网关请求时，Receipt 记录 ThoughtsFlow 发给网关的内容，不代表最终供应商请求。上游新增的 stdio Gateway 尚未接入。配置条件见[模型连接指南](docs/MODEL_CONNECTIONS.md)。
 
-## Orca + OMP 的职责
+## herdr-core 与工作台的职责
 
-先分别安装并配置 [Orca](https://github.com/stablyai/orca) 和 [oh-my-pi / OMP](https://github.com/can1357/oh-my-pi)，在 Orca 中登记代码项目，并为 OMP 配好模型与认证。
+ThoughtsFlow 拥有上下文图谱、任务意图、交接和证据；herdr-core 拥有持久终端、原生模板、状态与消息；所选 Agent 拥有模型、工具、Skills、认证和审批。
 
-任务由 Orca 在独立工作区中启动 OMP；ThoughtsFlow 查看进度、读取输出并回复协作问题。任务结果由 Orca 的准确 Task/Dispatch 关联确认，执行器退出不等于成功。
+- 交接 hash 冻结工作台提交的文本、来源和请求模板，不声称包含原生模板正文、Agent 内部提示或所有模型请求。
+- 任务送达、Agent 自报完成、进程退出与成果验收分别表达；结果未知时不会自动重派。
+- 屏幕观察是有界证据，不代表完整转录或任务成功。只释放已经退出且准确属于本工作台的终端。
+- 任务由人工拆分和审查，不自动调度依赖、合并代码或采纳决策。
 
-- Agent 使用 OMP 自己的配置。普通对话历史和已有证据只有经显式选择、预览后才随任务交接。
-- 交接 hash 冻结工作台提交的文本、来源与可选的请求模型；不声称包含 Agent 内部提示、工具结果或所有模型请求。启动回执核对请求参数，不证明实际模型用量。已保存输出是一页观察，分页末尾也不能单独证明完整或成功。
-- 任务由人工拆分和审查；当前不会自动合并代码或把结果自动采纳到 Decision Packet。
-- 工具审批及停止正在运行的任务继续在 Orca/OMP 原生界面处理。
-- Git worktree 提供代码隔离，**不提供操作系统权限沙箱**。
-- 连接中断或操作结果不明时，不会自动重复派发任务。
-
-CLI 路径、运行时版本与恢复语义见 [Agent 架构](docs/AGENT_ARCHITECTURE.md)、[跨平台说明](docs/CROSS_PLATFORM.md)和[上游兼容跟踪](docs/upstream/README.md)。Orca 与 OMP 是分别安装的外部运行时，本项目安装包不捆绑它们。
+协议、专用会话和恢复说明见 [Agent 架构](docs/AGENT_ARCHITECTURE.md)、[跨平台说明](docs/CROSS_PLATFORM.md)和[上游跟踪](docs/upstream/README.md)。安装包不捆绑 herdr-core 或任何 Agent。
 
 ## 数据与隐私
 
@@ -121,7 +117,7 @@ Tauri commands → Rust application services → domain + ports
         ├─ ContextCompiler：图谱路径与显式选择
         ├─ Provider adapters：兼容直连请求与目录
         ├─ Filesystem adapter：决策文档导出
-        └─ Orca adapter → 本机 Orca → OMP workers
+        └─ herdr-core JSON-RPC → 原生模板 → Agent harness
 ```
 
 上下文图谱通过显式交接连接 Agent 执行。界面不直接访问数据库或执行任意 shell 命令；旧回执不会按当前配置重新计算，输出证据不会伪造为历史 Model Run。
@@ -134,11 +130,11 @@ Tauri commands → Rust application services → domain + ports
 
 ThoughtsFlow 的设计深入学习了 **[oh-my-pi](https://github.com/can1357/oh-my-pi)** 的 Agent 执行、模型接入、会话树与上下文管理，以及 **[Orca](https://github.com/stablyai/orca)** 的多 Agent 编排和工作区协作方式。感谢这些项目及其贡献者公开设计与实现。
 
-ThoughtsFlow 是独立项目，与上述项目没有官方隶属或背书关系。代码许可见 [LICENSE](LICENSE)；上游许可证、参考来源和第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。外部 Orca、OMP 运行时仍分别遵循各自的许可证与使用条款。
+ThoughtsFlow 是独立项目，与上述项目没有官方隶属或背书关系。代码许可见 [LICENSE](LICENSE)；上游许可证、参考来源和第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。外部 herdr-core 和各 Agent 仍分别遵循自己的许可证与使用条款。Orca 是历史参考来源，已退出当前执行路径。
 
 ## English overview
 
-ThoughtsFlow is a local-first Agent workbench for graphical context management and workflow orchestration. The primary workflow reuses separately installed Orca and OMP, including the Agent's existing model configuration, tools, Skills and approvals. Tasks inherit OMP configuration by default; an optional native model selector can be frozen into the handoff when the runtime supports it. This records the requested selector, not the actual model used. Preview exact context handoffs, save immutable output observations, and explicitly reuse evidence in later tasks without setting up another Provider.
+ThoughtsFlow is a local-first Agent workbench for graphical context management. Its execution foundation is herdr-core: select an existing native Agent template, preview a context handoff, run in an explicitly chosen directory, and save immutable screen observations. Models, authentication, tools and approvals remain with the Agent. Legacy Orca history stays read-only; no Orca runtime is required. Task delivery, reported completion and process exit are distinct from acceptance. Worktrees and automatic DAG scheduling are not provided.
 
 Built with Tauri 2, React, TypeScript, Rust and SQLite. Existing direct-model conversations and four streaming protocols remain compatibility features. Historical receipts remain unchanged; a handoff records the input delivered to an Agent harness, not all internal model requests. Saved evidence is a bounded output observation, not proof of success. Native general-purpose Agent chat and automatic DAG scheduling are not implemented. Local databases are not encrypted.
 
