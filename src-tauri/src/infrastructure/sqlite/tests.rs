@@ -127,11 +127,12 @@ async fn migration_creates_the_complete_strict_schema() {
 
     let schema = repository.schema_info().await.expect("schema is readable");
 
-    assert_eq!(schema.version, 10);
+    assert_eq!(schema.version, 11);
     assert_eq!(
         schema.strict_tables,
         vec![
             "agent_evidence",
+            "agent_execution",
             "agent_handoff",
             "agent_mission",
             "agent_operation",
@@ -244,7 +245,7 @@ async fn development_v5_upgrade_preserves_original_history_and_receipts_across_r
         let repository = SqliteRepository::connect(directory.path().join("development.sqlite"))
             .await
             .expect("the recognized development lineage upgrades and reopens");
-        assert_eq!(repository.schema_info().await.unwrap().version, 10);
+        assert_eq!(repository.schema_info().await.unwrap().version, 11);
         let profile = repository
             .get_provider_profile("provider-upgrade")
             .await
@@ -262,7 +263,7 @@ async fn development_v5_upgrade_preserves_original_history_and_receipts_across_r
             history.as_slice(),
             "the old checksum and every migration metadata field remain original"
         );
-        assert_eq!(upgraded.len(), 10);
+        assert_eq!(upgraded.len(), 11);
         let error = sqlx::query(
             "INSERT INTO context_manifest_item \
              (manifest_id, workspace_id, position, source_kind, role, content_block_id, \
@@ -455,7 +456,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
         .await
         .expect("production repository migrator upgrades the legacy file");
     let schema = repository.schema_info().await.expect("schema is readable");
-    assert_eq!(schema.version, 10);
+    assert_eq!(schema.version, 11);
     let migrated = repository
         .get_provider_profile("provider-upgrade")
         .await
@@ -469,6 +470,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
         schema.strict_tables,
         vec![
             "agent_evidence",
+            "agent_execution",
             "agent_handoff",
             "agent_mission",
             "agent_operation",
@@ -520,7 +522,7 @@ async fn assert_real_file_upgrade_from(schema_version: i64) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     let index_columns = sqlx::query_scalar::<_, String>(
         "SELECT name FROM pragma_index_info('idx_manifest_item_workspace_content') ORDER BY seqno",
@@ -768,7 +770,7 @@ async fn default_marker_upgrade_preserves_json_types_values_and_all_historical_e
     let repository = SqliteRepository::connect(&directory.path().join("upgrade.sqlite"))
         .await
         .expect("schema v7 upgrades through the production startup path");
-    assert_eq!(repository.schema_info().await.unwrap().version, 10);
+    assert_eq!(repository.schema_info().await.unwrap().version, 11);
     for (index, value) in values.iter().enumerate() {
         let profile = repository
             .get_provider_profile(&format!("marker-{index}"))
@@ -981,7 +983,7 @@ async fn default_marker_upgrade_rolls_back_profile_writes_if_migration_history_c
     let repository = SqliteRepository::connect(&path)
         .await
         .expect("repair permits a complete retry");
-    assert_eq!(repository.schema_info().await.unwrap().version, 10);
+    assert_eq!(repository.schema_info().await.unwrap().version, 11);
     let parameters = repository
         .get_provider_profile("provider-upgrade")
         .await
@@ -3833,7 +3835,7 @@ async fn agent_workbench_v10_upgrade_preserves_v9_receipts_hashes_and_migration_
     let repository = SqliteRepository::connect(directory.path().join("upgrade.sqlite"))
         .await
         .unwrap();
-    assert_eq!(repository.schema_info().await.unwrap().version, 10);
+    assert_eq!(repository.schema_info().await.unwrap().version, 11);
     let mut connection = repository.acquire_test_connection().await.unwrap();
     assert_eq!(
         marker_history(&mut connection).await,
@@ -3860,4 +3862,108 @@ async fn agent_workbench_v10_upgrade_preserves_v9_receipts_hashes_and_migration_
             .unwrap();
         assert_eq!(count, 0, "upgrade never invents Agent history");
     }
+}
+
+#[tokio::test]
+async fn herdr_v11_upgrade_preserves_orca_records_byte_for_byte() {
+    let (directory, mut connection) = default_marker_upgrade_fixture().await;
+    let schema10 = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            TEST_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 10)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    schema10.run(&mut connection).await.unwrap();
+    let workspace: String = sqlx::query_scalar("SELECT id FROM workspace LIMIT 1")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let mission=serde_json::json!({"id":"legacy-mission","workspaceId":workspace,"repositoryId":"orca-project","repositoryPath":"/original","objective":"Original","runId":"orca-run","coordinatorHandle":"old-handle","runtimeId":"old-runtime","status":"ready","error":null,"createdAt":"2026-09-22"}).to_string();
+    let original = "{\"original\": \"ThoughsFlow Orca receipt\", \"hash\": \"keep-raw\"}";
+    sqlx::query(
+        "INSERT INTO agent_mission(id,workspace_id,body_json) VALUES ('legacy-mission',?,?)",
+    )
+    .bind(&workspace)
+    .bind(&mission)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO agent_operation(id,mission_id,kind,status,request_json,receipt_json,created_at) VALUES ('legacy-op','legacy-mission','start-task','unknown','{}',?,1)").bind(original).execute(&mut connection).await.unwrap();
+    sqlx::query("INSERT INTO agent_handoff(operation_id,workspace_id,mission_id,body_json) VALUES ('legacy-op',?,'legacy-mission',?)").bind(&workspace).bind(original).execute(&mut connection).await.unwrap();
+    sqlx::query("INSERT INTO agent_evidence(id,workspace_id,mission_id,request_json,body_json,raw_receipt_json) VALUES ('legacy-evidence',?,'legacy-mission','{}',?,?)").bind(&workspace).bind(original).bind(original).execute(&mut connection).await.unwrap();
+    let history = development_migration_history(&mut connection).await;
+    connection.close().await.unwrap();
+    let repository = SqliteRepository::connect(directory.path().join("upgrade.sqlite"))
+        .await
+        .unwrap();
+    let mut c = repository.acquire_test_connection().await.unwrap();
+    // The fixture helper's database path is checked below, so this must contain its rows.
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT body_json FROM agent_mission WHERE id='legacy-mission'")
+            .fetch_optional(&mut *c)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(mission));
+    for (table, column) in [
+        ("agent_operation", "receipt_json"),
+        ("agent_handoff", "body_json"),
+        ("agent_evidence", "body_json"),
+        ("agent_evidence", "raw_receipt_json"),
+    ] {
+        let body: String = sqlx::query_scalar(&format!(
+            "SELECT {column} FROM {table} WHERE mission_id='legacy-mission' LIMIT 1"
+        ))
+        .fetch_one(&mut *c)
+        .await
+        .unwrap();
+        assert_eq!(body, original);
+    }
+    let upgraded = development_migration_history(&mut c).await;
+    assert_eq!(&upgraded[..10], history.as_slice());
+    assert_eq!(upgraded.len(), 11);
+}
+
+#[tokio::test]
+async fn herdr_v11_migration_failure_rolls_back_new_schema_and_keeps_history() {
+    let (directory, mut connection) = default_marker_upgrade_fixture().await;
+    let schema10 = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            TEST_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 10)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    schema10.run(&mut connection).await.unwrap();
+    let history = development_migration_history(&mut connection).await;
+    let evidence = marker_history(&mut connection).await;
+    sqlx::query("CREATE TRIGGER reject_v11 BEFORE INSERT ON _sqlx_migrations WHEN NEW.version=11 BEGIN SELECT RAISE(ABORT,'injected v11 failure'); END").execute(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    assert!(
+        SqliteRepository::connect(directory.path().join("upgrade.sqlite"))
+            .await
+            .is_err()
+    );
+    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(directory.path().join("upgrade.sqlite"))
+        .connect()
+        .await
+        .unwrap();
+    assert_eq!(
+        development_migration_history(&mut connection).await,
+        history
+    );
+    assert_eq!(marker_history(&mut connection).await, evidence);
+    let exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='agent_execution'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(exists, 0);
 }
