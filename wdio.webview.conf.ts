@@ -38,7 +38,7 @@ export const config: WebdriverIO.Config = {
           THOUGHSFLOW_WEBVIEW_E2E_DATA_DIR: appDataDir,
           THOUGHSFLOW_NODE_BIN: process.execPath,
           ...Object.fromEntries(
-            ["THOUGHSFLOW_ORCA_BIN", "THOUGHSFLOW_OMP_BIN", "TF_AGENT_FIXTURE_STATE"]
+            ["THOUGHTSFLOW_HERDR_BIN", "THOUGHTSFLOW_HERDR_SESSION", "TF_AGENT_FIXTURE_STATE"]
               .flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []),
           ),
         },

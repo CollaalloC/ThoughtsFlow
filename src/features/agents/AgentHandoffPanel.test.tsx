@@ -7,7 +7,7 @@ import { AgentHandoffPanel } from "./AgentHandoffPanel";
 import { agentHistoryTime } from "./AgentHistory";
 import { AgentTaskDrafts } from "./agent-drafts";
 
-const mission: AgentMission = { id: "mission-1", workspaceId: "workspace-1", repositoryId: "repo", repositoryPath: "/repo", objective: "目标", runId: "run-1", coordinatorHandle: "coordinator", runtimeId: "runtime", status: "ready", error: null, createdAt: "2026-10-06" };
+const mission: AgentMission = { runtimeBackend: "herdr-core", id: "mission-1", workspaceId: "workspace-1", repositoryId: "repo", repositoryPath: "/repo", objective: "目标", runId: "run-1", coordinatorHandle: "coordinator", runtimeId: "runtime", status: "ready", error: null, createdAt: "2026-10-06" };
 const tree: ContextTreeProjection = { rootId: "root", workspaceId: mission.workspaceId, cursor: { workspaceId: mission.workspaceId, version: 0, activeRunId: null, branchId: null, updatedAt: "2026-10-06" }, draftVersion: 0, nodes: [], edges: [], branches: [], checkpoints: [] };
 const preview: AgentHandoffPreview = { title: "下一任务", hash: "preview-hash", text: "完整交接预览", compilerVersion: "1", sourceRunIds: [], evidenceIds: [], sources: [], parentRunId: null, branchId: null, cursorVersion: 0, draftVersion: 0, branchVersion: null };
 function evidence(id: string): AgentEvidenceSummary {
@@ -25,14 +25,14 @@ function fixture(overrides: Partial<DesktopBridge> = {}, invoke = async () => { 
     listAgentHandoffPage: vi.fn().mockResolvedValue({ items: [handoff("h1")], nextCursor: null }),
     getAgentEvidence: vi.fn().mockResolvedValue({ ...evidence("e1"), text: "不可变输出正文" }),
     getAgentHandoff: vi.fn().mockResolvedValue({ ...handoff("h1"), preview: { ...preview, text: "不可变交接正文" } }),
-    previewAgentHandoff: vi.fn<DesktopBridge["previewAgentHandoff"]>().mockImplementation(async ({ requestedModel }) => ({
-      ...preview, ...(requestedModel === undefined ? {} : { requestedModel }),
+    previewAgentHandoff: vi.fn<DesktopBridge["previewAgentHandoff"]>().mockImplementation(async ({ requestedTemplate }) => ({
+      ...preview, ...(requestedTemplate === undefined ? {} : { requestedTemplate }),
     })),
     ...overrides,
   };
 }
 function props(bridge: DesktopBridge) {
-  return { bridge, mission, busy: false, canStart: true, evidenceRevision: 0, onStart: vi.fn<() => Promise<AgentOperation | undefined>>().mockResolvedValue({ id: "op", missionId: mission.id, kind: "start-task", status: "succeeded", receipt: null, error: null, createdAt: "2026-10-06" }) };
+  return { templates: [{ name: "reviewer", description: "Review" }, { name: "writer", description: "Write" }], bridge, mission, busy: false, canStart: true, evidenceRevision: 0, onStart: vi.fn<() => Promise<AgentOperation | undefined>>().mockResolvedValue({ id: "op", missionId: mission.id, kind: "start-task", status: "succeeded", receipt: null, error: null, createdAt: "2026-10-06" }) };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -40,6 +40,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 async function makePreview() {
+  if (!(screen.getByLabelText("Agent 模板") as HTMLSelectElement).value) fireEvent.change(screen.getByLabelText("Agent 模板"), { target: { value: "reviewer" } });
   fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "下一任务" } });
   fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "核实来源" } });
   fireEvent.click(screen.getByRole("button", { name: "预览交接内容" }));
@@ -50,114 +51,37 @@ async function makePreview() {
 beforeEach(() => vi.stubGlobal("DOMMatrixReadOnly", class { m22 = 1; }));
 afterEach(() => vi.unstubAllGlobals());
 
-describe("Agent handoff requested model", () => {
-  it("inherits OMP configuration without probing models or including a model field", async () => {
-    const invoke = vi.fn(async () => { throw new Error("Unexpected IPC"); });
-    const bridge = fixture({}, invoke);
-    const panel = props(bridge);
-    render(<AgentHandoffPanel {...panel} />);
-    expect(screen.getByRole("combobox", { name: "模型选择" })).toHaveValue("inherit");
-    expect(screen.queryByLabelText("请求模型")).not.toBeInTheDocument();
-    await makePreview();
-    expect(bridge.previewAgentHandoff).toHaveBeenLastCalledWith({
-      missionId: mission.id, title: "下一任务", spec: "核实来源", context: { includeActiveContext: false, evidenceIds: [] },
-    });
-    expect(within(screen.getByRole("region", { name: "交接预览" })).getByText("请求模型：沿用 Agent 配置（不代表实际使用的模型）")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
-    await waitFor(() => expect(panel.onStart).toHaveBeenCalledTimes(1));
-    expect(panel.onStart).toHaveBeenCalledWith({ missionId: mission.id, title: "下一任务", spec: "核实来源", handoff: {
-      context: { includeActiveContext: false, evidenceIds: [] }, previewHash: preview.hash,
-      expectedCursorVersion: 0, expectedDraftVersion: 0, expectedBranchId: null, expectedBranchVersion: null,
-    } });
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it.each(["provider/model", "@smol"])("passes the exact OMP selector %s and clears it only after a confirmed start", async (requestedModel) => {
-    const invoke = vi.fn(async () => { throw new Error("Unexpected IPC"); });
-    const bridge = fixture({}, invoke);
-    const panel = props(bridge);
-    render(<AgentHandoffPanel {...panel} />);
-    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
-    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: requestedModel } });
-    await makePreview();
-    expect(bridge.previewAgentHandoff).toHaveBeenLastCalledWith(expect.objectContaining({ requestedModel }));
-    expect(within(screen.getByRole("region", { name: "交接预览" })).getByText(`请求模型：${requestedModel}（不代表实际使用的模型）`)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
-    await waitFor(() => expect(panel.onStart).toHaveBeenCalledWith(expect.objectContaining({ requestedModel })));
-    expect(screen.getByLabelText("模型选择")).toHaveValue("inherit");
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it("invalidates preview on model edits and mode changes, including an in-flight preview", async () => {
-    const pending = deferred<AgentHandoffPreview>();
+describe("Herdr native template handoff", () => {
+  it("preserves existing dotted and localized template names", async () => {
     const bridge = fixture();
-    render(<AgentHandoffPanel {...props(bridge)} />);
+    render(<AgentHandoffPanel {...props(bridge)} templates={[{ name: "审查.v2", description: "Native template" }]} />);
+    fireEvent.change(screen.getByLabelText("Agent 模板"), { target: { value: "审查.v2" } });
     await makePreview();
-    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
-    expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: "@smol" } });
-    await makePreview();
-    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: "provider/model" } });
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
-    vi.mocked(bridge.previewAgentHandoff).mockReturnValueOnce(pending.promise);
-    fireEvent.click(screen.getByRole("button", { name: "预览交接内容" }));
-    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "inherit" } });
-    await act(async () => pending.resolve({ ...preview, requestedModel: "provider/model" }));
-    expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
-    await makePreview();
-    expect(bridge.previewAgentHandoff).toHaveBeenLastCalledWith({
-      missionId: mission.id, title: "下一任务", spec: "核实来源", context: { includeActiveContext: false, evidenceIds: [] },
-    });
+    expect(bridge.previewAgentHandoff).toHaveBeenCalledWith(expect.objectContaining({ requestedTemplate: "审查.v2" }));
   });
-
-  it.each(["", " provider/model", "provider/model ", "provider/\u0000model", "provider/\u0085model", "x".repeat(513), "😀".repeat(257)])(
-    "blocks invalid model selectors before preview or start (case %#)", async (requestedModel) => {
-      const bridge = fixture();
-      const panel = props(bridge);
-      const drafts = new AgentTaskDrafts([[mission.id, { title: "任务", spec: "说明", requestedModel, includeActiveContext: false, evidenceIds: [] }]]);
-      render(<AgentHandoffPanel {...panel} drafts={drafts} />);
-      await screen.findByRole("checkbox", { name: "使用证据 证据 e1" });
-      expect(screen.getByLabelText("请求模型")).toHaveAttribute("aria-invalid", "true");
-      expect(screen.getByRole("button", { name: "预览交接内容" })).toBeDisabled();
-      const start = screen.getByRole("button", { name: "启动 OMP 任务" });
-      fireEvent.submit(start.closest("form")!);
-      expect(bridge.previewAgentHandoff).not.toHaveBeenCalled();
-      expect(panel.onStart).not.toHaveBeenCalled();
-    },
-  );
-
-  it("accepts the 512 UTF-16-unit boundary without interpreting the native selector", async () => {
-    const bridge = fixture();
-    render(<AgentHandoffPanel {...props(bridge)} />);
-    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
-    const requestedModel = "😀".repeat(256);
-    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: requestedModel } });
-    await makePreview();
-    expect(bridge.previewAgentHandoff).toHaveBeenLastCalledWith(expect.objectContaining({ requestedModel }));
-  });
-
-  it.each([undefined, "provider/other"])("rejects a preview that does not confirm the explicit model (case %#)", async (returnedModel) => {
-    const bridge = fixture({ previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedModel: returnedModel }) });
-    const panel = props(bridge);
+  it("uses an existing template without a Provider and freezes it in the preview", async () => {
+    const bridge = fixture(); const panel = props(bridge);
     render(<AgentHandoffPanel {...panel} />);
-    fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "任务" } });
-    fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "说明" } });
-    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
-    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: "@smol" } });
-    fireEvent.click(screen.getByRole("button", { name: "预览交接内容" }));
-    expect(await screen.findByText("交接预览未确认请求模型，请检查运行时支持后重新预览。")).toBeVisible();
-    expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
-    expect(panel.onStart).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("模型选择")).not.toBeInTheDocument();
+    await makePreview();
+    expect(bridge.previewAgentHandoff).toHaveBeenCalledWith(expect.objectContaining({ requestedTemplate: "reviewer" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
+    await waitFor(() => expect(panel.onStart).toHaveBeenCalledWith(expect.objectContaining({ requestedTemplate: "reviewer" })));
+    expect(screen.getByLabelText("Agent 模板")).toHaveValue("");
   });
-
-  it.each([undefined, "@smol"])("shows the stored requested model in history without claiming an observed model (%s)", async (requestedModel) => {
-    const bridge = fixture({ getAgentHandoff: vi.fn().mockResolvedValue({ ...handoff("h1"), preview: { ...preview, requestedModel } }) });
-    render(<AgentHandoffPanel {...props(bridge)} />);
-    const history = screen.getByRole("region", { name: "历史任务交接" });
-    fireEvent.click(await within(history).findByText(`交接 h1 · ${agentHistoryTime(handoff("h1").createdAt)}`));
-    expect(await within(history).findByText(`请求模型：${requestedModel ?? "沿用 Agent 配置"}（不代表实际使用的模型）`)).toBeVisible();
+  it("invalidates preview when the template changes", async () => {
+    render(<AgentHandoffPanel {...props(fixture())} />); await makePreview();
+    fireEvent.change(screen.getByLabelText("Agent 模板"), { target: { value: "writer" } });
+    expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
+  });
+  it("keeps old Orca missions read-only without replacing stored model evidence", async () => {
+    const bridge = fixture({ getAgentHandoff: vi.fn().mockResolvedValue({ ...handoff("h1"), preview: { ...preview, requestedModel: "@smol" } }) });
+    render(<AgentHandoffPanel {...props(bridge)} mission={{ ...mission, runtimeBackend: "orca" }} />);
+    expect(screen.queryByRole("button", { name: "启动 Agent 任务" })).not.toBeInTheDocument();
+    const history = await screen.findByRole("region", { name: "历史任务交接" });
+    fireEvent.click(within(history).getByText("交接 h1", { exact: false }));
+    expect(await within(history).findByText(/请求模型：@smol/)).toBeVisible();
   });
 });
 
@@ -214,14 +138,14 @@ describe("Agent handoff paged history", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一页证据" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: "使用证据 证据 e2" }));
     expect(screen.getByRole("button", { name: "取消证据 证据 e1" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     await makePreview();
     expect(bridge.previewAgentHandoff).toHaveBeenLastCalledWith(expect.objectContaining({ context: { includeActiveContext: false, evidenceIds: ["e1", "e2"] } }));
     fireEvent.click(screen.getByRole("button", { name: "重新加载上下文与证据" }));
     await screen.findByRole("checkbox", { name: "使用证据 证据 e2" });
     expect(screen.getByRole("button", { name: "取消证据 证据 e1" })).toBeVisible();
     expect(screen.getByRole("checkbox", { name: "使用证据 证据 e2" })).toBeChecked();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "上一页证据" }));
     expect(await screen.findByRole("checkbox", { name: "使用证据 证据 e1" })).toBeChecked();
     expect(bridge.getAgentEvidence).not.toHaveBeenCalled();
@@ -266,32 +190,32 @@ describe("Agent handoff paged history", () => {
   });
 
   it("restores only draft choices across remounts, keeps unknown drafts, and clears confirmed successful drafts", async () => {
-    const drafts = new AgentTaskDrafts([[mission.id, { title: "保留标题", spec: "保留说明", requestedModel: "@smol", includeActiveContext: true, evidenceIds: ["older-unloaded"] }]]);
+    const drafts = new AgentTaskDrafts([[mission.id, { title: "保留标题", spec: "保留说明", requestedTemplate: "reviewer", includeActiveContext: true, evidenceIds: ["older-unloaded"] }]]);
     const bridge = fixture();
     const start = vi.fn().mockResolvedValueOnce({ id: "op", status: "unknown" }).mockResolvedValueOnce({ id: "op2", status: "succeeded" });
     const rendered = render(<AgentHandoffPanel {...props(bridge)} drafts={drafts} onStart={start} />);
     expect(screen.getByLabelText("任务标题")).toHaveValue("保留标题");
-    expect(screen.getByLabelText("请求模型")).toHaveValue("@smol");
+    expect(screen.getByLabelText("Agent 模板")).toHaveValue("reviewer");
     expect(screen.getByRole("button", { name: "取消证据 older-unload" })).toBeVisible();
     expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "最后一次输入" } });
     expect(drafts.get(mission.id)?.spec).toBe("最后一次输入");
-    expect(drafts.get(mission.id)?.requestedModel).toBe("@smol");
+    expect(drafts.get(mission.id)?.requestedTemplate).toBe("reviewer");
     fireEvent.click(screen.getByRole("button", { name: "预览交接内容" }));
     await screen.findByRole("region", { name: "交接预览" });
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
     expect(drafts.get(mission.id)?.spec).toBe("最后一次输入");
     rendered.unmount();
     render(<AgentHandoffPanel {...props(bridge)} drafts={drafts} onStart={start} />);
     expect(screen.getByLabelText("任务说明")).toHaveValue("最后一次输入");
-    expect(screen.getByLabelText("请求模型")).toHaveValue("@smol");
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByLabelText("Agent 模板")).toHaveValue("reviewer");
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "预览交接内容" }));
     await screen.findByRole("region", { name: "交接预览" });
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     await waitFor(() => expect(drafts.has(mission.id)).toBe(false));
-    expect(screen.getByLabelText("模型选择")).toHaveValue("inherit");
+    expect(screen.getByLabelText("Agent 模板")).toHaveValue("");
     expect(bridge.getAgentEvidence).not.toHaveBeenCalled();
   });
 
@@ -331,7 +255,7 @@ describe("Agent handoff paged history", () => {
   });
 
   it("reconciles a late confirmed draft deletion after remount and cleans StrictMode subscriptions", async () => {
-    const saved = { title: "尚未结束的提交", spec: "执行说明", requestedModel: "provider/model", includeActiveContext: true, evidenceIds: ["e1"] };
+    const saved = { title: "尚未结束的提交", spec: "执行说明", requestedTemplate: "writer", includeActiveContext: true, evidenceIds: ["e1"] };
     const drafts = new AgentTaskDrafts([[mission.id, saved]]);
     const subscribers = new Set<() => void>();
     const subscribe = drafts.subscribe.bind(drafts);
@@ -355,7 +279,7 @@ describe("Agent handoff paged history", () => {
     act(() => { drafts.delete(mission.id); });
     expect(screen.getByLabelText("任务标题")).toHaveValue("");
     expect(screen.getByLabelText("任务说明")).toHaveValue("");
-    expect(screen.getByLabelText("模型选择")).toHaveValue("inherit");
+    expect(screen.getByLabelText("Agent 模板")).toHaveValue("");
     expect(screen.getByLabelText("包含当前图谱路径")).not.toBeChecked();
     expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /取消证据/ })).not.toBeInTheDocument();

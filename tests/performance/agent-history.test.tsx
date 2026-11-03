@@ -10,7 +10,7 @@ import type { AgentEvidenceSummary, AgentHandoffSummary, AgentMission, ContextTr
 vi.mock("../../src/features/agents/AgentWorkflowGraph", () => ({ AgentWorkflowGraph: () => null }));
 vi.mock("../../src/features/context-tree", () => ({ ContextTree: () => null }));
 
-const mission: AgentMission = {
+const mission: AgentMission = { runtimeBackend: "herdr-core",
   id: "m", workspaceId: "w", repositoryId: "r", repositoryPath: "/fixture",
   objective: "history benchmark", runId: "run", coordinatorHandle: "coordinator",
   runtimeId: "runtime", status: "ready", error: null, createdAt: "2026-10-06T00:00:00Z",

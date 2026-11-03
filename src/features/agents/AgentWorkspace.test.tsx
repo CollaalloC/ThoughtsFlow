@@ -8,10 +8,10 @@ import { AgentWorkspace } from "./AgentWorkspace";
 import { agentHistoryTime } from "./AgentHistory";
 
 const environment: AgentEnvironment = {
-  available: true, running: true, orcaVersion: "1.0", ompVersion: "29.0",
+  available: true, running: true, runtimeVersion: "1.0", templates: [{ name: "reviewer", description: "Existing Agent" }, { name: "writer", description: "Writer" }],
   runtimeId: "runtime-1", projects: [{ id: "repo-1", name: "Example", path: "/projects/example" }], message: null,
 };
-const mission: AgentMission = {
+const mission: AgentMission = { runtimeBackend: "herdr-core",
   id: "mission-1", workspaceId: "workspace-1", repositoryId: "repo-1", repositoryPath: "/projects/example",
   objective: "实现协作功能", runId: "run-1", coordinatorHandle: "coordinator-1", runtimeId: "runtime-1",
   status: "ready", error: null, createdAt: "2026-09-22T00:00:00Z",
@@ -30,7 +30,7 @@ const tree: ContextTreeProjection = {
   cursor: { workspaceId: mission.workspaceId, activeRunId: null, branchId: null, version: 0, updatedAt: "2026-10-06T00:00:00Z" },
   draftVersion: 0, nodes: [], edges: [], branches: [], checkpoints: [],
 };
-const preview: AgentHandoffPreview = {
+const preview: AgentHandoffPreview = { requestedTemplate: "reviewer",
   hash: "preview-hash", text: "任务与所选上下文", sourceRunIds: [], evidenceIds: [], sources: [],
   parentRunId: null, branchId: null, cursorVersion: 0, draftVersion: 0, branchVersion: null, compilerVersion: "1",
 };
@@ -90,6 +90,7 @@ async function ready() {
 }
 
 function fillTask() {
+  if (!(screen.getByLabelText("Agent 模板") as HTMLSelectElement).value) fireEvent.change(screen.getByLabelText("Agent 模板"), { target: { value: "reviewer" } });
   fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "实现任务列表" } });
   fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "仅修改任务列表，保持现有接口，运行组件测试验证。" } });
 }
@@ -128,10 +129,10 @@ describe("AgentWorkspace", () => {
     });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
-    expect(await screen.findByText("Orca 1.0 · 运行中 · OMP 29.0")).toBeVisible();
+    expect(await screen.findByText("herdr-core 1.0 · 已连接")).toBeVisible();
     await act(async () => initial.resolve({ ...environment, running: false, projects: [] }));
-    expect(screen.getByText("Orca 1.0 · 运行中 · OMP 29.0")).toBeVisible();
-    expect(screen.getByRole("combobox", { name: "代码仓库" })).toBeEnabled();
+    expect(screen.getByText("herdr-core 1.0 · 已连接")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "工作目录" })).toBeEnabled();
   });
 
   it("keeps the newly created mission selected when initial history arrives late", async () => {
@@ -139,8 +140,8 @@ describe("AgentWorkspace", () => {
     const bridge = fixture({ listAgentMissions: vi.fn().mockReturnValue(history.promise) });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
-    await screen.findByText("Orca 1.0 · 运行中 · OMP 29.0");
-    fireEvent.change(screen.getByLabelText("代码仓库"), { target: { value: "repo-1" } });
+    await screen.findByText("herdr-core 1.0 · 已连接");
+    fireEvent.change(screen.getByLabelText("工作目录"), { target: { value: "repo-1" } });
     fireEvent.change(screen.getByLabelText("协作目标"), { target: { value: mission.objective } });
     fireEvent.click(screen.getByRole("button", { name: "创建协作" }));
     expect(await screen.findByRole("heading", { name: mission.objective })).toBeVisible();
@@ -155,7 +156,7 @@ describe("AgentWorkspace", () => {
     await ready();
     await prepareTask();
     fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "中".repeat(70) } });
-    const submit = screen.getByRole("button", { name: "启动 OMP 任务" });
+    const submit = screen.getByRole("button", { name: "启动 Agent 任务" });
     expect(screen.getByText("任务标题超过 200 字节上限（当前 210 字节），请缩短后再提交。")).toBeVisible();
     expect(submit).toBeDisabled();
     fireEvent.submit(submit.closest("form")!);
@@ -176,7 +177,7 @@ describe("AgentWorkspace", () => {
     }) });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
-    fireEvent.change(screen.getByLabelText("代码仓库"), { target: { value: "repo-1" } });
+    fireEvent.change(screen.getByLabelText("工作目录"), { target: { value: "repo-1" } });
     fireEvent.change(screen.getByLabelText("协作目标"), { target: { value: "目".repeat(10_667) } });
     expect(screen.getByText(/协作目标超过 32000 字节上限/)).toBeVisible();
     const create = screen.getByRole("button", { name: "创建协作" });
@@ -189,7 +190,7 @@ describe("AgentWorkspace", () => {
     await prepareTask();
     fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "述".repeat(21_334) } });
     expect(screen.getByText(/任务说明超过 64000 字节上限/)).toBeVisible();
-    const start = screen.getByRole("button", { name: "启动 OMP 任务" });
+    const start = screen.getByRole("button", { name: "启动 Agent 任务" });
     expect(start).toBeDisabled();
     fireEvent.submit(start.closest("form")!);
     expect(bridge.startAgentTask).not.toHaveBeenCalled();
@@ -215,7 +216,7 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
     expect(screen.getByText("已派发")).toBeVisible();
-    expect(screen.getByText("任务已完成，请审查成果。 请在 Orca 中检查：custom_attention")).toBeVisible();
+    expect(screen.getByText("Agent 报告完成，请审查成果。 请在原生终端中检查：custom_attention")).toBeVisible();
     expect(screen.queryByText(/root_completion/)).not.toBeInTheDocument();
   });
 
@@ -223,18 +224,18 @@ describe("AgentWorkspace", () => {
     const user = userEvent.setup();
     const bridge = fixture({ listAgentMissions: vi.fn().mockResolvedValue([]) });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
-    await waitFor(() => expect(screen.getByLabelText("代码仓库")).toBeEnabled());
+    await waitFor(() => expect(screen.getByLabelText("工作目录")).toBeEnabled());
     expect(bridge.createAgentMission).not.toHaveBeenCalled();
     expect(bridge.startAgentTask).not.toHaveBeenCalled();
-    await user.selectOptions(screen.getByLabelText("代码仓库"), "repo-1");
+    await user.type(screen.getByLabelText("工作目录"), "repo-1");
     await user.type(screen.getByLabelText("协作目标"), mission.objective);
     await user.click(screen.getByRole("button", { name: "创建协作" }));
     await ready();
     expect(bridge.createAgentMission).toHaveBeenCalledWith({ id: expect.any(String), workspaceId: "workspace-1", repositoryId: "repo-1", objective: mission.objective });
-    expect(screen.getByText(/不会使用 ThoughtsFlow 的 Provider 凭据/)).toBeVisible();
+    expect(screen.getByText(/不会自动创建 worktree/)).toBeVisible();
     await prepareTask();
-    await user.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
-    expect(bridge.startAgentTask).toHaveBeenCalledWith({ operationId: expect.any(String), missionId: mission.id, title: "实现任务列表", spec: "仅修改任务列表，保持现有接口，运行组件测试验证。", handoff: {
+    await user.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
+    expect(bridge.startAgentTask).toHaveBeenCalledWith({ requestedTemplate: "reviewer", operationId: expect.any(String), missionId: mission.id, title: "实现任务列表", spec: "仅修改任务列表，保持现有接口，运行组件测试验证。", handoff: {
       context: { includeActiveContext: false, evidenceIds: [] }, previewHash: preview.hash,
       expectedCursorVersion: 0, expectedDraftVersion: 0, expectedBranchId: null, expectedBranchVersion: null,
     } });
@@ -245,40 +246,39 @@ describe("AgentWorkspace", () => {
   it("opens Orca explicitly and prevents work without a ThoughtsFlow workspace", async () => {
     const bridge = fixture({ agentEnvironment: vi.fn().mockResolvedValue({ ...environment, running: false }) });
     render(<AgentWorkspace bridge={bridge} />);
-    expect(await screen.findByRole("button", { name: "启动 Orca" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "连接 herdr-core" })).toBeEnabled();
     expect(bridge.openAgentRuntime).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "启动 Orca" }));
+    fireEvent.click(screen.getByRole("button", { name: "连接 herdr-core" }));
     await waitFor(() => expect(bridge.openAgentRuntime).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("button", { name: "创建协作" })).toBeDisabled();
     expect(bridge.listAgentMissions).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, "@smol"])("does not repeat an in-flight task submission or claim an unknown result succeeded (model %s)", async (requestedModel) => {
+  it.each(["reviewer", "writer"])("does not repeat an in-flight task submission or claim an unknown result succeeded (model %s)", async (requestedTemplate) => {
     const pending = deferred<AgentOperation>();
     const bridge = fixture({ startAgentTask: vi.fn().mockReturnValue(pending.promise),
-      previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedModel }),
+      previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedTemplate }),
     });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
-    if (requestedModel !== undefined) {
-      fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
-      fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: requestedModel } });
+    if (requestedTemplate !== undefined) {
+      fireEvent.change(screen.getByLabelText("Agent 模板"), { target: { value: requestedTemplate } });
     }
     await prepareTask();
-    const form = screen.getByRole("button", { name: "启动 OMP 任务" }).closest("form")!;
+    const form = screen.getByRole("button", { name: "启动 Agent 任务" }).closest("form")!;
     fireEvent.submit(form);
     fireEvent.submit(form);
     expect(bridge.startAgentTask).toHaveBeenCalledTimes(1);
-    if (requestedModel !== undefined) expect(bridge.startAgentTask).toHaveBeenCalledWith(expect.objectContaining({ requestedModel }));
+    if (requestedTemplate !== undefined) expect(bridge.startAgentTask).toHaveBeenCalledWith(expect.objectContaining({ requestedTemplate }));
     await act(async () => pending.resolve({ ...operation, status: "unknown", error: "Orca timed out" }));
     expect(screen.getByText(/操作结果尚未确认，请勿重复提交/)).toBeVisible();
     expect(screen.queryByText("任务已提交。执行进展会自动更新。")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
     await waitFor(() => expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(3));
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     expect(screen.getByLabelText("任务标题")).toHaveValue("实现任务列表");
-    if (requestedModel !== undefined) expect(screen.getByLabelText("请求模型")).toHaveValue(requestedModel);
+    if (requestedTemplate !== undefined) expect(screen.getByLabelText("Agent 模板")).toHaveValue(requestedTemplate);
   });
 
   it("keeps verified replies and ended-worker release available with an unrelated unknown start", async () => {
@@ -294,7 +294,7 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
     await prepareTask();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     await user.type(screen.getByLabelText("回复问题 question-1"), "保留兼容性。");
     await user.click(screen.getByRole("button", { name: "发送回复" }));
     expect(bridge.replyToAgent).toHaveBeenCalledWith({ operationId: expect.any(String), missionId: mission.id, messageId: "question-1", body: "保留兼容性。" });
@@ -323,7 +323,7 @@ describe("AgentWorkspace", () => {
     expect(screen.getByRole("heading", { name: otherMission.objective })).toBeVisible();
     expect(screen.queryByText("旧协作过期警告")).not.toBeInTheDocument();
     await prepareTask();
-    await user.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    await user.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     expect(bridge.startAgentTask).toHaveBeenCalledWith(expect.objectContaining({ missionId: otherMission.id }));
   });
 
@@ -340,7 +340,7 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("连接已断开 · 保留最近一次进展")).toBeVisible();
     expect(screen.getByRole("article", { name: "任务 已知任务" })).toBeVisible();
     await prepareTask();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
     expect(await screen.findByText("运行时绑定已失效")).toBeVisible();
     expect(bridge.reconnectAgentMission).not.toHaveBeenCalled();
@@ -373,7 +373,7 @@ describe("AgentWorkspace", () => {
     await ready();
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
     await prepareTask();
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     await screen.findByText("任务已提交。执行进展会自动更新。");
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
@@ -392,7 +392,7 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await act(async () => { await Promise.resolve(); });
     await prepareTask();
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新进展" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
@@ -414,7 +414,7 @@ describe("AgentWorkspace", () => {
     const rendered = render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await act(async () => { await Promise.resolve(); });
     await prepareTask();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeEnabled();
     visibility = "hidden";
     fireEvent(document, new Event("visibilitychange"));
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
@@ -423,9 +423,9 @@ describe("AgentWorkspace", () => {
     visibility = "visible";
     fireEvent(document, new Event("visibilitychange"));
     expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     await act(async () => resumedRead.resolve(snapshot));
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeEnabled();
     rendered.unmount();
     fireEvent(document, new Event("visibilitychange"));
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
@@ -468,9 +468,9 @@ describe("AgentWorkspace", () => {
     expect(bridge.getAgentSnapshot).toHaveBeenCalledTimes(3);
     expect(screen.getByText("上次确认的进展")).toBeVisible();
     expect(screen.queryByText("后台之前的旧响应")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     await act(async () => resumedRead.resolve(snapshot));
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeEnabled();
   });
 
   it.each(["disconnected", "failed"])("waits for the resumed read before reconnecting when it returns %s", async (outcome) => {
@@ -523,7 +523,7 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("断开前的问题")).toBeVisible();
     expect(screen.getByLabelText("回复问题 question-1")).toBeDisabled();
     await prepareTask();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "重新连接协作" })).toBeEnabled();
   });
 
@@ -547,7 +547,7 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
     fillTask();
-    const start = screen.getByRole("button", { name: "启动 OMP 任务" });
+    const start = screen.getByRole("button", { name: "启动 Agent 任务" });
     fireEvent.submit(start.closest("form")!);
     expect(bridge.startAgentTask).not.toHaveBeenCalled();
     await previewTask();
@@ -565,7 +565,7 @@ describe("AgentWorkspace", () => {
     expect(start).toBeDisabled();
     await previewTask();
     expect(bridge.previewAgentHandoff).toHaveBeenLastCalledWith({
-      missionId: mission.id, title: "新标题", spec: "新说明", context: { includeActiveContext: true, evidenceIds: [evidence.id] },
+      missionId: mission.id, requestedTemplate: "reviewer", title: "新标题", spec: "新说明", context: { includeActiveContext: true, evidenceIds: [evidence.id] },
     });
     fireEvent.click(start);
     await screen.findByText("任务已提交。执行进展会自动更新。");
@@ -582,7 +582,7 @@ describe("AgentWorkspace", () => {
     fireEvent.change(screen.getByLabelText("任务说明"), { target: { value: "已修改说明" } });
     await act(async () => pending.resolve(preview));
     expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     expect(bridge.startAgentTask).not.toHaveBeenCalled();
   });
 
@@ -590,21 +590,20 @@ describe("AgentWorkspace", () => {
     const bridge = fixture({ startAgentTask: vi.fn()
       .mockRejectedValueOnce(new DesktopBridgeError({ code, message: "上下文需要重新确认" }))
       .mockResolvedValue(operation),
-      previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedModel: "@smol" }),
+      previewAgentHandoff: vi.fn().mockResolvedValue({ ...preview, requestedTemplate: "reviewer" }),
     });
     render(<AgentWorkspace bridge={bridge} workspaceId="workspace-1" />);
     await ready();
-    fireEvent.change(screen.getByLabelText("模型选择"), { target: { value: "explicit" } });
-    fireEvent.change(screen.getByLabelText("请求模型"), { target: { value: "@smol" } });
+    fireEvent.change(screen.getByLabelText("Agent 模板"), { target: { value: "reviewer" } });
     await prepareTask();
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     expect(await screen.findByText("上下文需要重新确认 请重新预览后再启动。")).toBeVisible();
     expect(screen.queryByText(/操作结果尚未确认/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     expect(screen.queryByRole("region", { name: "交接预览" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("请求模型")).toHaveValue("@smol");
+    expect(screen.getByLabelText("Agent 模板")).toHaveValue("reviewer");
     await previewTask();
-    fireEvent.click(screen.getByRole("button", { name: "启动 OMP 任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent 任务" }));
     await screen.findByText("任务已提交。执行进展会自动更新。");
     expect(bridge.startAgentTask).toHaveBeenCalledTimes(2);
   });
@@ -620,7 +619,7 @@ describe("AgentWorkspace", () => {
     await waitFor(() => expect(bridge.setActiveContext).toHaveBeenCalledWith({
       workspaceId: mission.workspaceId, runId: null, branchId: null, expectedCursorVersion: 7, expectedDraftVersion: 3,
     }));
-    expect(screen.getByRole("button", { name: "启动 OMP 任务" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent 任务" })).toBeDisabled();
     expect(bridge.getContextTree).toHaveBeenCalledTimes(2);
   });
 

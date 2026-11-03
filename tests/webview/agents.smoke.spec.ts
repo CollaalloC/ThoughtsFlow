@@ -1,164 +1,73 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $, $$, browser, expect } from "@wdio/globals";
+import { projectRoot } from "../../scripts/desktop-toolchain";
 import { button, controlByLabel, createAgentWorkspace, focusMainWindow, pinMainWindow, selectOptionByText, waitForBodyText } from "./support";
-
-const fixtureOutput = "OMP fixture output; no model was called";
-
-function recordedCommands(path: string): string[][] {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
-    .map((line) => (JSON.parse(line) as { argv: string[] }).argv);
-}
-
-async function captureRegion(label: string, filename: string) {
-  await focusMainWindow();
-  const region = await $(`[aria-label="${label}"]`);
-  // Embedded WebDriver accepts wheel actions without scrolling this nested
-  // pane. Use the DOM scrolling API and wait for the native WebView to paint.
-  await browser.executeAsync((element: HTMLElement, done: () => void) => {
-    element.scrollIntoView({ block: "center", behavior: "instant" });
-    requestAnimationFrame(() => requestAnimationFrame(() => done()));
-  }, region);
-  await browser.saveScreenshot(join(tmpdir(), filename));
-}
-
-describe("Agent workbench through native IPC and an isolated fixture CLI", () => {
-  afterEach(async function () {
-    if (this.currentTest?.state !== "failed") return;
-    console.log(`TF_AGENT_WORKBENCH_FAILURE ${await $("body").getText()}`);
-    await browser.saveScreenshot(join(tmpdir(), "thoughtsflow-workbench-native-failure.png"));
-  });
-
-  it("needs no Provider, reuses saved Agent evidence, and reloads immutable history offline", async () => {
-    const statePath = process.env.TF_AGENT_FIXTURE_STATE;
-    if (!statePath) throw new Error("This journey requires the isolated fixture runner");
+const output = "Herdr fixture output; no model was called";
+describe("Herdr workbench through native IPC and generation-1 RPC fixture", () => {
+  it("selects native templates, preserves handoffs and evidence, and reads history offline", async () => {
+    const state = process.env.TF_AGENT_FIXTURE_STATE;
+    if (!state) throw new Error("Isolated fixture runner required");
     await pinMainWindow();
-    await expect(await $('[aria-label="Agent 工作台"]')).toBeDisplayed();
-    await expect(await $('select[aria-label="Provider"]')).not.toExist();
-    await createAgentWorkspace({ name: "Agent 原生验证", goal: "管理任务上下文与证据；无需配置 Provider，不调用模型" });
-    await waitForBodyText("1.4.237-fixture");
-    const repository = await controlByLabel("代码仓库", "select");
-    const option = await repository.$('option[value="fixture-repo"]');
-    await selectOptionByText(repository, await option.getText());
-    await (await controlByLabel("协作目标", "textarea")).setValue("原生工作台上下文闭环");
+    await createAgentWorkspace({ name: "Herdr 原生验证", goal: "选择上下文并复用原生 Agent；无需 Provider" });
+    await (await button("连接 herdr-core")).click();
+    await waitForBodyText("0.1.17-fixture");
+    await (await controlByLabel("工作目录")).setValue(projectRoot);
+    await (await controlByLabel("协作目标", "textarea")).setValue("Herdr 上下文证据闭环");
     await (await button("创建协作")).click();
     await waitForBodyText("已连接 · 每 5 秒更新进展");
     const missionId = await (await $('[aria-label="历史协作"]')).getValue();
-    expect(missionId).not.toBe("");
-
-    await (await controlByLabel("任务标题")).setValue("采集输出证据");
-    await (await controlByLabel("任务说明", "textarea")).setValue("仅执行 fixture，用固定文本验证输出；不得调用模型或修改项目文件。");
-    await expect(await $('//button[normalize-space(.)="启动 OMP 任务"]')).toBeDisabled();
-    await (await button("预览交接内容")).click();
-    const preview = await $('[aria-label="交接预览"]');
-    await preview.waitForDisplayed();
-    await expect(preview).toHaveText(expect.stringContaining("输出观察 0"));
-    const firstHandoffHash = await (await preview.$("code")).getText();
-    expect(firstHandoffHash).toMatch(/^[a-f0-9]{64}$/);
-    await (await button("启动 OMP 任务")).click();
-    await waitForBodyText("任务已提交");
-    await focusMainWindow();
-    const firstTask = await $('[aria-label="任务 采集输出证据"]');
-    await firstTask.waitForDisplayed();
-    const reply = await $('textarea[aria-label^="回复问题 "]');
-    await reply.waitForDisplayed();
-    await reply.setValue("确认，继续 fixture 验证");
-    await (await button("发送回复")).click();
-    await focusMainWindow();
-    await browser.waitUntil(async () => (await firstTask.getText()).includes("已完成"));
-    await (await firstTask.$("details.agent-workspace__output > summary")).click();
-    await (await button("读取输出")).click();
-    await expect(await firstTask.$(".agent-workspace__output pre")).toHaveText(expect.stringContaining(fixtureOutput));
-    await (await button("保存当前页观察（重新读取）")).click();
-    await waitForBodyText("输出观察已保存，可在下一任务中选择。");
-    const evidenceSection = await $('[aria-label="已保存的 Agent 证据"]');
-    const savedDetails = await evidenceSection.$("details");
-    await savedDetails.waitForExist();
-    await (await savedDetails.$("summary")).click();
-    await expect(await savedDetails.$("pre")).toHaveText(expect.stringContaining(fixtureOutput));
-    const evidenceHash = await (await savedDetails.$("code")).getText();
-    expect(evidenceHash).toMatch(/^[a-f0-9]{64}$/);
-    const evidenceChoice = await $('input[aria-label^="使用证据 "]');
-    const evidenceId = await evidenceChoice.getAttribute("data-evidence-id");
-    if (!evidenceId) throw new Error("Saved evidence is missing its stable identity");
-    await (await firstTask.$('.//button[normalize-space(.)="释放已结束的 Agent"]')).click();
-    await browser.waitUntil(async () => (await firstTask.getText()).includes("已释放"));
-
-    await (await controlByLabel("任务标题")).setValue("复用已保存证据");
-    await (await controlByLabel("任务说明", "textarea")).setValue("仅使用明确勾选的 fixture 观察继续验证；不调用模型，不修改代码。");
-    await selectOptionByText(await controlByLabel("模型选择", "select"), "指定本次模型");
-    await (await controlByLabel("请求模型")).setValue("fixture/model-v1");
-    await evidenceChoice.click();
-    await (await button("预览交接内容")).click();
-    const reusedPreview = await $('[aria-label="交接预览"]');
-    await reusedPreview.waitForDisplayed();
-    await expect(reusedPreview).toHaveText(expect.stringContaining("输出观察 1"));
-    await expect(reusedPreview).toHaveText(expect.stringContaining("请求模型：fixture/model-v1"));
-    await expect(await reusedPreview.$("pre")).toHaveText(expect.stringContaining(fixtureOutput));
-    const reusedHandoffText = await (await reusedPreview.$("pre")).getProperty("textContent");
-    const reusedHandoffHash = await (await reusedPreview.$("code")).getText();
-    expect(reusedHandoffHash).not.toBe(firstHandoffHash);
-    await (await button("启动 OMP 任务")).click();
-    await focusMainWindow();
-    const secondTask = await $('[aria-label="任务 复用已保存证据"]');
-    await secondTask.waitForDisplayed();
-    const secondReply = await $('textarea[aria-label^="回复问题 "]');
-    await secondReply.waitForDisplayed();
-    await secondReply.setValue("确认本次输入包含保存的证据");
-    await (await button("发送回复")).click();
-    await focusMainWindow();
-    await browser.waitUntil(async () => (await secondTask.getText()).includes("已完成"));
-    await (await secondTask.$('.//button[normalize-space(.)="释放已结束的 Agent"]')).click();
-    await browser.waitUntil(async () => (await secondTask.getText()).includes("已释放"));
-    await expect(await $('[aria-label="人工编排来源图"]')).toBeDisplayed();
-
-    const starts = recordedCommands(`${statePath}.calls.jsonl`).filter((argv) => argv.slice(0, 2).join(" ") === "orchestration worker-start");
-    expect(starts).toHaveLength(2);
-    for (const argv of starts) {
-      expect(argv[argv.indexOf("--agent") + 1]).toBe("omp");
-      expect(argv).not.toContain("--effort");
-    }
-    expect(starts[0]).not.toContain("--model");
-    expect(starts[1][starts[1].indexOf("--model") + 1]).toBe("fixture/model-v1");
-    expect(starts[1][starts[1].indexOf("--spec") + 1]).toBe(reusedHandoffText);
-    writeFileSync(`${statePath}.offline`, "fixture runtime intentionally offline\n");
-    // Reload destroys all React state. The runtime wrapper now refuses reads
-    // and writes, so persisted handoffs/evidence must come from SQLite.
-    await browser.refresh();
-    await pinMainWindow();
-    await waitForBodyText("原生工作台上下文闭环");
-    await waitForBodyText("连接已断开");
-    await expect(await $('[aria-label="历史协作"]')).toHaveValue(missionId);
-    const offlineEvidence = await $('[aria-label="已保存的 Agent 证据"] details');
-    await offlineEvidence.waitForExist();
-    await (await offlineEvidence.$("summary")).click();
-    await expect(await offlineEvidence.$("pre")).toHaveText(expect.stringContaining(fixtureOutput));
-    await expect(await offlineEvidence.$("code")).toHaveText(evidenceHash);
-    const histories = await $$('[aria-label="历史任务交接"] details');
-    expect(histories).toHaveLength(2);
     const hashes: string[] = [];
-    for (const history of histories) {
-      await (await history.$("summary")).click();
-      hashes.push(await (await history.$("code")).getText());
+    for (const [index, template] of ["reviewer", "writer"].entries()) {
+      const title = index ? "复用观察" : "采集观察";
+      await (await controlByLabel("任务标题")).setValue(title);
+      await (await controlByLabel("任务说明", "textarea")).setValue("仅执行 fixture，保留 $(echo literal) 文本，不调用模型。");
+      await selectOptionByText(await controlByLabel("Agent 模板", "select"), template === "reviewer" ? "reviewer · Fixture review" : "writer · Fixture implementation");
+      if (index) await (await $('input[aria-label^="使用证据 "]')).click();
+      await (await button("预览交接内容")).click();
+      const preview = await $('[aria-label="交接预览"]');
+      await preview.waitForDisplayed();
+      await expect(preview).toHaveText(expect.stringContaining(`请求模板：${template}`));
+      if (index) await expect(await preview.$("pre")).toHaveText(expect.stringContaining(output));
+      hashes.push(await (await preview.$("code")).getText());
+      await (await button("启动 Agent 任务")).click();
+      await waitForBodyText("任务已提交"); await focusMainWindow();
+      const task = await $(`[aria-label="任务 ${title}"]`); await task.waitForDisplayed();
+      const reply = await $('textarea[aria-label^="回复问题 "]'); await reply.waitForDisplayed();
+      await reply.setValue("确认 fixture，结束程序"); await (await button("发送回复")).click();
+      await focusMainWindow();
+      await browser.waitUntil(async () => (await task.getText()).includes("执行已结束，结果待核实"));
+      if (!index) {
+        await (await task.$("details.agent-workspace__output > summary")).click();
+        await (await button("读取输出")).click();
+        await expect(await task.$("pre")).toHaveText(expect.stringContaining(output));
+        await (await button("保存当前页观察（重新读取）")).click();
+        await waitForBodyText("输出观察已保存，可在下一任务中选择。");
+      }
+      await (await task.$('.//button[normalize-space(.)="释放已结束的 Agent"]')).click();
+      await browser.waitUntil(async () => (await task.getText()).includes("已释放"));
     }
-    expect(hashes.sort()).toEqual([firstHandoffHash, reusedHandoffHash].sort());
-    await expect(await $('[aria-label="历史任务交接"]')).toHaveText(expect.stringContaining(evidenceId));
-    await expect(await $('[aria-label="历史任务交接"]')).toHaveText(expect.stringContaining("fixture/model-v1"));
-
-    await (await controlByLabel("任务标题")).setValue("离线准备下一任务");
-    await (await controlByLabel("任务说明", "textarea")).setValue("只预览来源，离线时不得启动或重派。");
-    await (await $('input[aria-label^="使用证据 "]')).click();
-    await (await button("预览交接内容")).click();
-    await expect(await $('[aria-label="交接预览"] pre')).toHaveText(expect.stringContaining(fixtureOutput));
-    await expect(await $('//button[normalize-space(.)="启动 OMP 任务"]')).toBeDisabled();
-    const offlineCommands = recordedCommands(`${statePath}.offline-calls.jsonl`);
-    expect(offlineCommands.some((argv) => argv[0] === "status")).toBe(true);
-    expect(offlineCommands.some((argv) => argv.slice(0, 2).join(" ") === "orchestration worker-start")).toBe(false);
-    expect(recordedCommands(`${statePath}.calls.jsonl`).filter((argv) => argv.slice(0, 2).join(" ") === "orchestration worker-start")).toHaveLength(2);
-    await captureRegion("已保存的 Agent 证据", "thoughtsflow-workbench-native-evidence.png");
-    await captureRegion("人工编排来源图", "thoughtsflow-workbench-native-graph.png");
-    console.log(`TF_AGENT_WORKBENCH_EVIDENCE ${JSON.stringify({ missionId, evidenceId, evidenceHash, handoffHashes: hashes, dispatchCount: starts.length, offlineCommands, providerConfigured: false, modelCalled: false })}`);
+    const calls = readFileSync(`${state}.calls.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> });
+    const runs = calls.filter((call) => call.method === "terminal.run");
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => (r.params.argv as string[])[0])).toEqual(["reviewer", "writer"]);
+    expect((runs[1].params.argv as string[])[1]).toContain(output);
+    for (const run of runs) { expect(run.params.keep).toBe(false); expect(run.params.no_parent).toBe(true); expect(run.params.line).toBeUndefined(); }
+    expect(calls.filter((r) => r.method === "terminal.read").every((r) => r.params.lines === 0)).toBe(true);
+    writeFileSync(`${state}.offline`, "offline\n");
+    await browser.refresh(); await pinMainWindow();
+    await waitForBodyText("Herdr 上下文证据闭环"); await waitForBodyText("连接已断开");
+    await expect(await $('[aria-label="历史协作"]')).toHaveValue(missionId);
+    const records = await $$('[aria-label="历史任务交接"] details'); expect(records).toHaveLength(2);
+    const saved: string[]=[];
+    for (const record of records) { await (await record.$("summary")).click(); saved.push(await (await record.$("code")).getText()); }
+    expect(saved.sort()).toEqual(hashes.sort());
+    await expect(await $('[aria-label="历史任务交接"]')).toHaveText(expect.stringContaining("请求模板：writer"));
+    const evidence=await $('[aria-label="已保存的 Agent 证据"] details'); await (await evidence.$("summary")).click();
+    await expect(await evidence.$("pre")).toHaveText(expect.stringContaining(output));
+    await focusMainWindow(); await evidence.scrollIntoView({ block: "center" });
+    await browser.saveScreenshot(join(tmpdir(), "thoughtsflow-herdr-native.png"));
+    console.log("TF_HERDR_EVIDENCE", JSON.stringify({missionId, hashes, dispatches:runs.length, providerConfigured:false, modelCalled:false}));
   });
 });

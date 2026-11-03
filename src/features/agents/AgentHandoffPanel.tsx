@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ContextTree } from "../context-tree";
 import type { DesktopBridge } from "../../platform/desktop-bridge";
-import type { AgentHandoffPreview, AgentMission, AgentOperation, ContextTreeProjection, StartAgentTaskInput } from "../../shared/contracts";
+import type { AgentTemplate, AgentHandoffPreview, AgentMission, AgentOperation, ContextTreeProjection, StartAgentTaskInput } from "../../shared/contracts";
 import { AgentWorkflowGraph } from "./AgentWorkflowGraph";
 import { AgentHistory } from "./AgentHistory";
 import { AgentEvidencePicker, MAX_SELECTED_EVIDENCE, type AgentEvidenceChoice } from "./AgentEvidencePicker";
@@ -9,6 +9,7 @@ import { useAgentHistoryPage } from "./useAgentHistoryPage";
 import type { AgentTaskDraft, AgentTaskDrafts } from "./agent-drafts";
 
 interface Props {
+  templates?: AgentTemplate[];
   bridge: DesktopBridge;
   mission: AgentMission;
   busy: boolean;
@@ -27,25 +28,22 @@ function byteLimit(label: string, value: string, limit: number) {
   return bytes > limit ? `${label}超过 ${limit} 字节上限（当前 ${bytes} 字节），请缩短后再提交。` : null;
 }
 
-function modelValidation(value: string | undefined) {
-  if (value === undefined) return null;
-  if (!value) return "请输入 OMP 中已有的模型标识或角色，例如 provider/model 或 @smol。";
-  if (value.length > 512) return "模型选择超过长度上限（512），请缩短后再预览。";
-  if (value !== value.trim() || /[\u0000-\u001f\u007f-\u009f]/.test(value)) return "模型选择不能包含首尾空白或控制字符。";
-  return null;
+function templateValidation(value: string | undefined) {
+  return value && new TextEncoder().encode(value).length <= 128 && !value.startsWith(".") && !/[\\/\u0000-\u001f\u007f-\u009f]/.test(value)
+    ? null : "请选择已有 herdr-core Agent 模板。";
 }
 
 export function AgentHandoffPanel(props: Props) {
   return <AgentHandoffContent key={`${props.mission.workspaceId}:${props.mission.id}`} {...props} />;
 }
 
-function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision, onStart, drafts }: Props) {
+function AgentHandoffContent({ templates = [], bridge, mission, busy, canStart, evidenceRevision, onStart, drafts }: Props) {
   const initialDraft = useRef<AgentTaskDraft>(drafts?.get(mission.id) ?? { title: "", spec: "", includeActiveContext: false, evidenceIds: [] });
   const draft = useRef(initialDraft.current);
   const observedSavedDraft = useRef(drafts?.get(mission.id));
   const [title, setTitle] = useState(initialDraft.current.title);
   const [spec, setSpec] = useState(initialDraft.current.spec);
-  const [requestedModel, setRequestedModel] = useState(initialDraft.current.requestedModel);
+  const [requestedTemplate, setRequestedTemplate] = useState(initialDraft.current.requestedTemplate);
   const [includeActiveContext, setIncludeActiveContext] = useState(initialDraft.current.includeActiveContext);
   const [evidenceIds, setEvidenceIds] = useState(initialDraft.current.evidenceIds);
   const selectedLabels = useRef(new Map<string, AgentEvidenceChoice>());
@@ -77,8 +75,8 @@ function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision
   const inFlight = useRef(false);
   const titleError = byteLimit("任务标题", title, 200);
   const specError = byteLimit("任务说明", spec, 64_000);
-  const modelError = modelValidation(requestedModel);
-  const valid = !!title.trim() && !!spec.trim() && !titleError && !specError && !modelError;
+  const templateError = templateValidation(requestedTemplate);
+  const valid = !!title.trim() && !!spec.trim() && !titleError && !specError && !templateError;
   const invalidate = useCallback(() => { revision.current += 1; setPreview(null); setError(null); }, []);
 
   useEffect(() => {
@@ -87,7 +85,7 @@ function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision
       const saved = drafts.get(mission.id);
       if (observedSavedDraft.current && !saved) {
         draft.current = { title: "", spec: "", includeActiveContext: false, evidenceIds: [] };
-        setTitle(""); setSpec(""); setRequestedModel(undefined); setIncludeActiveContext(false); setEvidenceIds([]);
+        setTitle(""); setSpec(""); setRequestedTemplate(undefined); setIncludeActiveContext(false); setEvidenceIds([]);
         selectedLabels.current.clear();
         invalidate();
       }
@@ -154,9 +152,9 @@ function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision
     setWorking(true);
     try {
       const result = await bridge.previewAgentHandoff({ missionId: mission.id, title: title.trim(), spec: spec.trim(),
-        ...(requestedModel === undefined ? {} : { requestedModel }), context: { includeActiveContext, evidenceIds } });
+        ...(requestedTemplate === undefined ? {} : { requestedTemplate }), context: { includeActiveContext, evidenceIds } });
       if (alive.current && expectedRevision === revision.current) {
-        if (requestedModel !== undefined && result.requestedModel !== requestedModel) throw new Error("交接预览未确认请求模型，请检查运行时支持后重新预览。");
+        if (requestedTemplate !== undefined && result.requestedTemplate !== requestedTemplate) throw new Error("交接预览未确认所选模板，请重新预览。");
         setPreview(result);
       }
     } catch (reason) {
@@ -178,14 +176,14 @@ function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision
     revision.current += 1;
     try {
       const operation = await onStart({ missionId: mission.id, title: title.trim(), spec: spec.trim(),
-        ...(requestedModel === undefined ? {} : { requestedModel }), handoff: {
+        ...(requestedTemplate === undefined ? {} : { requestedTemplate }), handoff: {
         context: { includeActiveContext, evidenceIds }, previewHash: confirmed.hash,
         expectedCursorVersion: confirmed.cursorVersion, expectedDraftVersion: confirmed.draftVersion,
         expectedBranchId: confirmed.branchId, expectedBranchVersion: confirmed.branchVersion,
       } });
       if (!alive.current) return;
       if (operation?.status === "succeeded") {
-        setTitle(""); setSpec(""); setRequestedModel(undefined); setEvidenceIds([]); setIncludeActiveContext(false);
+        setTitle(""); setSpec(""); setRequestedTemplate(undefined); setEvidenceIds([]); setIncludeActiveContext(false);
         draft.current = { title: "", spec: "", evidenceIds: [], includeActiveContext: false };
         selectedLabels.current.clear();
         drafts?.delete(mission.id);
@@ -200,25 +198,20 @@ function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision
   };
 
   return <>
-    <form className="agent-workspace__panel" onSubmit={(event) => { event.preventDefault(); void start(); }}>
+    {mission.runtimeBackend === "herdr-core" ? <form className="agent-workspace__panel" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <h4>预览上下文，交给 Agent</h4>
-      <p>默认沿用本机 OMP 配置，也可为本次任务指定已有模型。认证、工具、Skills 与审批仍由 OMP 管理。</p>
+      <p>选择现有 Herdr 模板，继承其 Agent、模型、认证、工具和 Skills 配置。</p>
       <label>任务标题<input aria-label="任务标题" aria-invalid={!!titleError} required value={title} onChange={(event) => { setTitle(event.target.value); persistDraft({ title: event.target.value }); invalidate(); }} disabled={busy} /></label>
       {titleError ? <p className="agent-workspace__error" role="alert">{titleError}</p> : null}
       <label>任务说明<textarea aria-label="任务说明" aria-invalid={!!specError} required rows={4} value={spec} onChange={(event) => { setSpec(event.target.value); persistDraft({ spec: event.target.value }); invalidate(); }} placeholder="写清范围、约束和验收标准" disabled={busy} /></label>
       {specError ? <p className="agent-workspace__error" role="alert">{specError}</p> : null}
-      <label>模型选择<select aria-label="模型选择" value={requestedModel === undefined ? "inherit" : "explicit"} disabled={busy} onChange={(event) => {
-        const value = event.target.value === "inherit" ? undefined : "";
-        setRequestedModel(value); persistDraft({ requestedModel: value }); invalidate();
-      }}><option value="inherit">沿用 OMP 配置</option><option value="explicit">指定本次模型</option></select></label>
-      {requestedModel !== undefined ? <>
-        <label>请求模型<input aria-label="请求模型" aria-invalid={!!modelError} aria-describedby="agent-model-help" required maxLength={512}
-          value={requestedModel} placeholder="provider/model 或 @smol" disabled={busy} onChange={(event) => {
-            setRequestedModel(event.target.value); persistDraft({ requestedModel: event.target.value }); invalidate();
-          }} /></label>
-        <p id="agent-model-help">填写本机 OMP 已有的模型标识或角色。OMP 校验其可用性，运行时可能拒绝此选择；这里只记录请求模型，不代表实际使用的模型。</p>
-        {modelError ? <p className="agent-workspace__error" role="alert">{modelError}</p> : null}
-      </> : null}
+      <label>Agent 模板<select aria-label="Agent 模板" value={requestedTemplate ?? ""} required disabled={busy} onChange={(event) => {
+        setRequestedTemplate(event.target.value); persistDraft({ requestedTemplate: event.target.value }); invalidate();
+      }}><option value="">选择已有模板</option>
+        {requestedTemplate && !templates.some((item) => item.name === requestedTemplate) ? <option value={requestedTemplate}>{requestedTemplate}（尚未核实）</option> : null}
+        {templates.map((item) => <option key={item.name} value={item.name}>{item.name} · {item.description}</option>)}
+      </select></label>
+      {!templates.length ? <p>连接 herdr-core 后读取本机模板；模型和 Agent 启动选项在 Herdr 模板中配置。</p> : null}
       <fieldset disabled={busy} className="agent-workspace__selection">
         <legend>选择本次交接内容</legend>
         <label><input type="checkbox" checked={includeActiveContext} onChange={(event) => { setIncludeActiveContext(event.target.checked); persistDraft({ includeActiveContext: event.target.checked }); invalidate(); }} />包含当前图谱路径</label>
@@ -232,11 +225,11 @@ function AgentHandoffContent({ bridge, mission, busy, canStart, evidenceRevision
       {error ? <p className="agent-workspace__error" role="alert">{error}</p> : null}
       <div className="agent-workspace__actions">
         <button type="button" disabled={busy || working || !valid} onClick={() => void buildPreview()}>{working && !busy ? "正在处理…" : "预览交接内容"}</button>
-        <button className="agent-workspace__primary" disabled={busy || working || !canStart || !valid || !preview} type="submit">{busy ? "正在提交…" : "启动 OMP 任务"}</button>
+        <button className="agent-workspace__primary" disabled={busy || working || !canStart || !valid || !preview} type="submit">{busy ? "正在提交…" : "启动 Agent 任务"}</button>
       </div>
-      {preview ? <section aria-label="交接预览"><h4>即将提交给 Agent 的文本</h4><p>请求模型：{preview.requestedModel ?? "沿用 Agent 配置"}（不代表实际使用的模型）</p><pre>{preview.text}</pre><p>来源回答 {preview.sourceRunIds.length} · 输出观察 {preview.evidenceIds.length} · hash <code>{preview.hash}</code></p><p>这是提交给 harness 的交接快照；Agent 的后续工具调用和完整模型请求由现有运行时管理。</p></section> : <p>启动前必须先查看交接预览；编辑任务、模型或所选来源会使预览失效。</p>}
-      <p>启动后，OMP 可在独立 worktree 中读写文件；不会自动合并，也不会使用 ThoughtsFlow 的 Provider 凭据。</p>
-    </form>
+      {preview ? <section aria-label="交接预览"><h4>即将提交给 Agent 的文本</h4><p>请求模板：{preview.requestedTemplate ?? "历史交接"}（模型由模板中的 Agent 决定）</p><pre>{preview.text}</pre><p>来源回答 {preview.sourceRunIds.length} · 输出观察 {preview.evidenceIds.length} · hash <code>{preview.hash}</code></p><p>这是提交给 harness 的交接快照；Agent 的后续工具调用和完整模型请求由现有运行时管理。</p></section> : <p>启动前必须先查看交接预览；编辑任务、模板或所选来源会使预览失效。</p>}
+      <p>Agent 在协作选定的目录中运行，该目录可能与其他任务共享；不会自动创建 worktree。需要隔离时请选择独立 checkout。</p>
+    </form> : <p>旧 Orca 协作仅供查阅，原始交接和证据保留；新任务请建立 herdr-core 协作。</p>}
     {[contextError, evidencePage.error, handoffPage.error].filter(Boolean).map((item, index) => <p key={index} className="agent-workspace__error" role="alert">读取本地上下文记录失败：{item}</p>)}
     <button type="button" disabled={busy || working} onClick={() => { invalidate(); setReload((value) => value + 1); }}>重新加载上下文与证据</button>
     <AgentWorkflowGraph handoffs={handoffs} evidence={evidence} runTitles={runTitles} />

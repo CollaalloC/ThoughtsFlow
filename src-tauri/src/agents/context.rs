@@ -107,6 +107,9 @@ impl store::AgentStore {
             }
         }
         let mut text = task_spec(&mission.objective, &input.title, &input.spec);
+        if mission.runtime_backend == "herdr-core" {
+            text = text.replace("Work only in the assigned worktree for this task.", "Work only in the selected working directory. It may be shared; do not overwrite other work.").replace("Ask the coordinator when scope or authorization is unclear.", "Ask the user through the native Agent interface when scope or authorization is unclear.");
+        }
         let mut sources = Vec::new();
         let mut source_run_ids = Vec::new();
         if input.context.include_active_context {
@@ -214,6 +217,7 @@ impl store::AgentStore {
             hash: String::new(),
             title: input.title.clone(),
             requested_model: input.requested_model.clone(),
+            requested_template: input.requested_template.clone(),
             text,
             compiler_version: format!(
                 "{HANDOFF_VERSION}; context/{}",

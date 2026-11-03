@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DesktopBridgeError, type DesktopBridge } from "../../platform/desktop-bridge";
 import type {
-  AgentEnvironment,
+  AgentEnvironment, AgentTemplate,
   AgentEvidence,
   WorkspaceSummary,
   AgentMessage,
@@ -44,24 +44,25 @@ const statusLabels: Record<string, string> = {
   live: "在线", unverifiable: "暂时无法确认", reclaimable: "可释放", retained: "已保留",
   release_pending: "正在释放", release_unknown: "释放结果未确认",
   dispatched: "已派发", in_progress: "进行中", outcome_unknown: "执行结果未确认",
+  reported_done: "Agent 报告完成，待验收", reported_error: "Agent 报告错误", observed: "已观察",
   finished_unverified: "执行已结束，结果待核实",
 };
 
 const attentionLabels: Record<string, string> = {
   guidance: "Agent 需要你的指导。",
   input: "Agent 正等待补充信息。",
-  approval: "有操作等待批准，请在 Orca 中处理。",
+  approval: "有操作等待批准，请在原生终端中处理。",
   failure: "任务执行失败，请检查输出。",
   interruption: "任务已中断，请检查输出与当前状态。",
-  stale: "进展较长时间未更新，请检查 Orca 中的 Agent。",
-  unverifiable: "暂时无法确认执行状态，请在 Orca 中检查。",
-  root_completion: "任务已完成，请审查成果。",
+  stale: "进展较长时间未更新，请检查 原生终端中的 Agent。",
+  unverifiable: "暂时无法确认执行状态，请在原生终端中检查。",
+  root_completion: "Agent 报告完成，请审查成果。",
 };
 
 function attentionLabel(attention: string) {
   return attention.split(",").map((category) => {
     const detail = category.trim();
-    return attentionLabels[detail] ?? `请在 Orca 中检查：${detail}`;
+    return attentionLabels[detail] ?? `请在原生终端中检查：${detail}`;
   }).join(" ");
 }
 
@@ -218,28 +219,28 @@ function AgentWorkspaceContent({ bridge, workspaceId, drafts, missionSelections 
   };
 
   const selectedMission = missions.find((mission) => mission.id === missionId);
-  const runtimeReady = environment?.available && environment.running && !!environment.ompVersion;
+  const runtimeReady = environment?.available && environment.running;
 
   return (
     <section className="agent-workspace" aria-label="Agent 协作工作面">
       <header className="agent-workspace__header">
         <span className="agent-workspace__eyebrow">AGENTS</span>
         <h2>管理上下文，编排现有 Agent</h2>
-        <p>ThoughtsFlow 管理图谱、交接内容与工作流证据；Orca 管理独立工作区，OMP 沿用已有 harness 执行任务。</p>
+        <p>ThoughtsFlow 管理上下文、任务与证据；herdr-core 管理持久终端，现有 Agent 模板提供执行能力。</p>
       </header>
       {!workspaceId ? <p className="agent-workspace__notice">请先在上方创建或选择本地工作区。</p> : null}
       <section className="agent-workspace__runtime" aria-label="运行环境">
         <div>
           <strong>本机运行环境</strong>
           <p>{environment
-            ? `Orca ${environment.orcaVersion ?? "未检测到"} · ${environment.running ? "运行中" : "未连接"} · OMP ${environment.ompVersion ?? "未检测到"}`
-            : "正在检测 Orca 与 OMP…"}</p>
+            ? `herdr-core ${environment.runtimeVersion ?? "未检测到"} · ${environment.running ? "已连接" : "未连接"}`
+            : "正在检测 herdr-core…"}</p>
           {environment?.message ? <p>{environment.message}</p> : null}
         </div>
         <div className="agent-workspace__actions">
           <button disabled={!!busy} onClick={() => void inspectEnvironment(false)} type="button">重新检测</button>
           {environment && !environment.running ? (
-            <button disabled={!!busy || !environment.available} onClick={() => void inspectEnvironment(true)} type="button">启动 Orca</button>
+            <button disabled={!!busy || !environment.available} onClick={() => void inspectEnvironment(true)} type="button">连接 herdr-core</button>
           ) : null}
         </div>
       </section>
@@ -256,13 +257,10 @@ function AgentWorkspaceContent({ bridge, workspaceId, drafts, missionSelections 
           <form className="agent-workspace__panel" onSubmit={(event) => { event.preventDefault(); void createMission(); }}>
             <h3>新建协作</h3>
             <label>
-              代码仓库
-              <select aria-label="代码仓库" required value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)} disabled={!!busy || !runtimeReady || !workspaceId}>
-                <option value="">选择 Orca 中的仓库</option>
-                {environment?.projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {project.path}</option>)}
-              </select>
+              工作目录
+              <input aria-label="工作目录" required value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)} placeholder="已有项目或独立 checkout 的绝对路径" disabled={!!busy || !workspaceId} />
             </label>
-            {environment?.running && !environment.projects.length ? <p>请先在 Orca 中登记代码仓库，再重新检测。</p> : null}
+            <p>按所选目录运行；herdr-core 不自动创建 Git worktree。</p>
             <label>
               协作目标
               <textarea aria-label="协作目标" aria-invalid={!!objectiveError} aria-describedby={objectiveError ? "agent-objective-error" : undefined} required rows={4} value={objective} onChange={(event) => setObjective(event.target.value)} placeholder="说明要完成的目标与验收标准" disabled={!!busy || !workspaceId} />
@@ -274,14 +272,14 @@ function AgentWorkspaceContent({ bridge, workspaceId, drafts, missionSelections 
           </form>
         </aside>
         {selectedMission ? (
-          <AgentMissionView key={selectedMission.id} bridge={bridge} mission={selectedMission} drafts={drafts} />
+          <AgentMissionView key={selectedMission.id} bridge={bridge} mission={selectedMission} drafts={drafts} templates={environment?.templates ?? []} />
         ) : <div className="agent-workspace__empty">选择已有协作，或选定仓库开始一个新目标。</div>}
       </div>
     </section>
   );
 }
 
-function AgentMissionView({ bridge, mission, drafts }: { bridge: DesktopBridge; mission: AgentMission; drafts?: AgentTaskDrafts }) {
+function AgentMissionView({ bridge, mission, drafts, templates }: { bridge: DesktopBridge; mission: AgentMission; drafts?: AgentTaskDrafts; templates: AgentTemplate[] }) {
   const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [operations, setOperations] = useState<AgentOperation[]>([]);
   const [receiptsLoaded, setReceiptsLoaded] = useState(false);
@@ -384,7 +382,7 @@ function AgentMissionView({ bridge, mission, drafts }: { bridge: DesktopBridge; 
     try {
       operation = await send(operationId);
     } catch (reason) {
-      if (kind === "start-task" && reason instanceof DesktopBridgeError && ["agent_handoff_stale", "agent_handoff_required", "agent_handoff", "agent_model", "agent_model_unsupported"].includes(reason.code)) {
+      if (kind === "start-task" && reason instanceof DesktopBridgeError && ["agent_handoff_stale", "agent_handoff_required", "agent_handoff", "agent_model", "agent_model_unsupported", "agent_template"].includes(reason.code)) {
         mutationInFlight.current = false;
         revision.current += 1;
         if (active.current) { setBusy(false); void refresh(); }
@@ -413,7 +411,7 @@ function AgentMissionView({ bridge, mission, drafts }: { bridge: DesktopBridge; 
       setNotice(`操作失败：${operation.error ?? "请查看操作回执。"}`);
     } else {
       if (target) setUncertainTargets((previous) => [...previous, target]);
-      setNotice("操作结果尚未确认，请勿重复提交。请检查操作回执和 Orca 中的实际任务。");
+      setNotice("操作结果尚未确认，请勿重复提交。请检查操作回执和 herdr-core 中的实际终端。");
     }
     void refresh();
     return operation;
@@ -430,12 +428,12 @@ function AgentMissionView({ bridge, mission, drafts }: { bridge: DesktopBridge; 
       </p>
       {readError ? <p className="agent-workspace__error" role="alert">{readError}</p> : null}
       {missionWarning ? <p className="agent-workspace__notice">{missionWarning}</p> : null}
-      {snapshot && !snapshot.connected ? (
+      {snapshot && !snapshot.connected && mission.runtimeBackend === "herdr-core" ? (
         <button disabled={!canReconnect} onClick={() => void mutate("reconnect", (operationId) => bridge.reconnectAgentMission({ operationId, missionId: mission.id }))} type="button">重新连接协作</button>
       ) : null}
       {notice ? <p className="agent-workspace__notice" role="status">{notice}</p> : null}
-      {uncertain ? <p className="agent-workspace__notice">有操作尚未确认，请查看下方回执并核对 Orca。{uncertainStart ? "已暂停新增任务，避免重复启动。" : "请勿重复提交同一操作。"}</p> : null}
-      <AgentHandoffPanel bridge={bridge} mission={mission} busy={busy} drafts={drafts}
+      {uncertain ? <p className="agent-workspace__notice">有操作尚未确认，请查看下方回执并核对 herdr-core。{uncertainStart ? "已暂停新增任务，避免重复启动。" : "请勿重复提交同一操作。"}</p> : null}
+      <AgentHandoffPanel templates={templates} bridge={bridge} mission={mission} busy={busy} drafts={drafts}
         canStart={canMutate && snapshot?.canStartTasks !== false && !uncertainStart}
         evidenceRevision={evidenceRevision}
         onStart={(input) => mutate("start-task", (operationId) => bridge.startAgentTask({ ...input, operationId }))} />

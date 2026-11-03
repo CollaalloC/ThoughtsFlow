@@ -1,3 +1,8 @@
+export interface AgentTemplate {
+  name: string;
+  description: string;
+}
+
 export interface AgentProject {
   id: string;
   name: string;
@@ -7,14 +12,15 @@ export interface AgentProject {
 export interface AgentEnvironment {
   available: boolean;
   running: boolean;
-  orcaVersion: string | null;
-  ompVersion: string | null;
+  runtimeVersion: string | null;
+  templates: AgentTemplate[];
   runtimeId: string | null;
   projects: AgentProject[];
   message: string | null;
 }
 
 export interface AgentMission {
+  runtimeBackend?: "herdr-core" | "orca";
   id: string;
   workspaceId: string;
   repositoryId: string;
@@ -89,6 +95,7 @@ export interface StartAgentTaskInput {
   title: string;
   spec: string;
   requestedModel?: string;
+  requestedTemplate?: string;
   handoff?: AgentHandoffConfirmation;
 }
 
@@ -126,6 +133,7 @@ export interface PreviewAgentHandoffInput {
   title: string;
   spec: string;
   requestedModel?: string;
+  requestedTemplate?: string;
   context: AgentContextSelection;
 }
 
@@ -148,6 +156,7 @@ export interface AgentHandoffSource {
 export interface AgentHandoffPreview {
   title?: string;
   requestedModel?: string;
+  requestedTemplate?: string;
   hash: string;
   text: string;
   compilerVersion: string;

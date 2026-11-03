@@ -77,9 +77,9 @@ impl AgentStore {
     }
 
     pub async fn recover(&self) -> AppResult<()> {
-        sqlx::query("UPDATE agent_operation SET status = 'unknown', error = '应用退出时未取得最终回执。请检查 Orca；不会自动重发。' WHERE status = 'pending'")
+        sqlx::query("UPDATE agent_operation SET status = 'unknown', error = '应用退出时未取得最终回执。请检查原执行运行时；不会自动重发。' WHERE status = 'pending'")
             .execute(&self.pool).await.map_err(database)?;
-        sqlx::query("UPDATE agent_mission SET body_json = json_set(body_json, '$.status', 'needs-attention', '$.error', '创建被中断，请检查 Orca；不会自动重建。') WHERE json_extract(body_json, '$.status') = 'creating'")
+        sqlx::query("UPDATE agent_mission SET body_json = json_set(body_json, '$.status', 'needs-attention', '$.error', '创建被中断，请检查原执行运行时；不会自动重建。') WHERE json_extract(body_json, '$.status') = 'creating'")
             .execute(&self.pool).await.map_err(database)?;
         Ok(())
     }
@@ -89,16 +89,6 @@ impl AgentStore {
             .bind(&mission.id)
             .bind(&mission.workspace_id)
             .bind(serde_json::to_string(mission).map_err(database)?)
-            .execute(&self.pool)
-            .await
-            .map_err(database)?;
-        Ok(())
-    }
-
-    pub async fn save_mission(&self, mission: &AgentMission) -> AppResult<()> {
-        sqlx::query("UPDATE agent_mission SET body_json = ? WHERE id = ?")
-            .bind(serde_json::to_string(mission).map_err(database)?)
-            .bind(&mission.id)
             .execute(&self.pool)
             .await
             .map_err(database)?;
@@ -128,28 +118,6 @@ impl AgentStore {
             .into_iter()
             .map(|body| serde_json::from_str(&body).map_err(database))
             .collect()
-    }
-
-    #[cfg(test)]
-    pub async fn save_binding(
-        &self,
-        id: &str,
-        pane_key: Option<&str>,
-        generation: Option<i64>,
-    ) -> AppResult<()> {
-        sqlx::query("UPDATE agent_mission SET coordinator_pane_key = COALESCE(?, coordinator_pane_key), consumer_generation = ? WHERE id = ?")
-            .bind(pane_key).bind(generation).bind(id).execute(&self.pool).await.map_err(database)?;
-        Ok(())
-    }
-
-    pub async fn binding(&self, id: &str) -> AppResult<(Option<String>, Option<i64>)> {
-        sqlx::query_as(
-            "SELECT coordinator_pane_key, consumer_generation FROM agent_mission WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(database)
     }
 
     pub async fn operation(&self, id: &str) -> AppResult<Option<(AgentOperation, Value)>> {
@@ -320,28 +288,6 @@ impl AgentStore {
         Ok(handoff)
     }
 
-    pub(super) async fn handoff_for_dispatch(
-        &self,
-        mission: &str,
-        task: &str,
-        dispatch: &str,
-    ) -> AppResult<Option<String>> {
-        sqlx::query_scalar(
-            "SELECT o.id FROM agent_operation o
-            JOIN agent_handoff h ON h.operation_id=o.id AND h.mission_id=o.mission_id
-            WHERE o.mission_id=? AND o.kind='start-task' AND o.status='succeeded'
-                AND json_extract(o.receipt_json,'$.result.dispatchId')=?
-                AND json_extract(o.receipt_json,'$.result.taskId')=?
-            ORDER BY o.rowid DESC LIMIT 1",
-        )
-        .bind(mission)
-        .bind(dispatch)
-        .bind(task)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(database)
-    }
-
     pub(super) async fn save_evidence(
         &self,
         input: &CaptureAgentEvidenceInput,
@@ -455,22 +401,61 @@ impl AgentStore {
         Ok(operation)
     }
 
-    pub async fn replied_message_ids(
+    pub(super) async fn execution(
         &self,
         mission: &str,
-    ) -> AppResult<std::collections::HashSet<String>> {
-        let ids: Vec<String> = sqlx::query_scalar("SELECT json_extract(request_json, '$.messageId') FROM agent_operation WHERE mission_id = ? AND kind = 'reply' AND status IN ('pending', 'succeeded', 'unknown') AND json_type(request_json, '$.messageId') = 'text'")
-            .bind(mission).fetch_all(&self.pool).await.map_err(database)?;
-        Ok(ids.into_iter().collect())
+        id: &str,
+    ) -> AppResult<Option<super::AgentExecution>> {
+        let body: Option<String> = sqlx::query_scalar(
+            "SELECT body_json FROM agent_execution WHERE mission_id=? AND operation_id=?",
+        )
+        .bind(mission)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?;
+        body.map(|body| serde_json::from_str(&body).map_err(database))
+            .transpose()
     }
 
-    pub async fn unresolved_releases(
-        &self,
-        mission: &str,
-    ) -> AppResult<std::collections::HashSet<String>> {
-        let ids: Vec<String> = sqlx::query_scalar("SELECT json_extract(request_json, '$.dispatchId') FROM agent_operation WHERE mission_id = ? AND kind = 'release' AND status IN ('pending', 'unknown') AND json_type(request_json, '$.dispatchId') = 'text'")
+    pub(super) async fn executions(&self, mission: &str) -> AppResult<Vec<super::AgentExecution>> {
+        let bodies: Vec<String> = sqlx::query_scalar("SELECT body_json FROM agent_execution WHERE mission_id=? ORDER BY rowid DESC LIMIT 200")
             .bind(mission).fetch_all(&self.pool).await.map_err(database)?;
-        Ok(ids.into_iter().collect())
+        bodies
+            .into_iter()
+            .map(|body| serde_json::from_str(&body).map_err(database))
+            .collect()
+    }
+
+    pub(super) async fn finish_execution(
+        &self,
+        operation: &AgentOperation,
+        execution: Option<&super::AgentExecution>,
+    ) -> AppResult<()> {
+        let mut tx = self.pool.begin().await.map_err(database)?;
+        if let Some(execution) = execution {
+            if execution.operation_id != operation.id
+                || execution.mission_id != operation.mission_id
+            {
+                return Err(database("执行身份不匹配"));
+            }
+            sqlx::query(
+                "INSERT INTO agent_execution(operation_id,mission_id,body_json) VALUES (?,?,?)",
+            )
+            .bind(&operation.id)
+            .bind(&operation.mission_id)
+            .bind(serde_json::to_string(execution).map_err(database)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(database)?;
+        }
+        let changed = sqlx::query("UPDATE agent_operation SET status=?, receipt_json=?, error=? WHERE id=? AND mission_id=? AND status='pending'")
+            .bind(&operation.status).bind(operation.receipt.to_string()).bind(&operation.error).bind(&operation.id).bind(&operation.mission_id)
+            .execute(&mut *tx).await.map_err(database)?.rows_affected();
+        if changed != 1 {
+            return Err(database("操作已结束，不能重复提交"));
+        }
+        tx.commit().await.map_err(database)
     }
 
     pub async fn begin(
@@ -520,38 +505,8 @@ impl AgentStore {
         Ok(())
     }
 
-    /// One local commit publishes the outcome and the binding proved by that outcome.
-    pub async fn finish_operation(
-        &self,
-        operation: &AgentOperation,
-        mission: Option<&AgentMission>,
-        binding: Option<(Option<&str>, Option<i64>)>,
-    ) -> AppResult<()> {
-        if mission.is_some_and(|mission| mission.id != operation.mission_id)
-            || (binding.is_some() && mission.is_none())
-        {
-            return Err(database("Agent 操作和任务绑定不匹配"));
-        }
-        let mut transaction = self.pool.begin().await.map_err(database)?;
-        let changed = sqlx::query("UPDATE agent_operation SET status = ?, receipt_json = ?, error = ? WHERE id = ? AND mission_id = ? AND status = 'pending'")
-            .bind(&operation.status).bind(operation.receipt.to_string()).bind(&operation.error)
-            .bind(&operation.id).bind(&operation.mission_id).execute(&mut *transaction).await.map_err(database)?.rows_affected();
-        if changed != 1 {
-            return Err(database("Agent 操作已结束，不能重复提交"));
-        }
-        if let Some(mission) = mission {
-            sqlx::query("UPDATE agent_mission SET body_json = ? WHERE id = ?")
-                .bind(serde_json::to_string(mission).map_err(database)?)
-                .bind(&mission.id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(database)?;
-            if let Some((pane_key, generation)) = binding {
-                sqlx::query("UPDATE agent_mission SET coordinator_pane_key = COALESCE(?, coordinator_pane_key), consumer_generation = ? WHERE id = ?")
-                    .bind(pane_key).bind(generation).bind(&mission.id).execute(&mut *transaction).await.map_err(database)?;
-            }
-        }
-        transaction.commit().await.map_err(database)
+    pub async fn finish_operation(&self, operation: &AgentOperation) -> AppResult<()> {
+        self.finish_execution(operation, None).await
     }
 }
 

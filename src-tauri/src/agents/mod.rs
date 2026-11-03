@@ -1,9 +1,8 @@
-//! Local execution control: Orca owns workers; ThoughtsFlow owns intent and receipts.
+//! Context workbench: herdr-core owns terminals; ThoughtsFlow owns intent and evidence.
 mod commands;
 mod context;
 mod executable;
-mod orca;
-mod receipt;
+mod herdr;
 mod service;
 pub(crate) mod store;
 
@@ -18,11 +17,17 @@ use serde_json::Value;
 pub struct AgentEnvironment {
     pub available: bool,
     pub running: bool,
-    pub orca_version: Option<String>,
-    pub omp_version: Option<String>,
+    pub runtime_version: Option<String>,
+    pub templates: Vec<AgentTemplate>,
     pub runtime_id: Option<String>,
     pub projects: Vec<AgentProject>,
     pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentTemplate {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,9 +37,15 @@ pub struct AgentProject {
     pub path: String,
 }
 
+fn legacy_runtime() -> String {
+    "orca".into()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMission {
+    #[serde(default = "legacy_runtime")]
+    pub runtime_backend: String,
     pub id: String,
     pub workspace_id: String,
     pub repository_id: String,
@@ -125,6 +136,8 @@ pub struct StartTaskInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<AgentHandoffConfirmation>,
 }
 
@@ -143,6 +156,8 @@ pub struct PreviewAgentHandoffInput {
     pub spec: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_template: Option<String>,
     pub context: AgentContextSelection,
 }
 
@@ -174,6 +189,8 @@ pub struct AgentHandoffPreview {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_template: Option<String>,
     pub text: String,
     pub compiler_version: String,
     pub source_run_ids: Vec<String>,
@@ -336,3 +353,17 @@ pub struct ReadOutputInput {
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentExecution {
+    pub operation_id: String,
+    pub mission_id: String,
+    pub core_id: String,
+    pub terminal_address: String,
+    pub terminal_created_ms: u64,
+    pub template: String,
+    pub cwd: String,
+    pub title: String,
+    pub spec: String,
+}
