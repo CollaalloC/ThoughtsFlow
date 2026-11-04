@@ -77,7 +77,7 @@ export function executeDesktopCommand(plan: ReturnType<typeof planDesktopCommand
 }
 
 export function requireLiveAgentOptIn(env: NodeJS.ProcessEnv = process.env) {
-  if (env.TF_AGENT_LIVE !== "1" || !env.TF_AGENT_LIVE_REPO_ID?.trim()) {
-    throw new Error("Explicitly set TF_AGENT_LIVE=1 and TF_AGENT_LIVE_REPO_ID for this real model test");
+  if (env.TF_AGENT_LIVE !== "1" || !env.TF_AGENT_LIVE_AGENT_BIN?.trim()) {
+    throw new Error("Explicitly set TF_AGENT_LIVE=1 and TF_AGENT_LIVE_AGENT_BIN for this real model test");
   }
 }

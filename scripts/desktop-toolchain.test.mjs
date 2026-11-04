@@ -37,10 +37,10 @@ test("unknown OS and command fail before spawning; live agent requires both opt-
   assert.throws(() => planDesktopCommand("webview-build", { platform: "freebsd" }), /Unsupported desktop/);
   assert.throws(() => desktopBinaryPath("/tmp", "aix"), /Unsupported desktop/);
   assert.throws(() => planDesktopCommand("unknown"), /Unknown desktop task/);
-  for (const env of [{}, { TF_AGENT_LIVE: "1" }, { TF_AGENT_LIVE_REPO_ID: "repo" }, { TF_AGENT_LIVE: "1", TF_AGENT_LIVE_REPO_ID: "  " }]) {
+  for (const env of [{}, { TF_AGENT_LIVE: "1" }, { TF_AGENT_LIVE_AGENT_BIN: "repo" }, { TF_AGENT_LIVE: "1", TF_AGENT_LIVE_AGENT_BIN: "  " }]) {
     assert.throws(() => requireLiveAgentOptIn(env), /Explicitly set/);
   }
-  assert.doesNotThrow(() => requireLiveAgentOptIn({ TF_AGENT_LIVE: "1", TF_AGENT_LIVE_REPO_ID: "repo" }));
+  assert.doesNotThrow(() => requireLiveAgentOptIn({ TF_AGENT_LIVE: "1", TF_AGENT_LIVE_AGENT_BIN: "repo" }));
   assert.equal(planDesktopCommand("webview-smoke", { env: {} }).options.env.TF_WEBVIEW_LIVE_PROXY, undefined);
   assert.equal(planDesktopCommand("webview-live-proxy", { env: {} }).options.env.TF_WEBVIEW_LIVE_PROXY, "1");
 });
