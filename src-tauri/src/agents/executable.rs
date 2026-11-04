@@ -25,27 +25,23 @@ impl Platform {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tool {
-    Orca,
-    Omp,
+    Herdr,
     Node,
 }
 
 impl Tool {
     fn variable(self) -> &'static str {
         match self {
-            Self::Orca => "THOUGHSFLOW_ORCA_BIN",
-            Self::Omp => "THOUGHSFLOW_OMP_BIN",
+            Self::Herdr => "THOUGHTSFLOW_HERDR_BIN",
             Self::Node => "THOUGHSFLOW_NODE_BIN",
         }
     }
 
     fn filename(self, platform: Platform) -> &'static str {
         match (self, platform) {
-            (Self::Orca, Platform::Windows) => "orca.exe",
-            (Self::Orca, Platform::Linux) => "orca-ide",
-            (Self::Orca, Platform::MacOs) => "orca",
-            (Self::Omp, Platform::Windows) => "omp.exe",
-            (Self::Omp, _) => "omp",
+            (Self::Herdr, Platform::Windows) => "herdr-core.exe",
+            (Self::Herdr, Platform::Linux) => "herdr-core",
+            (Self::Herdr, Platform::MacOs) => "herdr-core",
             (Self::Node, Platform::Windows) => "node.exe",
             (Self::Node, _) => "node",
         }
@@ -125,9 +121,8 @@ impl SearchPaths {
 
     fn directories(&self) -> Vec<PathBuf> {
         let mut directories = self.path.clone();
-        // Windows installers permit custom directories. The desktop Orca.exe
-        // is not its CLI: use the registered resources/bin PATH entry or an
-        // explicit native CLI path rather than guessing installation roots.
+        // Use the native herdr-core executable on PATH or an explicit path;
+        // desktop Herdr viewers are separate applications, not the CLI.
         if self.platform != Platform::Windows {
             if let Some(home) = &self.home {
                 directories.push(home.join(".local/bin"));
@@ -266,23 +261,25 @@ mod tests {
     fn all_platforms_prefer_explicit_then_path_then_platform_fallbacks() {
         for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
             let paths = paths(platform);
-            let filename = Tool::Orca.filename(platform);
+            let filename = Tool::Herdr.filename(platform);
             let explicit = paths.path[1].join(filename);
             let all_executable = |_: &Path| FileStatus::Executable;
             assert_eq!(
-                resolve(Tool::Orca, Some(&explicit), None, &paths, &all_executable)
+                resolve(Tool::Herdr, Some(&explicit), None, &paths, &all_executable)
                     .unwrap()
                     .program,
                 explicit
             );
             assert_eq!(
-                resolve(Tool::Orca, None, None, &paths, &all_executable)
+                resolve(Tool::Herdr, None, None, &paths, &all_executable)
                     .unwrap()
                     .program,
                 paths.path[0].join(filename)
             );
             if platform == Platform::Windows {
-                assert!(resolve(Tool::Orca, None, None, &paths, &|_| FileStatus::Missing).is_err());
+                assert!(
+                    resolve(Tool::Herdr, None, None, &paths, &|_| FileStatus::Missing).is_err()
+                );
                 continue;
             }
             let fallback = paths
@@ -299,7 +296,7 @@ mod tests {
                 }
             };
             assert_eq!(
-                resolve(Tool::Orca, None, None, &paths, &only_fallback)
+                resolve(Tool::Herdr, None, None, &paths, &only_fallback)
                     .unwrap()
                     .program,
                 fallback
@@ -311,7 +308,7 @@ mod tests {
     fn invalid_explicit_path_never_falls_back_and_relative_path_entries_are_ignored() {
         for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
             let mut paths = paths(platform);
-            let invalid = paths.path[0].join(Tool::Orca.filename(platform));
+            let invalid = paths.path[0].join(Tool::Herdr.filename(platform));
             for status in [FileStatus::Missing, FileStatus::File] {
                 let probe = |candidate: &Path| {
                     if candidate == invalid {
@@ -320,11 +317,11 @@ mod tests {
                         FileStatus::Executable
                     }
                 };
-                assert!(resolve(Tool::Orca, Some(&invalid), None, &paths, &probe).is_err());
+                assert!(resolve(Tool::Herdr, Some(&invalid), None, &paths, &probe).is_err());
             }
             assert!(
                 resolve(
-                    Tool::Orca,
+                    Tool::Herdr,
                     Some(Path::new("relative")),
                     None,
                     &paths,
@@ -334,10 +331,10 @@ mod tests {
             );
             paths.path.insert(0, "relative".into());
             assert_eq!(
-                resolve(Tool::Orca, None, None, &paths, &|_| FileStatus::Executable)
+                resolve(Tool::Herdr, None, None, &paths, &|_| FileStatus::Executable)
                     .unwrap()
                     .program,
-                paths.path[1].join(Tool::Orca.filename(platform))
+                paths.path[1].join(Tool::Herdr.filename(platform))
             );
         }
     }
@@ -346,8 +343,8 @@ mod tests {
     fn windows_batch_files_are_rejected_without_searching_or_launching_a_shell() {
         let paths = paths(Platform::Windows);
         for suffix in ["cmd", "CMD", "bat", "BAT"] {
-            let script = paths.path[0].join(format!("orca.{suffix}"));
-            let result = resolve(Tool::Orca, Some(&script), None, &paths, &|_| {
+            let script = paths.path[0].join(format!("herdr-core.{suffix}"));
+            let result = resolve(Tool::Herdr, Some(&script), None, &paths, &|_| {
                 panic!("batch files must be rejected before probing")
             });
             assert!(result.unwrap_err().contains(".cmd/.bat"));
@@ -370,7 +367,7 @@ mod tests {
                 }
             };
             assert_eq!(
-                resolve(Tool::Orca, Some(&script), Some(&node), &paths, &probe).unwrap(),
+                resolve(Tool::Herdr, Some(&script), Some(&node), &paths, &probe).unwrap(),
                 LaunchPlan {
                     program: node.clone(),
                     prefix_arguments: vec![script.as_os_str().to_owned()]
@@ -378,7 +375,7 @@ mod tests {
             );
             assert!(
                 resolve(
-                    Tool::Omp,
+                    Tool::Herdr,
                     Some(&script),
                     Some(&paths.path[0].join("missing")),
                     &paths,
@@ -392,7 +389,7 @@ mod tests {
     #[test]
     fn windows_length_guard_counts_utf16_and_quoting_before_process_start() {
         let launch = LaunchPlan {
-            program: PathBuf::from("C:/程序 文件/orca.exe"),
+            program: PathBuf::from("C:/程序 文件/herdr-core.exe"),
             prefix_arguments: vec!["a\\\"b".into()],
         };
         assert!(
@@ -435,7 +432,7 @@ mod tests {
     fn unix_files_need_execute_permission_but_explicit_node_scripts_do_not() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let program = directory.path().join("orca");
+        let program = directory.path().join("herdr-core");
         std::fs::write(&program, "fixture").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(file_status(&program) == FileStatus::File);

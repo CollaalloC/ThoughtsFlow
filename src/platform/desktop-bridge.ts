@@ -1,6 +1,13 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AgentEnvironment,
+  AgentEvidence,
+  AgentEvidencePage,
+  AgentHandoffPage,
+  AgentHandoff,
+  AgentHandoffPreview,
+  CaptureAgentEvidenceInput,
+  PreviewAgentHandoffInput,
   AgentMission,
   AgentOperation,
   AgentOutput,
@@ -60,6 +67,14 @@ export interface DesktopBridge {
   reconnectAgentMission(input: ReconnectAgentMissionInput): Promise<AgentOperation>;
   listAgentOperations(missionId: string): Promise<AgentOperation[]>;
   readAgentOutput(input: ReadAgentOutputInput): Promise<AgentOutput>;
+  previewAgentHandoff(input: PreviewAgentHandoffInput): Promise<AgentHandoffPreview>;
+  listAgentHandoffs(missionId: string): Promise<AgentHandoff[]>;
+  captureAgentEvidence(input: CaptureAgentEvidenceInput): Promise<AgentEvidence>;
+  listAgentEvidence(workspaceId: string): Promise<AgentEvidence[]>;
+  listAgentEvidencePage(input: { workspaceId: string; cursor?: string | null }): Promise<AgentEvidencePage>;
+  listAgentHandoffPage(input: { missionId: string; cursor?: string | null }): Promise<AgentHandoffPage>;
+  getAgentEvidence(input: { workspaceId: string; id: string }): Promise<AgentEvidence>;
+  getAgentHandoff(input: { missionId: string; operationId: string }): Promise<AgentHandoff>;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
   createWorkspace(input: {
     name: string;
@@ -257,6 +272,14 @@ export function createDesktopBridge(invokeCommand: InvokeCommand = invoke): Desk
     reconnectAgentMission: (input) => request("agent_reconnect", { input }),
     listAgentOperations: (missionId) => request("agent_operations", { missionId }),
     readAgentOutput: (input) => request("agent_read_output", { input }),
+    previewAgentHandoff: (input) => request("agent_preview_handoff", { input }),
+    listAgentHandoffs: (missionId) => request("agent_handoffs", { missionId }),
+    captureAgentEvidence: (input) => request("agent_capture_evidence", { input }),
+    listAgentEvidence: (workspaceId) => request("agent_evidence", { workspaceId }),
+    listAgentEvidencePage: (input) => request("agent_evidence_page", { input }),
+    listAgentHandoffPage: (input) => request("agent_handoff_page", { input }),
+    getAgentEvidence: (input) => request("agent_get_evidence", { input }),
+    getAgentHandoff: (input) => request("agent_get_handoff", { input }),
     listWorkspaces: () => request("list_workspaces"),
     createWorkspace: (input) => request("create_workspace", { input }),
     openWorkspace: (id) => request("open_workspace", { id }),

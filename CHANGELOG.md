@@ -2,7 +2,29 @@
 
 Notable user-facing changes are recorded here. Pre-release status and available installers are listed on [GitHub Releases](https://github.com/CollaalloC/ThoughtsFlow/releases).
 
-## Unreleased
+## 0.1.0-beta.3 — 2026-11-04
+
+### Agent workbench
+
+- Make graphical context management and explicit Agent handoffs the primary workflow, without another Provider setup. Existing direct-model conversations remain available through compatibility views.
+- Replace the active Orca runtime dependency with herdr-core generation-1 JSON-RPC and existing native Agent templates. Models, credentials, tools, Skills and approvals stay with the selected Agent.
+- Preview and freeze task input and template selection, save immutable screen observations, and reuse explicitly selected evidence across tasks and working directories.
+- Preserve old Orca Missions as read-only history. Schema 11 adds immutable execution bindings without rewriting historical receipts, evidence, hashes or migration checksums.
+- Distinguish confirmed delivery, Agent-reported completion, process exit and task acceptance. Unknown outcomes are never automatically dispatched again.
+
+### Reliability and performance
+
+- Page history in groups of 50 summaries and read bodies only when expanded. Preserve drafts and selected Missions across navigation; late operations cannot clear newer edits.
+- Reject stale previews, foreign core/terminal identities and uncertain input delivery. Keep retained raw receipts when a local binding commit fails.
+- Reduce progress projection to one terminal-list request per snapshot and keep context reads workspace-scoped. Hidden views pause polling and revalidate before controls resume.
+- Verify the installed core with isolated fixtures and real OMP workflows; include explicitly gated real-Agent tests without model credentials in ordinary CI.
+
+### Usage and upgrade notes
+
+- herdr-core and Agent binaries are installed separately. Windows templates require sh; models and API accounts are not bundled.
+- Tasks run in the explicitly chosen directory; no automatic Git worktree creation or DAG scheduling is provided. Choose separate checkouts for file isolation.
+- Back up the local database before upgrading. Legacy Orca executions are not resumed or reassigned, and schema-upgraded databases should not be opened with older betas.
+- Test installers are not signed with trusted publisher certificates or notarized. Published platform assets and validation links are listed on the release page.
 
 ## 0.1.0-beta.2 — 2026-09-27
 

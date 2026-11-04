@@ -1,5 +1,7 @@
 # ThoughtsFlow 产品定位与原型设计蓝图
 
+> **2026-10-06 定位修订**：ThoughtsFlow 的主定位是现有 Agent 的上下文图形工作台与工作流编排平台。模型、认证、工具、Skills、MCP 和审批继承 Agent harness；Provider 直连降为兼容入口。当前决定与实现范围以 [ADR 0003](docs/adr/0003-agent-workbench-context-handoffs.md) 和[工作台计划](docs/AGENT_WORKBENCH_PLAN.md)为准。下文保留早期产品探索背景，其中默认 Focus、BYOK 主路径和首阶段不服务 Agent 的取舍已被本次决定取代。
+
 > 版本：Prototype 0.1
 > 需求基线：[AI 分支对话产品需求与架构调研报告](./AI分支对话产品需求与架构调研报告.md)
 > 市场基线：[产品市场定位与切入策略调研](./产品市场定位与切入策略调研.md)

@@ -32,7 +32,7 @@ test.describe("ThoughtsFlow Context Tree core journeys", () => {
 
   async function configureFixtureProvider(page: Page, providerName: string) {
     const workSurface = page.getByRole("navigation", { name: "工作面" });
-    await workSurface.getByRole("button", { name: "Provider 设置", exact: true }).click();
+    await workSurface.getByRole("button", { name: "Provider 设置（高级兼容）", exact: true }).click();
 
     const settings = page.getByRole("region", { name: "Providers" });
     await expect(settings).toBeVisible();
@@ -46,8 +46,9 @@ test.describe("ThoughtsFlow Context Tree core journeys", () => {
     await settings.getByRole("button", { name: "保存 Provider" }).click();
     await expect(settings.getByRole("status")).toContainText("Provider 已保存");
 
-    await page.getByRole("button", { name: "返回 Focus" }).click();
-    await expect(page.getByLabel("消息")).toBeVisible();
+    await page.getByRole("button", { name: "返回工作台" }).click();
+    await workSurface.getByRole("button", { name: "Focus（兼容）", exact: true }).click();
+    await expect(page.getByRole("navigation", { name: "工作区", exact: true })).toBeVisible();
   }
 
   async function createWorkspace(page: Page, workspaceName: string, providerName: string) {
@@ -234,6 +235,8 @@ test.describe("ThoughtsFlow Context Tree core journeys", () => {
       .poll(async () => {
         try {
           await page.goto("/", { timeout: 3_000, waitUntil: "domcontentloaded" });
+          await page.getByRole("navigation", { name: "工作面" })
+            .getByRole("button", { name: "Focus（兼容）", exact: true }).click();
           return await page.getByRole("navigation", { name: "工作区" }).isVisible();
         } catch {
           return false;

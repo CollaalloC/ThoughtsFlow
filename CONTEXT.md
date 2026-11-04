@@ -1,8 +1,8 @@
 # ThoughtsFlow Domain Language
 
-This glossary names the concepts that define ThoughtsFlow's local AI reasoning and decision workspace.
+ThoughtsFlow is a local-first Agent workbench for graphical context management and workflow orchestration. Existing Agent harnesses own model connections, tools, Skills and approvals. Provider-based direct inference remains a compatibility path. Execution uses herdr-core and existing native templates; legacy Orca data is read-only. See [ADR 0004](docs/adr/0004-herdr-core-workbench.md).
 
-## Provider Configuration
+## Provider Configuration (Compatibility)
 
 **Provider Template**:
 An immutable vendor preset that identifies a model provider and describes its default endpoint and protocol capabilities without containing credentials.
@@ -73,7 +73,7 @@ A user-owned collaboration objective attached to one ThoughtsFlow workspace and 
 _Avoid_: Model Run, conversation branch, provider request
 
 **Orchestration Run**:
-The external coordination scope that groups Agent Tasks and their Dispatches for one Mission.
+A historical Orca coordination scope. New herdr-core work uses a local Mission and Execution Attempt, not a fabricated external Run.
 _Avoid_: Model Run, model answer, Provider request
 
 **Agent Task**:
@@ -81,9 +81,27 @@ An independently reviewable piece of work with an explicit scope, constraints, a
 _Avoid_: Prompt, terminal, agent process
 
 **Dispatch**:
-One authoritative attempt by an agent to execute an Agent Task; a later attempt does not overwrite its result.
+A historical Orca attempt identifier. New herdr-core execution is tracked by a local Execution Attempt with exact core and terminal identities.
 _Avoid_: Model Run, Task, retry in place
 
 **Agent Operation**:
 One user request to control collaboration, with a durable identity and evidence of its outcome; command acceptance is separate from task completion.
 _Avoid_: Agent result, inferred success
+
+**Agent Harness**:
+The existing Agent's execution environment, including its model configuration, authentication, tool loop, Skills, MCP and approval policies. ThoughtsFlow delegates work to it without reimplementing these facilities.
+_Avoid_: Provider, model endpoint, ThoughtsFlow tool engine
+
+**Context Handoff**:
+An immutable snapshot of the exact task text and selected context/evidence submitted by ThoughtsFlow to an Agent Harness, with source identities and a hash. It does not claim to contain every internal model request made by the harness.
+_Avoid_: Context Receipt, entire Agent context, model request
+
+**Agent Evidence**:
+A user-requested immutable observation of one bounded page of an exact Dispatch's output, including source, cursor, text hash, observation time and observed task status. It can be explicitly reused in later task handoffs.
+_Avoid_: Final answer, verified success, Model Run, live transcript
+
+**Execution Attempt**:
+One durable local task launch operation bound to a herdr-core ID, terminal address, creation time, selected template and working directory. A confirmed first message proves delivery, not task acceptance. Unknown attempts are never automatically dispatched again.
+
+**Native Template**:
+A user-owned herdr-core template that chooses an existing Agent command and configuration. ThoughtsFlow requests its name; the Agent retains model, tool and approval ownership.

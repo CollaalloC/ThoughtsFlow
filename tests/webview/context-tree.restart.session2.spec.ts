@@ -12,6 +12,7 @@ import {
   openContextTree,
   openProviderMaintenance,
   openWorkspace,
+  openFocusCompatibility,
   pinMainWindow,
   requiredEnvironment,
   selectConversationProvider,
@@ -47,6 +48,7 @@ describe("ThoughtsFlow real process restart journey — session 2", () => {
     );
 
     await pinMainWindow();
+    await openFocusCompatibility();
     await openWorkspace(workspaceName);
     await selectConversationProvider({
       name: providerName,

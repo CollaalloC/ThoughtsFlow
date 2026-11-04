@@ -1,7 +1,7 @@
 name: Desktop WebView fixtures (manual)
 
 # Opt-in GUI coverage is separate from normal compilation/unit checks.
-# These journeys use local HTTP/Orca fixtures and do not call paid models.
+# These journeys use local HTTP/herdr-core fixtures and do not call paid models.
 on:
   workflow_dispatch:
 

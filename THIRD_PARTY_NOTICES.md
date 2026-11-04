@@ -3,15 +3,17 @@
 ThoughtsFlow's original source is distributed under the [MIT License](LICENSE).
 Third-party components retain their own licenses and copyright notices.
 
-## OMP and Orca
+## External Agent runtimes and historical references
 
-ThoughtsFlow learns from and interoperates with these independent projects:
+ThoughtsFlow interoperates with herdr-core and retains these historical design acknowledgements:
+
+- **[herdr-core](https://github.com/herdrdev/herdr-core)**: current external terminal and Agent collaboration foundation. Verified v0.1.17 (`ce87721557176f6cddaac1c7aefbf76929923263`) is Apache-2.0. Its binary and source are not bundled; the adapter independently implements the documented JSON-RPC protocol.
 
 - **[oh-my-pi / OMP](https://github.com/can1357/oh-my-pi)**: model-provider architecture, context-tree design, and the separately installed agent execution runtime. The verified v18.3.2 license is MIT; copyright Mario Zechner (2025), Can Bölük (2025–2026), and Stencil Labs, Inc. (2026).
 - **[Orca](https://github.com/stablyai/orca)**: supervised multi-agent orchestration and separately installed runtime. The verified v1.4.212 license is MIT; copyright Lovecast Inc. (2026).
 
-The application invokes a user's separately installed Orca CLI and optionally
-connects to an OMP Gateway. It does not include their executables, SDKs, or source
+The application invokes a user's separately installed herdr-core CLI and optionally
+connects to an OMP Gateway. Orca is retained as a historical reference and is no longer invoked. It does not include their executables, SDKs, or source
 trees. Source review found independently implemented Rust/React adapters, not a
 vendored fork. The Context Tree design reference is OMP commit
 `d16c6168c86f40fc44f25118c2fd06fe160fcb93`; its earlier MIT notice is retained too.

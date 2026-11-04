@@ -1,38 +1,20 @@
-# OMP / Orca 上游兼容跟踪
+# Agent 基座兼容跟踪
 
-最后核查：2026-09-26。机器可读基线见 [baseline.json](baseline.json)。已设置本任务的每周一 10:00 跟踪；只有重要变化、兼容性问题、已完成集成或需要决定的事项才通知。
+当前基座为 **herdr-core**，依据 [2026-11-04 架构决定](../adr/0004-herdr-core-workbench.md)。每周维护任务已更新为跟踪 herdr-core 与原生 Agent harness，不再添加 Orca 执行依赖。
 
-| 上游 | 本机已安装 | 核查时最新稳定版 | 官方来源 |
-| --- | --- | --- | --- |
-| OMP | 18.3.2（开始核查时为 18.2.10） | 18.3.2，2026-09-26 | [Release](https://github.com/can1357/oh-my-pi/releases/tag/v18.3.2) |
-| Orca | 1.4.207 | 1.4.212，2026-09-25 | [Release](https://github.com/stablyai/orca/releases/tag/v1.4.212) |
+机器可读基线见 [baseline.json](baseline.json)，协议与基础回归见 [2026-11-04](2026-11-04.md)，最新真实 Agent 验证见 [双阶段实测](2026-11-04-real-agent.md)。本机及已核实官方 tag 均为 herdr-core 0.1.17，协议 generation 1；不将 tag 核实表述为最新稳定 release 核实。
 
-此轮没有执行运行时升级命令，也没有读取或改写模型凭据。开始核查时 OMP 为 18.2.10，收尾 CLI 复核时已是 18.3.2；这里保留两次观察，避免使用过期安装状态。上次真实 OMP 单任务验证使用 18.2.8 / Orca 1.4.206，不能替代新版实测。
-
-## 已吸收的能力
-
-- OMP Auth Gateway：通过现有模型请求接口接入 `provider/model` 目录和多厂商路由，保持正常 Model Run 与 Agent Mission 分离。需要已配置 Auth Broker，不直接继承本机 `agent.db`。
-- 动态模型目录：读取声明的显示名与上下文大小，过滤已知不适用的模型类型，未知字段维持未知；前端按输入筛选且最多渲染 100 个候选。
-- Orca 跨平台启动约定：Windows 使用原生 `resources/bin/orca.exe`，Linux 使用 `orca-ide`，macOS 支持 PATH 和用户级安装目录；不经过 `.cmd/.bat` 重新解释任务正文。
-- 能力验证继续以运行时 `orchestration.contract.v1` 为准；离线和连接失败不等于某能力已证实不支持。读取执行器输出继续使用 Dispatch 与结构化 `worker-read`，不要求执行器一定有 PTY。
-
-## 有价值但尚未直接接入的更新
-
-| 更新 | 价值 | 当前取舍 |
+| 能力 | 当前实现 | 验证边界 |
 | --- | --- | --- |
-| OMP 18.3.1 `prompt_result`、`session_settled` / `isSettled` | 区分提示词完成与整个会话后台工作结束 | 只有另建 Direct OMP adapter 时才使用；目前生命周期由 Orca 管理，不争用其 RPC 连接 |
-| OMP `open_session`、`set_event_filter`、`--no-ui` | 宿主会话恢复与降低事件传输量 | 记录在下一适配阶段，当前软件没有 Direct OMP adapter |
-| OMP 18.3.2 Windows TEMP、原始输出链接和 compaction 修复 | 提升上游运行可靠性 | 作为升级候选，先验证版本契约和实际回归，再升级兼容基线 |
-| Orca 原生聊天 OMP 模型目录 / 模型切换 | 真实模型选择能力 | 不等同于 supervised worker 的模型覆盖；1.4.212 的 worker-start 仍不支持 OMP `--model` / `--effort`，界面不显示无效选择器 |
-| Orca WSL relay、Linux 孤儿进程释放、结构化任务状态修复 | 跨平台与恢复可靠性 | 对应平台 runner 执行后才提升验证状态 |
+| 原生模板 | 读取模板名/描述，选择后由 core 解析 Agent 命令与配置 | 不自动修改模板或模型凭据 |
+| 任务派发 | 冻结交接，先持久化意图，再核验准确终端与 first_message.sent | 送达不等于验收，未知结果不自动重派 |
+| 状态与指导 | 终端生命周期和 Agent 自报状态分别展示；只向 idle 的同一轮次发送指导 | 不绕过审批，不猜测屏幕语义 |
+| 输出证据 | lines:0 被动屏幕观察，保存原始 RPC 与读取前后身份 | 不冒充可分页转录、模型上下文或成功证明 |
+| Git / 工作目录 | 明确选择已有目录，可选用户准备的独立 checkout | core 不创建 worktree，本次不自动调度或合并 |
+| 旧 Orca 数据 | 只读历史、交接和证据可离线读取与显式复用 | 原始回执与 hash 不改写，不自动重新派发 |
 
-来源：[OMP RPC](https://github.com/can1357/oh-my-pi/blob/v18.3.2/docs/rpc.md)、[OMP Gateway](https://github.com/can1357/oh-my-pi/blob/v18.3.2/packages/coding-agent/src/cli/auth-gateway-cli.ts)、[Orca worker 参数](https://github.com/stablyai/orca/blob/v1.4.212/src/cli/specs/orchestration-worker-specs.ts)、[Orca OMP 原生聊天目录](https://github.com/stablyai/orca/blob/v1.4.212/src/shared/agent-session-option-catalog-omp.ts)。
+macOS 已通过 herdr-core 0.1.17 + OMP 18.16.0 的真实双阶段 Agent 工作流，继承既有 gpt-6-astra / xhigh 配置。Windows/Linux 尚无本轮真实执行证据。保留三平台构建/fixture CI；本地 macOS、MockRuntime 或静态检查均不能替代相应 runner。
 
-## 每次跟踪的执行顺序
+后续跟踪原生模板与 harness 继承、协议能力、会话身份、事件订阅、重连和屏幕/状态边界。完整 Agent 会话树需原生 harness 提供，不能从终端猜测。历史 OMP/Orca 版本记录保留在 [2026-11-02](2026-11-02.md) 和更早核查中，仅描述当时版本，不再代表当前执行架构。
 
-1. 读取本基线和当前 Git 状态，保留用户未提交的工作。
-2. 核对官方稳定 release、固定版本源码和本机 CLI；记录来源和核查时间。
-3. 把变化归为可直接复用、需能力门控、需独立适配或暂不相关；不依据版本号猜测全部能力。
-4. 对可复用变化先补契约测试，再实现最小改动；性能变化保留相同条件下的前后证据。
-5. 跑本地回归，按功能提交，并更新基线；不自动推送、发布、修改凭据或安装上游应用。
-6. Windows/Linux 的状态只由对应 CI / 实机记录提升。模型费用和账号权限不由离线目录或 fixture 测试推断。
+每轮先读取本基线、CONTEXT.md、最新 ADR 和工作树；只对已证实有收益的契约变化实现。保留用户改动与不可变记录，优先隔离 fixture、性能和平台检查，按功能本地提交，不自动升级、修改凭据、停止共享 core、推送或发布。

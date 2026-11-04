@@ -1,7 +1,7 @@
 import { $, $$, browser, expect } from "@wdio/globals";
 import type { ChainablePromiseElement } from "webdriverio";
 import { ProviderFixture } from "../fixtures/provider-server";
-import { assertNativePlatform } from "./support";
+import { openFocusCompatibility, pinMainWindow } from "./support";
 
 function xpathLiteral(value: string) {
   if (!value.includes('"')) return `"${value}"`;
@@ -117,10 +117,9 @@ describe("ThoughtsFlow native desktop WebView", () => {
   });
 
   it("selects an exact Model Run and keeps the cursor through a WKWebView reload", async () => {
-    assertNativePlatform();
     // Pin the single embedded window so the service does not probe the optional
     // advanced WDIO plugin before every ordinary WebDriver command.
-    await browser.tauri.switchWindow("main");
+    await pinMainWindow();
 
     const suffix = `${Date.now()}`;
     const providerName = `WebView Fixture ${suffix}`;
@@ -130,7 +129,7 @@ describe("ThoughtsFlow native desktop WebView", () => {
 
     const workSurface = await $('[aria-label="工作面"]');
     await workSurface.waitForDisplayed();
-    await (await button("Provider 设置")).click();
+    await (await button("Provider 设置（高级兼容）")).click();
 
     const settings = await $('[aria-labelledby="provider-settings-title"]');
     await settings.waitForDisplayed();
@@ -145,7 +144,8 @@ describe("ThoughtsFlow native desktop WebView", () => {
     await (await button("保存 Provider")).click();
     await waitForBodyText("Provider 已保存");
 
-    await (await button("返回 Focus")).click();
+    await (await button("返回工作台")).click();
+    await openFocusCompatibility();
     await (await button("添加工作区")).click();
     await (await controlByLabel("工作区名称")).setValue(workspaceName);
     await (await controlByLabel("工作区目标")).setValue("验证原生 Context Tree 游标持久化");
@@ -192,6 +192,7 @@ describe("ThoughtsFlow native desktop WebView", () => {
 
     await browser.refresh();
     await (await $('[aria-label="工作面"]')).waitForDisplayed();
+    await openFocusCompatibility();
     const workspaceButton = await $(
       `//nav[@aria-label="工作区"]//button[normalize-space(.)=${xpathLiteral(workspaceName)}]`,
     );

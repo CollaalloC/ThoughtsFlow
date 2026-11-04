@@ -1,8 +1,8 @@
-//! Local execution control: Orca owns workers; ThoughtsFlow owns intent and receipts.
+//! Context workbench: herdr-core owns terminals; ThoughtsFlow owns intent and evidence.
 mod commands;
+mod context;
 mod executable;
-mod orca;
-mod receipt;
+mod herdr;
 mod service;
 pub(crate) mod store;
 
@@ -17,11 +17,17 @@ use serde_json::Value;
 pub struct AgentEnvironment {
     pub available: bool,
     pub running: bool,
-    pub orca_version: Option<String>,
-    pub omp_version: Option<String>,
+    pub runtime_version: Option<String>,
+    pub templates: Vec<AgentTemplate>,
     pub runtime_id: Option<String>,
     pub projects: Vec<AgentProject>,
     pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentTemplate {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,9 +37,15 @@ pub struct AgentProject {
     pub path: String,
 }
 
+fn legacy_runtime() -> String {
+    "orca".into()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMission {
+    #[serde(default = "legacy_runtime")]
+    pub runtime_backend: String,
     pub id: String,
     pub workspace_id: String,
     pub repository_id: String,
@@ -121,6 +133,190 @@ pub struct StartTaskInput {
     pub mission_id: String,
     pub title: String,
     pub spec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<AgentHandoffConfirmation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextSelection {
+    pub include_active_context: bool,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewAgentHandoffInput {
+    pub mission_id: String,
+    pub title: String,
+    pub spec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_template: Option<String>,
+    pub context: AgentContextSelection,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffConfirmation {
+    pub context: AgentContextSelection,
+    pub preview_hash: String,
+    pub expected_cursor_version: u64,
+    pub expected_draft_version: u64,
+    pub expected_branch_id: Option<String>,
+    pub expected_branch_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffSource {
+    pub kind: String,
+    pub id: String,
+    pub role: String,
+    pub content_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffPreview {
+    pub hash: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_template: Option<String>,
+    pub text: String,
+    pub compiler_version: String,
+    pub source_run_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub sources: Vec<AgentHandoffSource>,
+    pub parent_run_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub cursor_version: u64,
+    pub draft_version: u64,
+    pub branch_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoff {
+    pub operation_id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub created_at: String,
+    pub preview: AgentHandoffPreview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureAgentEvidenceInput {
+    pub id: String,
+    pub mission_id: String,
+    pub dispatch_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidence {
+    pub id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub dispatch_id: String,
+    pub handoff_operation_id: Option<String>,
+    pub text: String,
+    pub content_hash: String,
+    pub source: Option<String>,
+    pub request_cursor: Option<String>,
+    pub cursor: Option<String>,
+    pub has_more: bool,
+    pub warning: Option<String>,
+    pub observed_task_status: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidencePageInput {
+    pub workspace_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffPageInput {
+    pub mission_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAgentEvidenceInput {
+    pub workspace_id: String,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAgentHandoffInput {
+    pub mission_id: String,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidenceSummary {
+    pub id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub dispatch_id: String,
+    pub handoff_operation_id: Option<String>,
+    pub title: Option<String>,
+    pub content_hash: String,
+    pub source: Option<String>,
+    pub request_cursor: Option<String>,
+    pub cursor: Option<String>,
+    pub has_more: bool,
+    pub warning: Option<String>,
+    pub observed_task_status: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffSummary {
+    pub operation_id: String,
+    pub workspace_id: String,
+    pub mission_id: String,
+    pub created_at: String,
+    pub title: String,
+    pub hash: String,
+    pub source_run_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvidencePage {
+    pub items: Vec<AgentEvidenceSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHandoffPage {
+    pub items: Vec<AgentHandoffSummary>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -157,3 +353,17 @@ pub struct ReadOutputInput {
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentExecution {
+    pub operation_id: String,
+    pub mission_id: String,
+    pub core_id: String,
+    pub terminal_address: String,
+    pub terminal_created_ms: u64,
+    pub template: String,
+    pub cwd: String,
+    pub title: String,
+    pub spec: String,
+}

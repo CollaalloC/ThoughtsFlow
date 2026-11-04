@@ -1,6 +1,7 @@
-import { ArrowLeft, Bot, GitCompareArrows, Map, MessageSquareText, Settings2 } from "lucide-react";
+import { ArrowLeft, Bot, GitCompareArrows, Map as MapIcon, MessageSquareText, Settings2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { DecisionRunOption } from "../features/decision";
+import { AgentTaskDrafts } from "../features/agents/agent-drafts";
 import { FocusWorkspace } from "../features/conversation";
 import { resolveContextBranchId } from "../features/context-tree";
 import { createDesktopBridge, type DesktopBridge } from "../platform/desktop-bridge";
@@ -53,8 +54,10 @@ export function App({ bridge: providedBridge }: AppProps) {
   const bridgeRef = useRef<DesktopBridge | null>(null);
   if (!bridgeRef.current) bridgeRef.current = providedBridge ?? createDesktopBridge();
   const bridge = bridgeRef.current;
+  const agentDrafts = useRef(new AgentTaskDrafts());
+  const agentMissionSelections = useRef(new Map<string, string>());
 
-  const [view, setView] = useState<AppView>("focus");
+  const [view, setView] = useState<AppView>("agents");
   const [workspaceId, setWorkspaceId] = useState<string>();
   const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
   const [projection, setProjection] = useState<RouteProjection | null>(null);
@@ -63,22 +66,6 @@ export function App({ bridge: providedBridge }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [settingsProviderProfileId, setSettingsProviderProfileId] = useState<string>();
-
-  useEffect(() => {
-    let active = true;
-    bridge
-      .listWorkspaces()
-      .then((workspaces) => {
-        if (!active || workspaceId) return;
-        setWorkspaceId(workspaces.find((workspace) => !workspace.archived)?.id);
-      })
-      .catch(() => {
-        // FocusWorkspace owns the primary initialization error; shell navigation remains usable.
-      });
-    return () => {
-      active = false;
-    };
-  }, [bridge, workspaceId]);
 
   useEffect(() => {
     if (view !== "route" && view !== "decision") return;
@@ -226,11 +213,18 @@ export function App({ bridge: providedBridge }: AppProps) {
         <Brand />
         <nav aria-label="工作面" className="app-shell__navigation">
           <button
+            aria-current={view === "agents" ? "page" : undefined}
+            onClick={() => openOrdinaryView("agents")}
+            type="button"
+          >
+            <Bot aria-hidden="true" size={14} /> Agent 工作台
+          </button>
+          <button
             aria-current={view === "focus" ? "page" : undefined}
             onClick={() => openOrdinaryView("focus")}
             type="button"
           >
-            <MessageSquareText aria-hidden="true" size={14} /> Focus
+            <MessageSquareText aria-hidden="true" size={14} /> Focus（兼容）
           </button>
           <button
             aria-current={view === "route" ? "page" : undefined}
@@ -238,7 +232,7 @@ export function App({ bridge: providedBridge }: AppProps) {
             onClick={() => openWorkspaceView("route")}
             type="button"
           >
-            <Map aria-hidden="true" size={14} /> 路线图
+            <MapIcon aria-hidden="true" size={14} /> 路线图
           </button>
           <button
             aria-current={view === "decision" ? "page" : undefined}
@@ -249,19 +243,11 @@ export function App({ bridge: providedBridge }: AppProps) {
             <GitCompareArrows aria-hidden="true" size={14} /> 决策
           </button>
           <button
-            aria-current={view === "agents" ? "page" : undefined}
-            disabled={!workspaceId}
-            onClick={() => openOrdinaryView("agents")}
-            type="button"
-          >
-            <Bot aria-hidden="true" size={14} /> Agent 协作
-          </button>
-          <button
             aria-current={view === "settings" ? "page" : undefined}
             onClick={() => openSettings()}
             type="button"
           >
-            <Settings2 aria-hidden="true" size={14} /> Provider 设置
+            <Settings2 aria-hidden="true" size={14} /> Provider 设置（高级兼容）
           </button>
         </nav>
       </header>
@@ -279,21 +265,22 @@ export function App({ bridge: providedBridge }: AppProps) {
         ) : (
           <section className="app-shell__workspace-view" aria-label={`${view} 工作面`}>
             <header className="app-shell__view-header">
-              <button
-                aria-label="返回 Focus"
-                onClick={() => openOrdinaryView("focus")}
+              {view !== "agents" ? <button
+                aria-label="返回工作台"
+                onClick={() => openOrdinaryView("agents")}
                 type="button"
               >
-                <ArrowLeft aria-hidden="true" size={15} /> 返回 Focus
-              </button>
+                <ArrowLeft aria-hidden="true" size={15} /> 返回工作台
+              </button> : null}
               <div>
-                <span>{view === "route" ? "ROUTE MAP" : view === "decision" ? "DECISION" : view === "agents" ? "AGENTS" : "PROVIDERS"}</span>
-                {detail?.workspace.name ? <strong>{detail.workspace.name}</strong> : null}
+                <span>{view === "route" ? "ROUTE MAP" : view === "decision" ? "DECISION" : view === "agents" ? "AGENT WORKBENCH" : "PROVIDERS"}</span>
+                {(view === "route" || view === "decision") && detail && detail.workspace.id === workspaceId ? <strong>{detail.workspace.name}</strong> : null}
               </div>
             </header>
 
             <Suspense fallback={<LoadingState label="正在加载工作面" />}>
-              {view === "agents" ? <AgentWorkspace bridge={bridge} workspaceId={workspaceId} /> : null}
+              {view === "agents" ? <AgentWorkspace bridge={bridge} workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId}
+                drafts={agentDrafts.current} missionSelections={agentMissionSelections.current} /> : null}
               {view === "settings" ? (
                 <ProviderSettings
                   bridge={bridge}

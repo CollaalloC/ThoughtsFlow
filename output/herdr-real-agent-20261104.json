@@ -1,0 +1,96 @@
+{
+  "date": "2026-11-04",
+  "platform": "macOS arm64 / WKWebView 605.1.15",
+  "herdrVersion": "0.1.17",
+  "ompVersion": "18.16.0",
+  "journeySeconds": 91.7,
+  "realModelCalled": true,
+  "modelOverride": false,
+  "approvalOverride": false,
+  "contextScope": "explicitly selected workspace system context; no prior Model Run branch in this live test",
+  "stages": [
+    {
+      "role": "producer",
+      "missionId": "b64eabf6-f735-47be-b1d2-362311c773a4",
+      "operationId": "7b75037a-25dc-4f68-a083-99734f3db4e8",
+      "operationStatus": "succeeded",
+      "terminal": "t1",
+      "template": "live-producer",
+      "firstMessage": {
+        "sent": true,
+        "started": true,
+        "turn": 0
+      },
+      "handoffHash": "36a004dcffa1af0507704bb107c570887427d9354b4e57def47acad3434c7573",
+      "selectedEvidenceIds": [],
+      "savedEvidenceId": "8353cddf-e4f4-46b8-9c24-4d87d38a653c",
+      "savedContentHash": "523647d3031ea5da6376a019423dd669f4426a1ace4da913dcd390cf515457e0",
+      "observedTaskStatus": "reported_done",
+      "artifact": {
+        "context_code": "TF_CTX_2bbee3f9-3142-48c7-83da-be0e7e8caf3d",
+        "nonce": "3c0009cf-30b9-42c8-89d2-d276ec171fa4",
+        "sum": 51
+      }
+    },
+    {
+      "role": "consumer",
+      "missionId": "61b8bce8-869c-4a7b-97ae-d05b7d7fd9cd",
+      "operationId": "575a9c7b-e486-4581-8533-36eecfedffd6",
+      "operationStatus": "succeeded",
+      "terminal": "t2",
+      "template": "live-consumer",
+      "firstMessage": {
+        "sent": true,
+        "started": true,
+        "turn": 0
+      },
+      "handoffHash": "73200848a603422b77c19d788a5becd5ddb08386e8171f72d4025bae51fac761",
+      "selectedEvidenceIds": [
+        "8353cddf-e4f4-46b8-9c24-4d87d38a653c"
+      ],
+      "savedEvidenceId": "d47338af-5093-478a-aa22-f037ef9b0d66",
+      "savedContentHash": "c48da4ca2f4f92dc6f79254ead3d62808fdb8415a18587373b250595ef19ba0a",
+      "observedTaskStatus": "reported_done",
+      "artifact": {
+        "context_code": "TF_CTX_2bbee3f9-3142-48c7-83da-be0e7e8caf3d",
+        "source_nonce": "3c0009cf-30b9-42c8-89d2-d276ec171fa4",
+        "doubled_sum": 102,
+        "source_evidence_id": "8353cddf-e4f4-46b8-9c24-4d87d38a653c",
+        "source_content_hash": "523647d3031ea5da6376a019423dd669f4426a1ace4da913dcd390cf515457e0"
+      }
+    }
+  ],
+  "sessionEvidence": [
+    {
+      "role": "producer",
+      "assistantMessages": 4,
+      "models": [
+        "openai-codex/gpt-6-astra"
+      ],
+      "tools": [
+        "read",
+        "eval"
+      ],
+      "tokens": 68284,
+      "sha256": "d66e848bdf1fd1e279d6dc1d47a127ac25b2a56eb55600e854b6cdbbc5a6c7fb"
+    },
+    {
+      "role": "consumer",
+      "assistantMessages": 4,
+      "models": [
+        "openai-codex/gpt-6-astra"
+      ],
+      "tools": [
+        "read",
+        "eval"
+      ],
+      "tokens": 73348,
+      "sha256": "0963bd5b2f94e19117ecc12423af5470ea4bc3b3f88ac3bd6651673d983d91e5"
+    }
+  ],
+  "cleanup": {
+    "exitCode": 0,
+    "stdout": "{\"stopped\":true}\n",
+    "stderr": ""
+  }
+}
