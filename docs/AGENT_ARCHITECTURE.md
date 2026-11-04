@@ -23,3 +23,5 @@
 旧 Orca 协作只读，现存终端不会被迁移、停止或重启。可把旧证据显式选择进新的 Herdr 任务，旧原始记录与 hash 不变。新任务在选定目录运行，不自动创建 worktree；共享目录不是权限沙箱。进展区最多投影最近 200 次执行，完整交接和证据按每页 50 条浏览。
 
 常用验证：`npm run check`、Rust 全量测试、`npm run test:webview:agents`（固定 fixture）。`TF_HERDR_LIVE=1 npm run test:herdr:live` 使用隔离状态的已安装 core 和无模型测试程序；它不证明真实模型或 Agent 配置可用。
+
+真实 Agent 验证需显式设置 `TF_AGENT_LIVE=1`、`TF_AGENT_LIVE_AGENT_BIN`（OMP 原生可执行文件绝对路径）和可选 `THOUGHTSFLOW_HERDR_BIN`，再运行 `npm run test:webview:agents:live`。它会使用原有模型认证与配置，创建隔离 core、临时模板、两个工作目录与独立会话目录，每个 Agent 设置 300 秒 / 2 USD 的原生运行上限；不覆盖模型、Provider 或审批参数。完整日志只保存在本机临时证据目录。当前 macOS 两阶段通过记录见 [真实 Agent QA](upstream/2026-11-04-real-agent.md)。

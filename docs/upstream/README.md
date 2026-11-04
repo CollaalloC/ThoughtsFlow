@@ -2,7 +2,7 @@
 
 当前基座为 **herdr-core**，依据 [2026-11-04 架构决定](../adr/0004-herdr-core-workbench.md)。每周维护任务已更新为跟踪 herdr-core 与原生 Agent harness，不再添加 Orca 执行依赖。
 
-机器可读基线见 [baseline.json](baseline.json)，当前协议与回归证据见 [2026-11-04](2026-11-04.md)。本机及已核实官方 tag 均为 herdr-core 0.1.17，协议 generation 1；不将 tag 核实表述为最新稳定 release 核实。
+机器可读基线见 [baseline.json](baseline.json)，协议与基础回归见 [2026-11-04](2026-11-04.md)，最新真实 Agent 验证见 [双阶段实测](2026-11-04-real-agent.md)。本机及已核实官方 tag 均为 herdr-core 0.1.17，协议 generation 1；不将 tag 核实表述为最新稳定 release 核实。
 
 | 能力 | 当前实现 | 验证边界 |
 | --- | --- | --- |
@@ -13,7 +13,7 @@
 | Git / 工作目录 | 明确选择已有目录，可选用户准备的独立 checkout | core 不创建 worktree，本次不自动调度或合并 |
 | 旧 Orca 数据 | 只读历史、交接和证据可离线读取与显式复用 | 原始回执与 hash 不改写，不自动重新派发 |
 
-Windows/Linux 尚无本轮真实执行证据。保留三平台构建/fixture CI；本地 macOS、MockRuntime 或静态检查均不能替代相应 runner。
+macOS 已通过 herdr-core 0.1.17 + OMP 18.16.0 的真实双阶段 Agent 工作流，继承既有 gpt-6-astra / xhigh 配置。Windows/Linux 尚无本轮真实执行证据。保留三平台构建/fixture CI；本地 macOS、MockRuntime 或静态检查均不能替代相应 runner。
 
 后续跟踪原生模板与 harness 继承、协议能力、会话身份、事件订阅、重连和屏幕/状态边界。完整 Agent 会话树需原生 harness 提供，不能从终端猜测。历史 OMP/Orca 版本记录保留在 [2026-11-02](2026-11-02.md) 和更早核查中，仅描述当时版本，不再代表当前执行架构。
 

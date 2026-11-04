@@ -1,9 +1,9 @@
 {
   "checkedAt": "2026-11-04",
-  "scope": "herdr-core 0.1.17 installed binary, official pinned tag and isolated generation-1 RPC; legacy Orca integration retired",
+  "scope": "herdr-core 0.1.17 with real OMP 18.16.0, native configuration inheritance and two-stage evidence reuse on macOS; no runtime upgrades",
   "omp": {
     "repository": "https://github.com/can1357/oh-my-pi",
-    "installedVersion": "18.13.2",
+    "installedVersion": "18.16.0",
     "latestStableVersion": "18.15.0",
     "latestPublishedAt": "2026-11-01T14:17:08Z",
     "latestCommit": "3fedf8d53267e32a6d7521ce725fdcc4a36fdc67",
@@ -14,7 +14,7 @@
     "gatewayRequiresAuthBroker": true,
     "gatewayUsesLocalAgentCredentialsAutomatically": false,
     "firstObservedInstalledVersion": "18.2.10",
-    "installationNote": "Observed 18.13.2 from Homebrew installation receipt and executable symlink on 2026-11-02. This review did not invoke omp, upgrade it or probe its model catalog.",
+    "installationNote": "Observed omp/18.16.0 on 2026-11-04. Ran authorized interactive Agent validation using existing model/auth/harness settings; no CLI or model upgrade and no model/provider/approval override.",
     "gatewayImplementation": "http-auth-gateway-serve",
     "stdioGatewaySince": "18.4.12",
     "stdioGatewayImplemented": false,
@@ -22,14 +22,15 @@
     "nativeModelCatalogImplemented": false,
     "nativeModelCatalogProbeReadOnly": false,
     "nativeModelCatalogNote": "The models CLI can initialize or migrate settings/database state, load extensions and refresh provider authentication. No verified read-only mode; do not run it automatically.",
-    "sessionLeaseProbeNote": "New lease status probes are candidates for a future Direct OMP adapter only; a free status snapshot does not grant ownership. No probe was executed during this review."
+    "sessionLeaseProbeNote": "New lease status probes are candidates for a future Direct OMP adapter only; a free status snapshot does not grant ownership. No probe was executed during this review.",
+    "latestStableCheckedAt": "2026-11-02"
   },
   "verification": {
     "lastRealOmpVersion": "18.2.8",
     "lastRealOrcaVersion": "1.4.206",
     "windowsRuntime": "not-yet-verified",
     "linuxRuntime": "not-yet-verified",
-    "runtimeScope": "Installed herdr-core with isolated config/state and no-model program; model-backed Agent acceptance is not established.",
+    "runtimeScope": "macOS native ThoughtsFlow -> herdr-core -> real interactive OMP; selected workspace system context, artifact execution, saved screen evidence reuse across two working directories, and persisted reload checks.",
     "ci": "previous-baseline-passed-on-three-platforms",
     "ciEvidence": {
       "runUrl": "https://github.com/CollaalloC/ThoughtsFlow/actions/runs/36253970625",
@@ -41,11 +42,27 @@
       ],
       "scope": "Historical Desktop CI core checks and native MockRuntime IPC for the stated commit. Current code through 3384237 has only local evidence; this review did not trigger remote runners."
     },
-    "review": "2026-11-04.md",
+    "review": "2026-11-04-real-agent.md",
     "modelOverrideRuntime": "legacy Orca only; retired from new launches",
     "legacyRealOmpTest": "2026-09-22",
     "lastIsolatedHerdrTest": "2026-11-04",
-    "herdrModelCalled": false
+    "herdrModelCalled": true,
+    "realHerdrAgent": {
+      "date": "2026-11-04",
+      "herdrVersion": "0.1.17",
+      "agent": "omp",
+      "agentVersion": "18.16.0",
+      "provider": "openai-codex",
+      "model": "gpt-6-astra",
+      "thinking": "xhigh",
+      "modelOverridden": false,
+      "approvalOverridden": false,
+      "nativeHerdrTemplatesPreexisted": false,
+      "templateScope": "temporary test templates; native OMP configuration inherited",
+      "completedStages": 2,
+      "evidenceReuseVerified": true,
+      "report": "2026-11-04-real-agent.md"
+    }
   },
   "activeRuntime": "herdr-core",
   "legacyOrca": {
