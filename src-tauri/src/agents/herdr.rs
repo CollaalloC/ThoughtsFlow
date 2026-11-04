@@ -136,7 +136,9 @@ impl HerdrCore {
             sent = true; // Even a partial pipe write is not proof of non-execution.
             stdin.write_all(format!("{request}\n").as_bytes()).await.map_err(|e| RuntimeFailure::new(e.to_string(), true))?;
             let raw = read_reply(&mut reader, 2).await.map_err(|mut e| {
-                e.ambiguous = !matches!(e.raw.pointer("/error/data/kind").and_then(Value::as_str), Some("blocked" | "status_mismatch" | "invalid_params")); e
+                // Only a validated error envelope can prove refusal. A foreign id or
+                // malformed protocol stays unknown even when it carries a safe kind.
+                e.ambiguous |= !matches!(e.raw.pointer("/error/data/kind").and_then(Value::as_str), Some("blocked" | "status_mismatch" | "invalid_params")); e
             })?;
             Ok(RuntimeReply { core_id, result: raw["result"].clone(), raw })
         }).await;
@@ -203,6 +205,16 @@ async fn read_reply(
         });
     }
     if raw.get("error").is_some() {
+        if raw.get("result").is_some()
+            || raw["error"]["code"].as_i64().is_none()
+            || raw["error"]["message"].as_str().is_none()
+        {
+            return Err(RuntimeFailure {
+                message: "herdr-core 错误回执结构不受支持；不会自动重发。".into(),
+                raw,
+                ambiguous: true,
+            });
+        }
         return Err(RuntimeFailure {
             message: raw
                 .pointer("/error/message")
@@ -262,6 +274,51 @@ impl AgentRuntime for HerdrCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn foreign_error_envelopes_cannot_clear_transport_uncertainty() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("error-envelope.mjs");
+        for kind in ["blocked", "status_mismatch", "invalid_params"] {
+            for case in [
+                "foreign-id",
+                "wrong-protocol",
+                "mixed-result",
+                "invalid-code",
+                "invalid-message",
+                "valid",
+            ] {
+                let mut receipt = json!({"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"fixture refusal","data":{"kind":kind}}});
+                match case {
+                    "foreign-id" => receipt["id"] = json!(999),
+                    "wrong-protocol" => receipt["jsonrpc"] = json!("1.0"),
+                    "mixed-result" => receipt["result"] = json!({"address":"possibly-started"}),
+                    "invalid-code" => receipt["error"]["code"] = json!("not-a-code"),
+                    "invalid-message" => receipt["error"]["message"] = Value::Null,
+                    _ => {}
+                }
+                std::fs::write(&wrapper, format!(
+                    "import readline from 'node:readline';\nconst refused={receipt};\nreadline.createInterface({{input:process.stdin}}).on('line', line=>{{const q=JSON.parse(line);const r=q.method==='hello'?{{jsonrpc:'2.0',id:q.id,result:{{generation:1,version:'0.1.17',core:{{id:'fixture-core'}},methods:['terminal.run']}}}}:refused;process.stdout.write(JSON.stringify(r)+'\\n');}});"
+                )).unwrap();
+                let mut plan = executable::discover(Tool::Node).unwrap();
+                plan.prefix_arguments.push(wrapper.clone().into_os_string());
+                let core = HerdrCore {
+                    launch: Ok(plan),
+                    enabled: AtomicBool::new(true),
+                };
+                let failure = core
+                    .call("terminal.run", json!({}), Some("fixture-core"))
+                    .await
+                    .unwrap_err();
+                assert_eq!(failure.raw, receipt, "preserve the original envelope");
+                assert_eq!(
+                    failure.ambiguous,
+                    case != "valid",
+                    "kind={kind}, case={case}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn subprocess_fixture_exercises_the_real_json_rpc_transport() {
         let dir = tempfile::tempdir().unwrap();
