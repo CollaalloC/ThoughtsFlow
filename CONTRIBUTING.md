@@ -35,7 +35,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-f
 cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features
 ```
 
-`npm run check` 包含前端测试、HTTP/Orca fixture、桌面启动器测试和前端构建。Rust 测试覆盖领域行为、SQLite 事务和 Tauri IPC。只运行浏览器界面不能证明原生桌面功能通过。
+`npm run check` 包含前端测试、HTTP/herdr-core fixture、桌面启动器测试和前端构建。Rust 测试覆盖领域行为、SQLite 事务和 Tauri IPC。只运行浏览器界面不能证明原生桌面功能通过。
 
 在有图形会话的平台上，可另外运行原生 WebView 旅程：
 
@@ -46,7 +46,7 @@ npm run test:webview:agents
 
 这些测试使用独立应用标识、测试数据目录和本地 fixture；测试驱动与故障注入仅在测试 feature 下启用。Linux 的 CI 图形运行需要 Xvfb/DBus。平台依赖、浏览器引擎和 CI 层次见 [CROSS_PLATFORM.md](docs/CROSS_PLATFORM.md)。
 
-真实模型与真实 Agent 测试是显式 opt-in。`test:webview:agents:live` 会使用现有 Orca/OMP 配置并派发任务，`test:webview:live-proxy` 会调用其配置的本机模型端点；它们可能产生费用和文件写入。运行前阅读测试脚本与[真实 Agent 验证说明](docs/LIVE_AGENT_QA_RESULTS.md)，不要向普通 PR 检查注入私人账号凭据。
+真实模型与真实 Agent 测试是显式 opt-in。`test:webview:agents:live` 通过隔离 herdr-core 会话使用现有 OMP 模型与认证配置，派发真实任务，`test:webview:live-proxy` 会调用其配置的本机模型端点；它们可能产生费用和文件写入。运行前阅读测试脚本与[真实 Agent 验证说明](docs/upstream/2026-11-04-real-agent.md)，不要向普通 PR 检查注入私人账号凭据。
 
 ## 需要保持的架构约束
 
@@ -62,7 +62,7 @@ npm run test:webview:agents
 
 ## 报告问题
 
-请包含应用版本、操作系统/架构、最小复现步骤、预期与实际结果。模型问题可补充供应商、协议和模型 ID；Agent 问题可补充 Orca/OMP 版本。分享截图和日志前删去密钥、私有代码、目录和对话内容。
+请包含应用版本、操作系统/架构、最小复现步骤、预期与实际结果。模型问题可补充供应商、协议和模型 ID；Agent 问题可补充 herdr-core 和所选 Agent 版本。分享截图和日志前删去密钥、私有代码、目录和对话内容。
 
 安全漏洞请按 [SECURITY.md](SECURITY.md) 私密报告，不要直接公开可利用细节。
 

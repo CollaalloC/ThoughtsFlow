@@ -2,31 +2,29 @@
 
 Notable user-facing changes are recorded here. Pre-release status and available installers are listed on [GitHub Releases](https://github.com/CollaalloC/ThoughtsFlow/releases).
 
-## Unreleased
+## 0.1.0-beta.3 — 2026-11-04
 
 ### Agent workbench
 
-- Replace active Orca orchestration with herdr-core generation-1 JSON-RPC and existing native Agent templates. Preserve legacy Orca missions as read-only history.
-- Add schema 11 execution bindings without rewriting receipts, handoffs or hashes. Freeze template selection, confirm first-message delivery, and keep unknown operations from being redispatched.
-- Make working-directory ownership and shared-file behavior explicit; distinguish reported completion and process exit from task acceptance.
+- Make graphical context management and explicit Agent handoffs the primary workflow, without another Provider setup. Existing direct-model conversations remain available through compatibility views.
+- Replace the active Orca runtime dependency with herdr-core generation-1 JSON-RPC and existing native Agent templates. Models, credentials, tools, Skills and approvals stay with the selected Agent.
+- Preview and freeze task input and template selection, save immutable screen observations, and reuse explicitly selected evidence across tasks and working directories.
+- Preserve old Orca Missions as read-only history. Schema 11 adds immutable execution bindings without rewriting historical receipts, evidence, hashes or migration checksums.
+- Distinguish confirmed delivery, Agent-reported completion, process exit and task acceptance. Unknown outcomes are never automatically dispatched again.
 
+### Reliability and performance
 
-- Preserve historical Orca handoffs, including their requested OMP model selectors. New launches use Herdr templates and their native configuration.
-- Page Agent history in groups of 50 summaries and fetch immutable bodies only when expanded, with explicit navigation back to the newest records and selection retained across pages.
-- Preserve unsent tasks and selected Missions while navigating. Confirmed dispatches clear only their unchanged draft, including after a view is reopened; newer edits remain intact.
-- Prevent delayed initialization responses from overwriting newly created workspaces, Missions or newer environment checks.
-- Improve source-graph direction arrows and zoom controls, and keep unused context trees collapsed.
+- Page history in groups of 50 summaries and read bodies only when expanded. Preserve drafts and selected Missions across navigation; late operations cannot clear newer edits.
+- Reject stale previews, foreign core/terminal identities and uncertain input delivery. Keep retained raw receipts when a local binding commit fails.
+- Reduce progress projection to one terminal-list request per snapshot and keep context reads workspace-scoped. Hidden views pause polling and revalidate before controls resume.
+- Verify the installed core with isolated fixtures and real OMP workflows; include explicitly gated real-Agent tests without model credentials in ordinary CI.
 
-- Make the Agent workbench the default entry point, with workspace creation and context selection independent of Provider setup. Keep direct-model conversations and Provider settings as compatibility features.
-- Preview and freeze explicit context handoffs before dispatch, preserving exact source identities, context revisions and the full submitted task text. Existing model receipts and their hashes remain unchanged.
-- Save immutable, bounded Agent output observations with Dispatch provenance, reuse selected evidence in later tasks, and inspect handoff/evidence relationships offline.
-- Reuse the existing OMP harness through Orca; model, authentication, tools, Skills and approvals remain owned by the Agent. Native general-purpose Agent chat and automatic DAG scheduling remain future work.
+### Usage and upgrade notes
 
-### Compatibility
-
-- Isolate Orca's `ORCA_AGENT_SESSION_ID` and child-only `ORCA_AGENT_SESSION_SPAWN_TOKEN` from child CLI calls so inherited session identity and ownership tokens cannot leak into the workbench coordinator.
-- Respect the selected output source's `limited` flag and require an advancing cursor before offering another output page.
-- Track OMP 18.12.6 and Orca 1.4.241 with fixed-source contract checks; installed versions observed were 18.12.5 and 1.4.237. Do not automatically upgrade installed runtimes or run OMP model discovery.
+- herdr-core and Agent binaries are installed separately. Windows templates require sh; models and API accounts are not bundled.
+- Tasks run in the explicitly chosen directory; no automatic Git worktree creation or DAG scheduling is provided. Choose separate checkouts for file isolation.
+- Back up the local database before upgrading. Legacy Orca executions are not resumed or reassigned, and schema-upgraded databases should not be opened with older betas.
+- Test installers are not signed with trusted publisher certificates or notarized. Published platform assets and validation links are listed on the release page.
 
 ## 0.1.0-beta.2 — 2026-09-27
 

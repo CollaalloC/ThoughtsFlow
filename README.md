@@ -4,9 +4,9 @@
 
 ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择上下文、向 Agent 交接任务、保存输出证据并组织后续工作；模型连接、工具、Skills、MCP 和审批沿用现有 Agent harness。当前执行路径以本机 herdr-core 为基座，复用已有 Agent 模板，无需在 ThoughtsFlow 再配置 Provider。
 
-[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.2) · [工作台架构](docs/adr/0004-herdr-core-workbench.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
+[下载测试版](https://github.com/CollaalloC/ThoughtsFlow/releases/tag/v0.1.0-beta.3) · [工作台架构](docs/adr/0004-herdr-core-workbench.md) · [参与贡献](CONTRIBUTING.md) · [English overview](#english-overview)
 
-> 最新已发布安装包仍为 `v0.1.0-beta.2`。以下 Agent 主入口与上下文交接描述当前源码的未发布改动；旧安装包不包含它们。安装包、平台和已知限制以发布页为准。
+> 本版本为 `v0.1.0-beta.3`：Agent 协作改用 herdr-core，已有 Orca 协作保留为只读历史。安装包、平台检查结果和签名限制以对应发布页为准。升级前请备份原数据库；迁移后不要直接用旧版打开同一数据库。
 
 ## 能做什么
 
@@ -34,6 +34,24 @@ ThoughtsFlow 是一个本地优先的 Agent 工作台。它负责图形化选择
 4. 查看准确终端的状态，保存屏幕观察，审阅后显式复用到下一任务。权限和信任对话在原生 Agent 终端处理。
 
 模型与启动参数继承 Herdr 模板，不另建模型目录或认证配置。任务在选定目录运行，可能共享文件；herdr-core 不自动创建 Git worktree，需要隔离时请选择独立 checkout。现有 Orca 协作保留为只读历史，原始回执与 hash 不变。
+
+### 准备一个原生 Agent 模板
+
+需要单独安装 **herdr-core 0.1.17 或更新的兼容版本**，以及已能独立运行的 Agent。以本机已有 OMP 为例，在 Herdr 原生模板目录创建 `omp.md`：
+
+```markdown
+---
+description: 使用本机 OMP 的现有模型、工具和认证
+command: omp
+---
+按工作台交接的范围执行任务，报告结果和验证证据。
+```
+
+macOS/Linux 默认目录为 `~/.config/herdr-core/templates/`；Windows 默认为 `%APPDATA%\herdr-core\templates\`，设置 `XDG_CONFIG_HOME` 时以该目录为准。Windows 原生模板还需要 `sh`（例如 Git for Windows）。模板不创建新的模型账号，OMP 应先在自己的原生界面完成配置；其它 Agent 可使用自己的启动命令和就绪约定，参见 [Herdr 模板文档](https://github.com/herdrdev/herdr-core/blob/v0.1.17/docs/templates.md)。
+
+重新检测或连接后，在工作台选择模板。若找不到 core，可通过 `THOUGHTSFLOW_HERDR_BIN` 指定其原生可执行文件的绝对路径。模型不会随安装包附带，现有认证、Skills 与审批仍归 Agent 管理。完整路径与原生终端介入方式见 [Agent 架构](docs/AGENT_ARCHITECTURE.md)。
+
+macOS 已完成真实 OMP 的配置继承、上下文交接、文件执行和证据复用验证，见 [真实 Agent 测试记录](docs/upstream/2026-11-04-real-agent.md)。三平台 CI、原生 WebView fixture 和安装包构建分别验证；Windows/Linux 的真实模型执行不因构建成功而自动视为通过。
 
 ## 兼容入口：直连模型
 

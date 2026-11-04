@@ -1,6 +1,6 @@
 # ThoughtsFlow release procedure
 
-The first public release is `v0.1.0-beta.2`. A beta provides installable builds for testing; successful packaging does not establish that every operating-system version, model vendor, or Orca/OMP combination has been tested.
+The first public release was `v0.1.0-beta.2`; the current Herdr test release is `v0.1.0-beta.3`. A beta provides installable builds for testing; successful packaging does not establish that every operating-system version, model vendor, or herdr-core/Agent combination has been tested.
 
 ## Artifacts
 
@@ -24,7 +24,7 @@ The workflow pins Rust 1.97.1 (matching the bundled standard-library notices) an
 - `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `THIRD_PARTY_LICENSES.tar.gz`.
 - `SHA256SUMS.txt` covering every other release asset.
 
-Each installer also includes the license resources configured in `src-tauri/tauri.conf.json`. OMP and Orca are separately installed runtimes; these installers do not redistribute them.
+Each installer also includes the license resources configured in `src-tauri/tauri.conf.json`. herdr-core and the chosen Agent are separately installed runtimes; these installers do not redistribute them. Historical Orca/OMP notices are retained for attribution.
 
 ## Prepare the version
 
@@ -41,9 +41,9 @@ The repository's first publication and merge are performed explicitly with `gh` 
 Run from the repository after the source is ready:
 
 ```sh
-git tag -a v0.1.0-beta.2 -m 'ThoughtsFlow v0.1.0-beta.2'
-git push origin v0.1.0-beta.2
-gh workflow run release.yml --ref v0.1.0-beta.2
+git tag -a v0.1.0-beta.3 -m 'ThoughtsFlow v0.1.0-beta.3'
+git push origin v0.1.0-beta.3
+gh workflow run release.yml --ref v0.1.0-beta.3
 gh run list --workflow release.yml --limit 5
 ```
 
@@ -58,18 +58,18 @@ Do not publish partial platform artifacts if any build or the aggregation job fa
 
 ## Verify and publish with gh
 
-Confirm that the chosen installer run and Desktop CI both succeeded for the exact release source commit. Check `build-*.json` against `git rev-list -n 1 v0.1.0-beta.2`, inspect the intended release files, and verify the checksums. On Linux use `sha256sum -c SHA256SUMS.txt`; on macOS use `shasum -a 256 -c SHA256SUMS.txt`, from inside `release-assets`.
+Confirm that the chosen installer run and Desktop CI both succeeded for the exact release source commit. Check `build-*.json` against `git rev-list -n 1 v0.1.0-beta.3`, inspect the intended release files, and verify the checksums. On Linux use `sha256sum -c SHA256SUMS.txt`; on macOS use `shasum -a 256 -c SHA256SUMS.txt`, from inside `release-assets`.
 
 Install and launch each target available for testing. Record untested operating systems as untested; do not convert a packaging result into a claim of desktop acceptance. Existing local data should be backed up before beta testing.
 
 Create `release-notes.md` with features, installation prerequisites, upstream acknowledgements, exact validation, and signing limitations. Then use the GitHub CLI to create a draft, upload the verified assets, inspect the result, and publish it as a prerelease:
 
 ```sh
-gh release create v0.1.0-beta.2 --verify-tag --draft --prerelease \
-  --title 'ThoughtsFlow v0.1.0-beta.2' --notes-file release-notes.md
-gh release upload v0.1.0-beta.2 release-assets/*
-gh release view v0.1.0-beta.2 --json tagName,isDraft,isPrerelease,assets,url
-gh release edit v0.1.0-beta.2 --draft=false --prerelease --latest=false
+gh release create v0.1.0-beta.3 --verify-tag --draft --prerelease \
+  --title 'ThoughtsFlow v0.1.0-beta.3' --notes-file release-notes.md
+gh release upload v0.1.0-beta.3 release-assets/*
+gh release view v0.1.0-beta.3 --json tagName,isDraft,isPrerelease,assets,url
+gh release edit v0.1.0-beta.3 --draft=false --prerelease --latest=false
 ```
 
 The workflow has `contents: read` only. Publication uses the maintainer's authenticated `gh` session after verification, so an installer job cannot independently publish a release. No model credentials are required for packaging.

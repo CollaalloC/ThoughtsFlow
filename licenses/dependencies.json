@@ -2,8 +2,8 @@
   "formatVersion": 1,
   "scope": "npm production dependencies; Cargo normal/build dependency graph across all targets, default features; conservative superset, not a binary SBOM",
   "lockfiles": {
-    "package-lock.json": "ac6c33968db49e97cf506e792ac34bca9e0993d7d69732ff835fd15f0268ab1a",
-    "src-tauri/Cargo.lock": "67f7697b13eb3852d80cf0aaa9aa129dcccf93e94d7db06c461855ec53151cee"
+    "package-lock.json": "512869b2b41dc070bc3b8eb87b4d2606ed4c64722bfe8b9640afeb43962afe92",
+    "src-tauri/Cargo.lock": "8ad6236e708842fdd7681b48ed854ae725c0a72e8f1469ba7ac2c77cddc69788"
   },
   "packages": [
     {
